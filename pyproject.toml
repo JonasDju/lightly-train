@@ -242,6 +242,7 @@ convention = "google"
 "src/lightly_train/__init__.py" = ["E402"]
 
 [tool.uv]
+exclude-newer = "2026-07-30T22:00:00Z"
 override-dependencies = [
     # Override dependency from SuperGradients on sphinx<=4.1
     "sphinx>=7.1",

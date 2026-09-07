@@ -7,6 +7,7 @@
 
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.attention import (
     MemEffAttention,
+    SDPAAttention,
 )
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.block import (
     NestedTensorBlock,
@@ -22,6 +23,7 @@ from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.swiglu_ffn import (
 
 __all__ = [
     "MemEffAttention",
+    "SDPAAttention",
     "NestedTensorBlock",
     "Mlp",
     "PatchEmbed",

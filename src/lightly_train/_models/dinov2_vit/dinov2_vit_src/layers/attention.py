@@ -12,6 +12,7 @@
 import os
 
 from torch import Tensor, nn
+from torch.nn.functional import scaled_dot_product_attention
 
 XFORMERS_ENABLED = os.environ.get("XFORMERS_DISABLED") is None
 try:
@@ -80,6 +81,42 @@ class MemEffAttention(Attention):
 
         x = memory_efficient_attention(q, k, v, attn_bias=attn_bias)
         x = x.reshape([B, N, C])
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
+class SDPAAttention(Attention):
+    """Attention using PyTorch's scaled dot product attention.
+
+    Drop-in replacement for MemEffAttention that does not require xFormers.
+    """
+
+    def forward(self, x: Tensor, attn_bias=None) -> Tensor:
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
+
+        # [B, N, 3, H, Dh] -> 3 x [B, H, N, Dh] as expected by SDPA.
+        q, k, v = (t.transpose(1, 2) for t in qkv.unbind(2))
+
+        attn_mask = attn_bias
+        if attn_mask is not None and not isinstance(attn_mask, Tensor):
+            # xFormers AttentionBias (e.g. BlockDiagonalMask from NestedTensorBlock).
+            attn_mask = attn_mask.materialize(
+                shape=(1, self.num_heads, N, N), dtype=q.dtype, device=q.device
+            )
+
+        x = scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            scale=self.scale,
+        )
+
+        x = x.transpose(1, 2).reshape(B, N, C)
 
         x = self.proj(x)
         x = self.proj_drop(x)

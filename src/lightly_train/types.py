@@ -240,5 +240,5 @@ def _try_convert_to_tuple(value: Any) -> Any:
 # The BeforeValidator is required because strict=False doesn't work with older Pydantic
 # versions when the tuple is used in a union, see: https://github.com/lightly-ai/lightly-train/pull/444
 ImageSizeTuple = Annotated[
-    Tuple[int, int], Field(strict=False), BeforeValidator(_try_convert_to_tuple)
+    Tuple[int, int, int], Field(strict=False), BeforeValidator(_try_convert_to_tuple)
 ]

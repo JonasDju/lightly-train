@@ -98,7 +98,7 @@ class DINOTransformArgs(MethodTransformArgs):
     # transformers. We should add a check for the model type and use the appropriate
     # scales accordingly.
     # https://github.com/facebookresearch/dino#resnet-50-and-other-convnets-trainings
-    image_size: ImageSizeTuple = (224, 224)
+    image_size: ImageSizeTuple = (224, 224, 24)
     channel_drop: ChannelDropArgs | None = None
     num_channels: int | Literal["auto"] = "auto"
     random_resize: DINORandomResizeArgs | None = Field(

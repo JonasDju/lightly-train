@@ -31,7 +31,7 @@ from lightly_train._models import _model_helpers
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers import (
     Mlp,
     PatchEmbed,
-    SDPAAttention,
+    SDPAttention,
     SwiGLUFFNFused,
 )
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers import (
@@ -502,7 +502,7 @@ def vit_small(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTrans
         depth=12,
         num_heads=6,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=SDPAAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -516,7 +516,7 @@ def vit_base(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTransf
         depth=12,
         num_heads=12,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=SDPAAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -530,7 +530,7 @@ def vit_large(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTrans
         depth=24,
         num_heads=16,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=SDPAAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -547,7 +547,7 @@ def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTran
         depth=40,
         num_heads=24,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=SDPAAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -564,7 +564,7 @@ def vit_so400m(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTran
         depth=27,
         num_heads=16,
         mlp_ratio=4304 / 1152,
-        block_fn=partial(Block, attn_class=SDPAAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -578,7 +578,7 @@ def _vit_test(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTrans
         depth=3,
         num_heads=2,
         mlp_ratio=1,
-        block_fn=partial(Block, attn_class=SDPAAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )

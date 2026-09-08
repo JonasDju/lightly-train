@@ -18,7 +18,7 @@ from torch import Tensor, nn
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.attention import (
     Attention,
     MemEffAttention,
-    SDPAAttention,
+    SDPAttention,
 )
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.drop_path import DropPath
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.layer_scale import (
@@ -237,7 +237,7 @@ class NestedTensorBlock(Block):
         """
         x_list contains a list of tensors to nest together and run
         """
-        assert isinstance(self.attn, (MemEffAttention, SDPAAttention))
+        assert isinstance(self.attn, (MemEffAttention, SDPAttention))
 
         if self.training and self.sample_drop_ratio > 0.0:
 

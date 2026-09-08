@@ -87,7 +87,7 @@ class MemEffAttention(Attention):
         return x
 
 
-class SDPAAttention(Attention):
+class SDPAttention(Attention):
     """Attention using PyTorch's scaled dot product attention.
 
     Drop-in replacement for MemEffAttention that does not require xFormers.

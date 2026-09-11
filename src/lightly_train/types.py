@@ -71,8 +71,8 @@ ImageFilename = str
 
 class DatasetItem(TypedDict):
     filename: ImageFilename
-    views: list[Tensor]  # One tensor per view, of shape (3, H, W) each.
-    masks: NotRequired[list[Tensor]]  # One tensor per view, of shape (H, W) each
+    views: list[Tensor]  # One tensor per view, of shape (1, D, H, W) each.
+    masks: NotRequired[list[Tensor]]  # One tensor per view, of shape (D, H, W) each
     geometries: NotRequired[list[Tensor]]  # One tensor per view, of shape (8,) each.
 
 
@@ -80,10 +80,10 @@ class DatasetItem(TypedDict):
 # variable names of the DatasetItem by the dataloader collate function.
 class Batch(TypedDict):
     filename: list[ImageFilename]  # length==batch_size
-    views: list[Tensor]  # One tensor per view, of shape (batch_size, 3, H, W) each.
+    views: list[Tensor]  # One tensor per view, of shape (batch_size, 1, D, H, W) each.
     masks: NotRequired[
         list[Tensor]
-    ]  # One tensor per view, of shape (batch_size, H, W) each.
+    ]  # One tensor per view, of shape (batch_size, D, H, W) each.
     geometries: NotRequired[
         list[Tensor]
     ]  # One tensor per view, of shape (batch_size, 8) each.

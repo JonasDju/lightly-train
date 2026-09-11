@@ -131,3 +131,16 @@ class PatchEmbed(nn.Module):
         if self.norm is not None:
             flops += Do * Ho * Wo * self.embed_dim
         return flops
+
+    def compute_out_dims(self, x: Tensor) -> Tuple[int, int, int, int, int]:
+        B, _, D, H, W = x.shape
+
+        new_D = math.ceil(D / self.patch_D) * self.patch_D
+        new_H = math.ceil(H / self.patch_H) * self.patch_H
+        new_W = math.ceil(W / self.patch_W) * self.patch_W
+
+        d_out = math.floor((new_D + 2 * self.proj.padding[0] - self.proj.dilation[0] * (self.proj.kernel_size[0] - 1) - 1) / self.proj.stride[0] + 1)
+        h_out = math.floor((new_H + 2 * self.proj.padding[1] - self.proj.dilation[1] * (self.proj.kernel_size[1] - 1) - 1) / self.proj.stride[1] + 1)
+        w_out = math.floor((new_W + 2 * self.proj.padding[2] - self.proj.dilation[2] * (self.proj.kernel_size[2] - 1) - 1) / self.proj.stride[2] + 1)
+
+        return B, self.proj.out_channels, d_out, h_out, w_out

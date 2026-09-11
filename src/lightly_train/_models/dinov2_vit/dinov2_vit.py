@@ -7,7 +7,7 @@
 #
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import torch
 from lightly.transforms.utils import IMAGENET_NORMALIZE
@@ -61,8 +61,8 @@ class DINOv2ViTModelWrapper(
     def feature_dim(self) -> int:
         return self._feature_dim
 
-    def patch_size(self) -> int:
-        return int(self._model.patch_size)
+    def patch_size(self) -> Tuple[int, int, int]:
+        return self._model.patch_size
 
     def forward_features(
         self, x: Tensor, masks: Tensor | None = None, n_blocks: int = 1
@@ -75,25 +75,21 @@ class DINOv2ViTModelWrapper(
                     x, n=n_blocks, reshape=True, return_class_token=True
                 )
             )
-            features = torch.cat([feat for feat, _ in x_list], dim=1)  # (B, n*D, H, W)
-            cls_token = torch.cat([cls for _, cls in x_list], dim=1)  # (B, n*D)
+            features = torch.cat([feat for feat, _ in x_list], dim=1)  # (B, n*embed_dim, D, H, W)
+            cls_token = torch.cat([cls for _, cls in x_list], dim=1)  # (B, n*embed_dim)
             return {"features": features, "cls_token": cls_token}
 
         rt = self._model(x, masks, is_training=True)  # forcing to return all patches
-        if rt["x_norm_patchtokens"].dim() == 3:
-            x_norm_patchtokens = rt["x_norm_patchtokens"]
-            b = x_norm_patchtokens.shape[0]
-            d = x_norm_patchtokens.shape[2]
-            h = x.shape[2] // self._model.patch_size
-            w = x.shape[3] // self._model.patch_size
 
-            features_reshaped = x_norm_patchtokens.permute(0, 2, 1).reshape(b, d, h, w)
-        elif rt["x_norm_patchtokens"].dim() == 4:
-            features_reshaped = rt["x_norm_patchtokens"]
-        else:
-            raise ValueError(
-                f"Unexpected shape for x_norm_patchtokens: {rt['x_norm_patchtokens'].shape}"
-            )
+        # DINOv2s' normal forward function does not apply any reshaping, so the output should always
+        # have shape (B N C) where N = D*H*W
+        assert rt["x_norm_patchtokens"].dim() == 3, (f"Unexpected shape for x_norm_patchtokens: "
+                                                     f"{rt['x_norm_patchtokens'].shape}")
+
+        x_norm_patchtokens = rt["x_norm_patchtokens"]
+        B, dim, patD, patH, patW = self._model.patch_embed.compute_out_dims(x)
+        features_reshaped = x_norm_patchtokens.reshape(B, patD, patH, patW, dim).permute(0, 4, 1, 2, 3)
+
         return {"features": features_reshaped, "cls_token": rt["x_norm_clstoken"]}
 
     def forward_pool(self, x: ForwardFeaturesOutput) -> ForwardPoolOutput:

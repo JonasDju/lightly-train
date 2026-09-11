@@ -17,6 +17,7 @@ from typing import (
     Sequence,
     overload,
     runtime_checkable,
+    Tuple
 )
 
 import typing_extensions
@@ -160,7 +161,7 @@ class MultiScaleFeatureDims(Protocol):
 
 @runtime_checkable
 class PatchSize(Protocol):
-    def patch_size(self) -> int:
+    def patch_size(self) -> int | Tuple[int, int, int]:
         """Returns the patch size of the model.
 
         For ViT models this is the size of each patch (e.g., 16 or 14).

@@ -308,16 +308,15 @@ class DinoVisionTransformer(nn.Module):
         return result
 
     def prepare_tokens_with_masks(self, x, masks=None):
-        # TODO(Thomas, 07/25): Fix swapped h and w.
-        B, nc, _, _ = x.shape
-        x, w, h = self.patch_embed(x)
+        B, nc, _, _, _ = x.shape
+        x, d, h, w = self.patch_embed(x)
         if masks is not None:
             x = torch.where(
                 masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x
             )
 
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        x = x + self.interpolate_pos_encoding(x, d, h, w)
 
         if self.register_tokens is not None:
             x = torch.cat(
@@ -335,7 +334,7 @@ class DinoVisionTransformer(nn.Module):
         x = [
             self.prepare_tokens_with_masks(x, masks)
             for x, masks in zip(x_list, masks_list)
-        ]
+        ]                                                               # List[(B, N, C)]
         for i, blk in enumerate(self.blocks):
             x = maybe_checkpoint(
                 blk,
@@ -365,7 +364,7 @@ class DinoVisionTransformer(nn.Module):
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
-        x = self.prepare_tokens_with_masks(x, masks)
+        x = self.prepare_tokens_with_masks(x, masks) # B N C
 
         for i, blk in enumerate(self.blocks):
             x = maybe_checkpoint(
@@ -468,13 +467,14 @@ class DinoVisionTransformer(nn.Module):
             outputs = self._get_intermediate_layers_not_chunked(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
-        class_tokens = [out[:, 0] for out in outputs]
-        outputs = [out[:, 1 + self.num_register_tokens :] for out in outputs]
+        class_tokens = [out[:, 0] for out in outputs]                           # B embed_dim
+        outputs = [out[:, 1 + self.num_register_tokens :] for out in outputs]   # B N embed_dim
         if reshape:
-            B, _, w, h = x.shape
+            B, dim, patD, patH, patW = self.patch_embed.compute_out_dims(x)
+            assert(all(out.shape[1] == patD * patH * patW for out in outputs))
             outputs = [
-                out.reshape(B, w // self.patch_size, h // self.patch_size, -1)
-                .permute(0, 3, 1, 2)
+                out.reshape(B, patD, patH, patW, dim)
+                .permute(0, 4, 1, 2, 3)                     # B embed_dim D H W
                 .contiguous()
                 for out in outputs
             ]

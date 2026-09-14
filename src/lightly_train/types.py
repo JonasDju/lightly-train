@@ -25,7 +25,7 @@ PackageModel = Any
 
 # Types for the new transforms.
 ImageDtypes = Union[np.uint8, np.float32]
-NDArrayImage = NDArray[ImageDtypes]  # (H, W) or (H, W, C)
+NDArrayImage = NDArray[ImageDtypes]  # Changed to channel first (expected by MONAI): (C, H, W, D)
 NDArrayMask = NDArray[Union[np.uint8, np.uint16, np.int_]]  # (H, W) or (H, W, C)
 NDArrayBBoxes = NDArray[np.float64]  # (n_boxes, 4)
 NDArrayOBBoxes = NDArray[

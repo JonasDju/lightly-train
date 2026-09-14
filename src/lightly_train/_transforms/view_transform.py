@@ -10,14 +10,13 @@ from __future__ import annotations
 from typing import Any, cast
 
 import cv2
+import numpy as np
 import torch
 from albumentations import (
     BasicTransform,
     ColorJitter,
-    Compose,
     GaussianBlur,
     HorizontalFlip,
-    RandomResizedCrop,
     Rotate,
     Solarize,
     ToGray,
@@ -25,10 +24,15 @@ from albumentations import (
 )
 from albumentations.pytorch.transforms import ToTensorV2
 from lightning_utilities.core.imports import RequirementCache
+from monai.transforms import (
+    Transform,
+    RandRotate, RandGaussianSmooth, NormalizeIntensity, Compose
+)
 
 from lightly_train._configs.config import PydanticConfig
 from lightly_train._transforms.channel_drop import ChannelDrop
 from lightly_train._transforms.normalize import NormalizeDtypeAware as Normalize
+from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 from lightly_train._transforms.transform import (
     ChannelDropArgs,
     ColorJitterArgs,
@@ -38,12 +42,19 @@ from lightly_train._transforms.transform import (
     RandomResizeArgs,
     RandomResizedCropArgs,
     RandomRotationArgs,
-    SolarizeArgs,
+    SolarizeArgs
 )
 from lightly_train.types import TransformInput, TransformOutputSingleView
 
 ALBUMENTATIONS_VERSION_2XX = RequirementCache("albumentations>=2.0.0")
 ALBUMENTATIONS_VERSION_GREATER_EQUAL_1_4_22 = RequirementCache("albumentations>=1.4.22")
+
+
+class ToTensor(Transform):
+
+    def __call__(self, data: np.ndarray):
+        # Input shape is (C, H, W, D), but our 3D implementation of DINOv2 expects (C, D, H, W)
+        return torch.from_numpy(data).permute(0, 3, 1, 2).contiguous()
 
 
 class ViewTransformArgs(PydanticConfig):
@@ -58,21 +69,16 @@ class ViewTransformArgs(PydanticConfig):
     normalize: NormalizeArgs
 
 
-def _get_RandomResizedCrop(args: RandomResizedCropArgs) -> RandomResizedCrop:
+def _get_RandomResizedCrop(args: RandomResizedCropArgs) -> Transform:
     # A lot of though went into the choice of interpolation method here.
     # See details in https://github.com/lightly-ai/lightly-train-old/pull/284
     assert args.scale is not None
-    if ALBUMENTATIONS_VERSION_2XX:
-        return RandomResizedCrop(
-            size=(args.size[0], args.size[1]),
-            scale=args.scale.as_tuple(),
-            interpolation=cv2.INTER_AREA,
-        )
-    return RandomResizedCrop(
-        height=args.size[0],
-        width=args.size[1],
+    return RandomResizedCrop3D(
+        size=(args.size[0], args.size[1], args.size[2]),
         scale=args.scale.as_tuple(),
-        interpolation=cv2.INTER_AREA,
+        interpolation="area",
+        upscale_interpolation="linear",     # Deviates from CV2 INTER_AREA slightly, but looks better in my opinion.
+                                            # Select None for the closest 3D approximation of CV2s' INTER_AREA
     )
 
 
@@ -136,29 +142,7 @@ class ViewTransform:
         args: ViewTransformArgs,
         record_geometry: bool = False,
     ):
-        # ``record_geometry`` is passed in by the method's transform (e.g. the
-        # dinov31 PaKA cross-view loss needs the crop box / flips) rather than
-        # living on the generic ``ViewTransformArgs``, so each method keeps its
-        # whole configuration in one place.
-        self._record_geometry = record_geometry
-        if self._record_geometry:
-            if not ALBUMENTATIONS_VERSION_2XX:
-                raise ValueError("record_geometry=True requires albumentations>=2.0.0.")
-            if args.random_rotation is not None:
-                raise ValueError(
-                    "record_geometry=True is not supported together with "
-                    "random_rotation because rotation invalidates patch boxes."
-                )
-
-        transform: list[BasicTransform] = []
-
-        if args.channel_drop is not None:
-            transform += [
-                ChannelDrop(
-                    num_channels_keep=args.channel_drop.num_channels_keep,
-                    weight_drop=args.channel_drop.weight_drop,
-                )
-            ]
+        transform: list[Transform] = []
 
         # .scale here corresponds to MethodTransformArgs.random_resize and may be None
         # .size here corresponds to MethodTransformArgs.image_size and may not be None
@@ -168,89 +152,42 @@ class ViewTransform:
             )
         transform += [_get_RandomResizedCrop(args.random_resized_crop)]
 
-        if args.random_flip:
-            transform += [
-                HorizontalFlip(p=args.random_flip.horizontal_prob),
-                VerticalFlip(p=args.random_flip.vertical_prob),
-            ]
+        # Disable flipping for now, as the MRI volumes should always have the same orientation
+        # if args.random_flip:
+        #     transform += [
+        #         HorizontalFlip(p=args.random_flip.horizontal_prob),
+        #         VerticalFlip(p=args.random_flip.vertical_prob),
+        #     ]
 
         if args.random_rotation:
             transform += [
-                Rotate(
-                    # We chose to use the border mode default of cv2.BORDER_REFLECT_101,
-                    # even though it is different from PIL, cause it makes the image more
-                    # realistic.
-                    # We also chose to switch the interpolation method to cv2.INTER_AREA,
-                    # from NEAREST for PIL, because it is more realistic.
-                    # See details in https://linear.app/lightly/issue/LIG-5911/look-into-albumentations-rotation-difference
-                    limit=args.random_rotation.degrees,
-                    p=args.random_rotation.prob,
-                    interpolation=cv2.INTER_AREA,
-                    border_mode=cv2.BORDER_REFLECT_101,
+                RandRotate(
+                    range_x=args.random_rotation.degrees_tuple()[0],
+                    range_y=args.random_rotation.degrees_tuple()[1],
+                    range_z=args.random_rotation.degrees_tuple()[2],
+                    prob=args.random_rotation.prob,
+                    mode="bilinear",
+                    padding_mode="border"
                 )
             ]
 
-        transform += build_photometric_ops(
-            color_jitter=args.color_jitter,
-            random_gray_scale=args.random_gray_scale,
-            gaussian_blur=args.gaussian_blur,
-            solarize=args.solarize,
-        )
 
-        transform += [Normalize(mean=args.normalize.mean, std=args.normalize.std)]
+        # Gaussian blur
+        if args.gaussian_blur:
+            transform += [
+                RandGaussianSmooth(
+                    sigma_x=args.gaussian_blur.sigmas,
+                    sigma_y=args.gaussian_blur.sigmas,
+                    sigma_z=args.gaussian_blur.sigmas,
+                    prob=args.gaussian_blur.prob
+                )
+            ]
 
-        transform += [ToTensorV2()]
+        transform += [NormalizeIntensity(subtrahend=args.normalize.mean*255, divisor=args.normalize.std*255)]
+        transform += [ToTensor()]
 
-        if self._record_geometry:
-            # save_applied_params (albumentations>=2.0 only) records the transforms
-            # that fired on each call, which is how we recover the crop box / flips
-            # for record_geometry. Read it inside __call__ immediately after the
-            # call; this keeps a single ViewTransform instance safe to reuse
-            # sequentially across views (as DINOTransform does for local views).
-            # Do not share a ViewTransform across threads.
-            self.transform = Compose(list(transform), save_applied_params=True)
-        else:
-            self.transform = Compose(list(transform))
+        self.transform = Compose(transform)
 
     def __call__(self, input: TransformInput) -> TransformOutputSingleView:
-        if not self._record_geometry:
-            transformed: TransformOutputSingleView = self.transform(**input)
-            return transformed
-
-        image_h, image_w = input["image"].shape[:2]
-        transformed = self.transform(**input)
-        # Albumentations adds an "applied_transforms" list (not part of the
-        # TypedDict) when save_applied_params=True.
-        applied = cast(dict[str, Any], transformed).pop("applied_transforms")
-
-        crop_coords: tuple[int, int, int, int] | None = None
-        hflip = False
-        vflip = False
-        # applied_transforms lists only the transforms that fired on this call, so a
-        # flip entry means the flip was applied.
-        for name, params in applied:
-            if name == "RandomResizedCrop":
-                crop_coords = params["crop_coords"]
-            elif name == "HorizontalFlip":
-                hflip = True
-            elif name == "VerticalFlip":
-                vflip = True
-        if crop_coords is None:
-            raise RuntimeError(
-                "record_geometry=True but no crop was applied. This indicates "
-                "an incompatible albumentations version or pipeline."
-            )
-        transformed["geometry"] = torch.tensor(
-            [
-                float(crop_coords[0]),
-                float(crop_coords[1]),
-                float(crop_coords[2]),
-                float(crop_coords[3]),
-                float(image_w),
-                float(image_h),
-                1.0 if hflip else 0.0,
-                1.0 if vflip else 0.0,
-            ],
-            dtype=torch.float32,
-        )
+        transformed: TransformOutputSingleView = self.transform(**input)
         return transformed

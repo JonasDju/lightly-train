@@ -55,7 +55,7 @@ class RandomResizeArgs(PydanticConfig):
 class RandomResizedCropArgs(PydanticConfig):
     # don't allow None for .size since it comes from MethodTransformArgs.image_size
     # however .scale comes from MethodTransformArgs.random_resize which may be None
-    size: tuple[int, int]
+    size: tuple[int, int, int]
     scale: RandomResizeArgs | None
 
 
@@ -125,7 +125,7 @@ class RandomRotate90Args(PydanticConfig):
 
 class RandomRotationArgs(PydanticConfig):
     prob: float = Field(ge=0.0, le=1.0)
-    degrees: float | tuple[float, float]
+    degrees: float | tuple[float, float, float]
     interpolation: int = cv2.INTER_AREA
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
@@ -135,6 +135,11 @@ class RandomRotationArgs(PydanticConfig):
         if isinstance(v, Iterable) and not isinstance(v, (str, bytes)):
             return tuple(v)
         return v
+
+    def degrees_tuple(self) -> tuple[float, float, float]:
+        if isinstance(self.degrees, float):
+            return (self.degrees,)*3
+        return self.degrees
 
 
 class RandomZoomOutArgs(ActivationPolicyArgs):
@@ -185,17 +190,13 @@ class NormalizeArgs(PydanticConfig):
     # CLI. Setting strict to False allows Pydantic to convert lists to tuples.
     mean: tuple[float, ...] = Field(
         default=(
-            IMAGENET_NORMALIZE["mean"][0],
-            IMAGENET_NORMALIZE["mean"][1],
-            IMAGENET_NORMALIZE["mean"][2],
+            0.5,
         ),
         strict=False,
     )
     std: tuple[float, ...] = Field(
         default=(
-            IMAGENET_NORMALIZE["std"][0],
-            IMAGENET_NORMALIZE["std"][1],
-            IMAGENET_NORMALIZE["std"][2],
+            0.5,
         ),
         strict=False,
     )

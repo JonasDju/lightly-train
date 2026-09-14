@@ -84,7 +84,7 @@ class DINOGlobalView1TransformArgs(PydanticConfig):
 
 class DINOLocalViewTransformArgs(PydanticConfig):
     num_views: int = 6
-    view_size: ImageSizeTuple = (96, 96)
+    view_size: ImageSizeTuple = (96, 96, 8)
     random_resize: DINOLocalViewRandomResizeArgs | None = Field(
         default_factory=DINOLocalViewRandomResizeArgs
     )
@@ -98,7 +98,7 @@ class DINOTransformArgs(MethodTransformArgs):
     # transformers. We should add a check for the model type and use the appropriate
     # scales accordingly.
     # https://github.com/facebookresearch/dino#resnet-50-and-other-convnets-trainings
-    image_size: ImageSizeTuple = (224, 224, 24)
+    image_size: ImageSizeTuple = (224, 224, 16)
     channel_drop: ChannelDropArgs | None = None
     num_channels: int | Literal["auto"] = "auto"
     random_resize: DINORandomResizeArgs | None = Field(
@@ -138,17 +138,17 @@ class DINOTransform(MethodTransform):
 
         global_transform_0 = ViewTransform(
             ViewTransformArgs(
-                channel_drop=transform_args.channel_drop,
+                channel_drop=None,
                 random_resized_crop=RandomResizedCropArgs(
                     size=transform_args.image_size,
                     scale=transform_args.random_resize,
                 ),
                 random_flip=transform_args.random_flip,
                 random_rotation=transform_args.random_rotation,
-                color_jitter=transform_args.color_jitter,
-                random_gray_scale=transform_args.random_gray_scale,
+                color_jitter=None,
+                random_gray_scale=None,
                 gaussian_blur=transform_args.gaussian_blur,
-                solarize=transform_args.solarize,
+                solarize=None,
                 normalize=transform_args.normalize,
             ),
             record_geometry=transform_args.record_geometry,
@@ -156,17 +156,17 @@ class DINOTransform(MethodTransform):
 
         global_transform_1 = ViewTransform(
             ViewTransformArgs(
-                channel_drop=transform_args.channel_drop,
+                channel_drop=None,
                 random_resized_crop=RandomResizedCropArgs(
                     size=transform_args.image_size,
                     scale=transform_args.random_resize,
                 ),
                 random_flip=transform_args.random_flip,
                 random_rotation=transform_args.random_rotation,
-                color_jitter=transform_args.color_jitter,
-                random_gray_scale=transform_args.random_gray_scale,
+                color_jitter=None,
+                random_gray_scale=None,
                 gaussian_blur=transform_args.global_view_1.gaussian_blur,
-                solarize=transform_args.global_view_1.solarize,
+                solarize=None,
                 normalize=transform_args.normalize,
             ),
             record_geometry=transform_args.record_geometry,
@@ -178,17 +178,17 @@ class DINOTransform(MethodTransform):
         if transform_args.local_view is not None:
             local_transform = ViewTransform(
                 ViewTransformArgs(
-                    channel_drop=transform_args.channel_drop,
+                    channel_drop=None,
                     random_resized_crop=RandomResizedCropArgs(
                         size=transform_args.local_view.view_size,
                         scale=transform_args.local_view.random_resize,
                     ),
                     random_flip=transform_args.random_flip,
                     random_rotation=transform_args.random_rotation,
-                    color_jitter=transform_args.color_jitter,
-                    random_gray_scale=transform_args.random_gray_scale,
+                    color_jitter=None,
+                    random_gray_scale=None,
                     gaussian_blur=transform_args.local_view.gaussian_blur,
-                    solarize=transform_args.solarize,
+                    solarize=None,
                     normalize=transform_args.normalize,
                 ),
                 record_geometry=transform_args.record_geometry,

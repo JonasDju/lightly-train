@@ -7,6 +7,7 @@
 #
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import cv2
@@ -24,6 +25,7 @@ from albumentations import (
 )
 from albumentations.pytorch.transforms import ToTensorV2
 from lightning_utilities.core.imports import RequirementCache
+from monai.data import MetaTensor
 from monai.transforms import (
     Transform,
     RandRotate, RandGaussianSmooth, NormalizeIntensity, Compose
@@ -52,9 +54,15 @@ ALBUMENTATIONS_VERSION_GREATER_EQUAL_1_4_22 = RequirementCache("albumentations>=
 
 class ToTensor(Transform):
 
-    def __call__(self, data: np.ndarray):
+    def __call__(self, data: np.ndarray | torch.Tensor) -> torch.Tensor:
+        # MONAI transforms (e.g. RandGaussianSmooth, RandRotate) may already return a
+        # MetaTensor. Convert to a plain tensor so that the default collate function
+        # does not carry MONAI metadata around.
+        tensor = torch.as_tensor(data)
+        if isinstance(tensor, MetaTensor):
+            tensor = tensor.as_tensor()
         # Input shape is (C, H, W, D), but our 3D implementation of DINOv2 expects (C, D, H, W)
-        return torch.from_numpy(data).permute(0, 3, 1, 2).contiguous()
+        return tensor.permute(0, 3, 1, 2).contiguous()
 
 
 class ViewTransformArgs(PydanticConfig):
@@ -142,6 +150,10 @@ class ViewTransform:
         args: ViewTransformArgs,
         record_geometry: bool = False,
     ):
+        if record_geometry:
+            raise NotImplementedError(
+                "record_geometry=True is not supported by the 3D view transform."
+            )
         transform: list[Transform] = []
 
         # .scale here corresponds to MethodTransformArgs.random_resize and may be None
@@ -160,11 +172,13 @@ class ViewTransform:
         #     ]
 
         if args.random_rotation:
+            # MONAI expects the rotation ranges in radians.
+            degrees_x, degrees_y, degrees_z = args.random_rotation.degrees_tuple()
             transform += [
                 RandRotate(
-                    range_x=args.random_rotation.degrees_tuple()[0],
-                    range_y=args.random_rotation.degrees_tuple()[1],
-                    range_z=args.random_rotation.degrees_tuple()[2],
+                    range_x=math.radians(degrees_x),
+                    range_y=math.radians(degrees_y),
+                    range_z=math.radians(degrees_z),
                     prob=args.random_rotation.prob,
                     mode="bilinear",
                     padding_mode="border"
@@ -183,11 +197,19 @@ class ViewTransform:
                 )
             ]
 
-        transform += [NormalizeIntensity(subtrahend=args.normalize.mean*255, divisor=args.normalize.std*255)]
+        transform += [
+            NormalizeIntensity(
+                subtrahend=[m * 255 for m in args.normalize.mean],
+                divisor=[s * 255 for s in args.normalize.std],
+                channel_wise=True,
+            )
+        ]
         transform += [ToTensor()]
 
         self.transform = Compose(transform)
 
     def __call__(self, input: TransformInput) -> TransformOutputSingleView:
-        transformed: TransformOutputSingleView = self.transform(**input)
+        transformed: TransformOutputSingleView = {
+            "image": self.transform(input["image"])
+        }
         return transformed

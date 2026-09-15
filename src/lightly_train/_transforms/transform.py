@@ -137,9 +137,9 @@ class RandomRotationArgs(PydanticConfig):
         return v
 
     def degrees_tuple(self) -> tuple[float, float, float]:
-        if isinstance(self.degrees, float):
-            return (self.degrees,)*3
-        return self.degrees
+        if isinstance(self.degrees, (int, float)):
+            return (float(self.degrees),) * 3
+        return tuple(float(d) for d in self.degrees)  # type: ignore[return-value]
 
 
 class RandomZoomOutArgs(ActivationPolicyArgs):

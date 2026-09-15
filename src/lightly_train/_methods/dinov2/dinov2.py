@@ -282,10 +282,11 @@ class DINOv2(Method):
         n_crops = global_views.shape[0]  # G*B
         batch_size = n_crops // n_global_crops
 
-        # Patch size is stored as (H, W, D)
-        d = global_views.shape[2] // self._patch_size[2]
-        h = global_views.shape[3] // self._patch_size[0]
-        w = global_views.shape[4] // self._patch_size[1]
+        # Patch size is stored as (H, W, D). Round up like PatchEmbed, which resizes
+        # inputs to the next multiple of the patch size.
+        d = math.ceil(global_views.shape[2] / self._patch_size[2])
+        h = math.ceil(global_views.shape[3] / self._patch_size[0])
+        w = math.ceil(global_views.shape[4] / self._patch_size[1])
 
         mask_generator = MaskingGenerator(
             input_size=(d, h, w),

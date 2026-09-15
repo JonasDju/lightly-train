@@ -57,7 +57,8 @@ class MaskingGenerator:
         self.max_num_patches = max_num_patches
 
         max_aspect = max_aspect or 1 / min_aspect
-        # reused independently for the (height/depth) and (width/depth) ratios
+        # reused independently for the (height/depth) and (width/depth) ratios. The
+        # sampled ratios are relative to the aspect ratios of the patch grid itself.
         self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
 
     def __repr__(self) -> str:
@@ -81,9 +82,15 @@ class MaskingGenerator:
             target_volume = random.uniform(self.min_num_patches, max_mask_patches)
 
             # Sample two aspect ratios (height/depth and (width/depth)
-            # independently such that d * h * w == target_volume
-            aspect_ratio_hd = math.exp(random.uniform(*self.log_aspect_ratio))
-            aspect_ratio_wd = math.exp(random.uniform(*self.log_aspect_ratio))
+            # independently such that d * h * w == target_volume. The ratios are
+            # anchored to the grid's own aspect ratios, otherwise cuboids rarely fit
+            # into anisotropic grids (e.g. 4x16x16)
+            aspect_ratio_hd = math.exp(random.uniform(*self.log_aspect_ratio)) * (
+                self.height / self.depth
+            )
+            aspect_ratio_wd = math.exp(random.uniform(*self.log_aspect_ratio)) * (
+                self.width / self.depth
+            )
 
             d = int(round((target_volume / (aspect_ratio_hd * aspect_ratio_wd)) ** (1 / 3)))
             h = int(round(d * aspect_ratio_hd))

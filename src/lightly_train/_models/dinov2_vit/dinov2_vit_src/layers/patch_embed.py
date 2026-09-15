@@ -54,9 +54,9 @@ class PatchEmbed(nn.Module):
         assert isinstance(img_size, (tuple, list, ListConfig)) and len(img_size) == 3, "img_size must specify a length in all three spatial dimensions"
         assert isinstance(patch_size, (tuple, list, ListConfig)) and len(patch_size) == 3, "patch_size must specify a length in all three spatial dimensions"
 
-        # Reorder W H D -> D H W
-        img_size = (img_size[2], img_size[1], img_size[0])
-        patch_size = (patch_size[2], patch_size[1], patch_size[0])
+        # Reorder H W D (config / transform convention) -> D H W (tensor layout)
+        img_size = (img_size[2], img_size[0], img_size[1])
+        patch_size = (patch_size[2], patch_size[0], patch_size[1])
 
         patch_grid_size = (
             img_size[0] // patch_size[0],
@@ -134,10 +134,11 @@ class PatchEmbed(nn.Module):
 
     def compute_out_dims(self, x: Tensor) -> Tuple[int, int, int, int, int]:
         B, _, D, H, W = x.shape
+        patch_D, patch_H, patch_W = self.patch_size
 
-        new_D = math.ceil(D / self.patch_D) * self.patch_D
-        new_H = math.ceil(H / self.patch_H) * self.patch_H
-        new_W = math.ceil(W / self.patch_W) * self.patch_W
+        new_D = math.ceil(D / patch_D) * patch_D
+        new_H = math.ceil(H / patch_H) * patch_H
+        new_W = math.ceil(W / patch_W) * patch_W
 
         d_out = math.floor((new_D + 2 * self.proj.padding[0] - self.proj.dilation[0] * (self.proj.kernel_size[0] - 1) - 1) / self.proj.stride[0] + 1)
         h_out = math.floor((new_H + 2 * self.proj.padding[1] - self.proj.dilation[1] * (self.proj.kernel_size[1] - 1) - 1) / self.proj.stride[1] + 1)

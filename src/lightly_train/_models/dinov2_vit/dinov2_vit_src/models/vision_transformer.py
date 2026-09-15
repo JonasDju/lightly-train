@@ -294,7 +294,6 @@ class DinoVisionTransformer(nn.Module):
             patch_pos_embed = nn.functional.interpolate(
                 patch_pos_embed.reshape(1, peD, peH, peW, dim).permute(0, 4, 1, 2, 3),
                 mode="trilinear",
-                antialias=self.interpolate_antialias,
                 **kwargs,
             )
 

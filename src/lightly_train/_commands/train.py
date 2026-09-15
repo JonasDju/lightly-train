@@ -331,7 +331,8 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
         )
 
     logger.info(
-        f"Args: {common_helpers.pretty_format_args(args=config.model_dump(), limit_keys={'data'})}"
+        # data_root and data_meta are single paths, so no sequence needs to be limited.
+        f"Args: {common_helpers.pretty_format_args(args=config.model_dump(), limit_keys=set())}"
     )
     logger.info(f"Using output directory '{out_dir}'.")
 
@@ -616,7 +617,8 @@ class FunctionTrainConfig(TrainConfig):
 class CLITrainConfig(FunctionTrainConfig):
     # CLI configuration with simpler types for better error messages.
     out: str
-    data: str | Sequence[str]
+    data_root: str
+    data_meta: str
     model: str
     checkpoint: str | None = None
     accelerator: str = "auto"
@@ -635,12 +637,12 @@ def log_resolved_config(config: TrainConfig, loggers: list[Logger]) -> None:
     """
     log_string = (
         "Resolved configuration:\n"
-        f"{common_helpers.pretty_format_args(args=config.model_dump(), limit_keys={'data'})}\n"
+        f"{common_helpers.pretty_format_args(args=config.model_dump(), limit_keys=set())}\n"
     )
     logger.info(log_string)
 
     hyperparams = common_helpers.sanitize_config_dict(
-        common_helpers.remove_excessive_args(config.model_dump(), limit_keys={"data"})
+        common_helpers.remove_excessive_args(config.model_dump(), limit_keys=set())
     )
     for logger_instance in loggers:
         logger_instance.log_hyperparams(params=hyperparams)

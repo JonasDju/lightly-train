@@ -9,7 +9,7 @@ import math
 from typing import Literal, NamedTuple, Sequence
 
 import numpy as np
-from monai.transforms import Transform
+from monai.transforms import Randomizable, Transform
 from numpy.typing import NDArray
 
 __all__ = ["RandomResizedCrop3D", "CropParams3D"]
@@ -151,7 +151,7 @@ def _resample(
     return out
 
 
-class RandomResizedCrop3D(Transform):
+class RandomResizedCrop3D(Randomizable, Transform):
     """Crop a random sub-volume and resize it to a fixed shape.
 
     Mirrors ``albumentations.RandomResizedCrop`` but for ``(C, H, W, D)``
@@ -189,7 +189,9 @@ class RandomResizedCrop3D(Transform):
             but a deliberate departure from the 2D pipeline.
         max_attempts: Rejection-sampling attempts before falling back to a crop
             that is shrunk isotropically until it fits.
-        seed: Optional seed or ``np.random.Generator``.
+        seed: Optional seed or ``np.random.RandomState``. Randomness is drawn from
+            MONAI's ``self.R`` so that ``set_random_state`` (e.g. called per
+            DataLoader worker) reseeds this transform.
     """
 
     def __init__(
@@ -200,7 +202,7 @@ class RandomResizedCrop3D(Transform):
         interpolation: InterpolationMode = "area",
         upscale_interpolation: InterpolationMode | None = None,
         max_attempts: int = 10,
-        seed: int | np.random.Generator | None = None,
+        seed: int | np.random.RandomState | None = None,
     ) -> None:
         if isinstance(size, int):
             size = (size, size, size)
@@ -226,7 +228,10 @@ class RandomResizedCrop3D(Transform):
         self.interpolation: InterpolationMode = interpolation
         self.upscale_interpolation: InterpolationMode | None = upscale_interpolation
         self.max_attempts = int(max_attempts)
-        self.rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
+        if isinstance(seed, np.random.RandomState):
+            self.set_random_state(state=seed)
+        else:
+            self.set_random_state(seed=seed)
 
     # ------------------------------------------------------------------ #
     # Parameter sampling
@@ -248,9 +253,9 @@ class RandomResizedCrop3D(Transform):
 
         h = w = d = 0
         for _ in range(self.max_attempts):
-            target_volume = self.rng.uniform(*self.scale) * volume
-            aspect_ratio_hd = math.exp(self.rng.uniform(*self.log_ratio)) * current_ratio_hd
-            aspect_ratio_wd = math.exp(self.rng.uniform(*self.log_ratio)) * current_ratio_wd
+            target_volume = self.R.uniform(*self.scale) * volume
+            aspect_ratio_hd = math.exp(self.R.uniform(*self.log_ratio)) * current_ratio_hd
+            aspect_ratio_wd = math.exp(self.R.uniform(*self.log_ratio)) * current_ratio_wd
             h, w, d = self._sizes_from_ratios(target_volume, aspect_ratio_hd, aspect_ratio_wd)
             if 0 < h <= height and 0 < w <= width and 0 < d <= depth:
                 return self._random_position(h, w, d, height, width, depth)
@@ -265,9 +270,9 @@ class RandomResizedCrop3D(Transform):
 
     def _random_position(self, h: int, w: int, d: int, height: int, width: int, depth: int) -> CropParams3D:
         return CropParams3D(
-            h_start=int(self.rng.integers(0, height - h + 1)),
-            w_start=int(self.rng.integers(0, width - w + 1)),
-            d_start=int(self.rng.integers(0, depth - d + 1)),
+            h_start=int(self.R.randint(0, height - h + 1)),
+            w_start=int(self.R.randint(0, width - w + 1)),
+            d_start=int(self.R.randint(0, depth - d + 1)),
             height=h,
             width=w,
             depth=d,

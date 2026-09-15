@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 from lightly_train._activation_checkpointing import ActivationCheckpointingArgs
 from lightly_train._checkpoint import Checkpoint
 from lightly_train._configs import validate
+from lightly_train._data import mi_dataset
 from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._env import Env
 from lightly_train._methods import method_helpers
@@ -194,6 +195,8 @@ def get_dataloader(
         num_workers=num_workers,
         drop_last=True,
         timeout=timeout,
+        # Reseed the random transforms in every worker, see mi_dataset.worker_init_fn.
+        worker_init_fn=mi_dataset.worker_init_fn,
     )
     if loader_args is not None:
         logger.debug(f"Using additional dataloader arguments {loader_args}.")

@@ -15,6 +15,7 @@ import torch
 from pytest_mock import MockerFixture
 from torch import Size
 
+from lightly_train._methods.dinov2 import dinov2 as dinov2_module
 from lightly_train._methods.dinov2.dinov2 import (
     DINOv2,
     DINOv2AdamWViTArgs,
@@ -48,7 +49,7 @@ def setup_dinov2_helper(
         optimizer_args=optimizer_args,
         embedding_model=emb_model,
         global_batch_size=batch_size,
-        num_input_channels=3,
+        num_input_channels=1,
     )
 
     trainer_mock = mocker.Mock()
@@ -93,8 +94,10 @@ class TestDINOv2:
         emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
         b = 16
 
-        views = [torch.rand(b, 3, 8, 8) for _ in range(2)] + [
-            torch.rand(b, 3, 4, 4) for _ in range(n_local_crops)
+        # Views are (B, C, D, H, W). The dummy model has patch size 2, so global views
+        # have a 4x4x4 patch grid.
+        views = [torch.rand(b, 1, 8, 8, 8) for _ in range(2)] + [
+            torch.rand(b, 1, 4, 4, 4) for _ in range(n_local_crops)
         ]
         batch: Batch = {
             "views": views,
@@ -133,6 +136,28 @@ class TestDINOv2:
         assert out.log_dict["train_loss/dino_local_loss"].shape == Size([])
         assert out.log_dict["train_loss/ibot_loss"].shape == Size([])
         assert out.log_dict["train_loss/koleo_loss"].shape == Size([])
+        assert torch.isfinite(out.loss)
+
+    def test_train_step_impl__anisotropic_views(self, mocker: MockerFixture) -> None:
+        # Patch size (H, W, D) = (4, 2, 2) with views (D, H, W) = (4, 16, 8) gives a
+        # (2, 4, 4) patch grid. The mask grid must match the patch embedding grid.
+        emb_model = EmbeddingModel(
+            wrapped_model=dummy_dinov2_vit_model(
+                patch_size=(4, 2, 2), img_size=(16, 8, 4)
+            )
+        )
+        b = 4
+        views = [torch.rand(b, 1, 4, 16, 8) for _ in range(2)] + [
+            torch.rand(b, 1, 2, 8, 4) for _ in range(2)
+        ]
+        batch: Batch = {"views": views, "filename": [f"img_{i}" for i in range(b)]}
+        dinov2 = setup_dinov2_helper(
+            DINOv2Args(mask_probability=1.0), mocker, emb_model, b
+        )
+        spy = mocker.spy(dinov2_module, "MaskingGenerator")
+        out = dinov2.training_step_impl(batch, 0)
+        assert spy.call_args.kwargs["input_size"] == (2, 4, 4)
+        assert torch.isfinite(out.loss)
 
     def test_layerwise_decay_optimizer(self, mocker: MockerFixture) -> None:
         emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())

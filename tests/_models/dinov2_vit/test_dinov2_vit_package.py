@@ -28,6 +28,10 @@ from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer i
 from ...helpers import DummyCustomModel
 
 
+def _vit_test_3d() -> DinoVisionTransformer:
+    return _vit_test(patch_size=(2, 2, 2), img_size=(8, 8, 8), in_chans=1)
+
+
 class TestDINOv2ViTPackage:
     @pytest.mark.parametrize(
         "model_name, listed",
@@ -74,11 +78,11 @@ class TestDINOv2ViTPackage:
         assert (model_name in model_names) is listed
 
     def test_is_supported_model__model_true(self) -> None:
-        model = _vit_test()
+        model = _vit_test_3d()
         assert DINOv2ViTPackage.is_supported_model(model)
 
     def test_is_supported_model__wrapped_model_true(self) -> None:
-        model = _vit_test()
+        model = _vit_test_3d()
         wrapped_model = DINOv2ViTModelWrapper(model=model)
         assert DINOv2ViTPackage.is_supported_model(wrapped_model)
 
@@ -96,12 +100,14 @@ class TestDINOv2ViTPackage:
             "_vittest14",
             "vits14-notpretrained",
             "vits14-noreg-notpretrained",
-            "vitb14-noreg-notpretrained",
         ],
     )
     def test_get_model(self, model_name: str) -> None:
-        model = DINOv2ViTPackage.get_model(model_name=model_name)
+        model = DINOv2ViTPackage.get_model(model_name=model_name, num_input_channels=1)
         assert isinstance(model, DinoVisionTransformer)
+        # Train configs are 3D: patch size (H, W, D) = (14, 14, 4).
+        assert tuple(model.patch_size) == (14, 14, 4)
+        assert model.patch_embed.in_chans == 1
 
     def test_tipsv2_model_names(self) -> None:
         assert DINOv2ViTPackage.parse_model_name("vitso400m14-tipsv2") == (
@@ -145,9 +151,9 @@ class TestDINOv2ViTPackage:
         assert constructor.call_args.kwargs["mlp_ratio"] == 4304 / 1152
 
     def test_load_weights__pytorch_checkpoint(self, tmp_path: Path) -> None:
-        expected = _vit_test()
+        expected = _vit_test_3d()
         torch.save(expected.state_dict(), tmp_path / "tipsv2.pt")
-        actual = _vit_test()
+        actual = _vit_test_3d()
 
         dinov2_helper.load_weights(
             model=actual,
@@ -161,7 +167,7 @@ class TestDINOv2ViTPackage:
             assert torch.equal(expected_param, actual_param)
 
     def test_get_model_wrapper(self) -> None:
-        model = _vit_test()
+        model = _vit_test_3d()
         fe = DINOv2ViTPackage.get_model_wrapper(model=model)
         assert isinstance(fe, DINOv2ViTModelWrapper)
 

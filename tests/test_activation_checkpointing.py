@@ -7,8 +7,9 @@
 #
 from __future__ import annotations
 
+import copy
 from pathlib import Path
-from typing import Iterable, Protocol, cast
+from typing import Any, Iterable, Protocol, cast
 
 import pytest
 import torch
@@ -68,6 +69,28 @@ def enable_checkpointing(
     """Configure a bare ViT the way its model wrapper would."""
     model._activation_checkpointing = True
     model._activation_checkpointing_every_n_blocks = every_n_blocks
+
+
+def _dinov2_vit(**kwargs: Any) -> nn.Module:
+    """Small 3D DINOv2 ViT. Inputs are (B, 1, 8, 56, 56) with a 2x4x4 patch grid."""
+    from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
+        DinoVisionTransformer,
+    )
+
+    return DinoVisionTransformer(
+        img_size=(56, 56, 8),
+        patch_size=(14, 14, 4),
+        in_chans=1,
+        embed_dim=64,
+        depth=4,
+        num_heads=4,
+        mlp_ratio=2.0,
+        **kwargs,
+    )
+
+
+def _dinov2_input(**kwargs: Any) -> torch.Tensor:
+    return torch.randn(2, 1, 8, 56, 56, **kwargs)
 
 
 class TestActivationCheckpointingArgs:
@@ -198,55 +221,26 @@ class TestMaybeCheckpoint:
 
 class TestDINOv2ViTActivationCheckpointing:
     def test_forward_backward(self) -> None:
-        from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
-            DinoVisionTransformer,
-        )
-
-        model = DinoVisionTransformer(
-            img_size=56,
-            patch_size=14,
-            embed_dim=64,
-            depth=4,
-            num_heads=4,
-            mlp_ratio=2.0,
-        )
-        enable_checkpointing(model)
+        model = _dinov2_vit()
+        enable_checkpointing(cast(ActivationCheckpointable, model))
         model.train()
-        x = torch.randn(2, 3, 56, 56, requires_grad=True)
+        x = _dinov2_input(requires_grad=True)
         out = cast(DinoForwardFeatures, model).forward_features(x)
         loss = out["x_norm_clstoken"].sum()
         torch.autograd.backward(loss)
         assert x.grad is not None
 
     def test_numerical_equivalence(self) -> None:
-        from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
-            DinoVisionTransformer,
-        )
-
         torch.manual_seed(0)
-        model_ref = DinoVisionTransformer(
-            img_size=56,
-            patch_size=14,
-            embed_dim=64,
-            depth=4,
-            num_heads=4,
-            mlp_ratio=2.0,
-        )
+        model_ref = _dinov2_vit()
         torch.manual_seed(0)
-        model_ckpt = DinoVisionTransformer(
-            img_size=56,
-            patch_size=14,
-            embed_dim=64,
-            depth=4,
-            num_heads=4,
-            mlp_ratio=2.0,
-        )
-        enable_checkpointing(model_ckpt)
+        model_ckpt = _dinov2_vit()
+        enable_checkpointing(cast(ActivationCheckpointable, model_ckpt))
         model_ckpt.load_state_dict(model_ref.state_dict())
         model_ref.train()
         model_ckpt.train()
 
-        x = torch.randn(2, 3, 56, 56)
+        x = _dinov2_input()
         out_ref = cast(DinoForwardFeatures, model_ref).forward_features(x)
         out_ckpt = cast(DinoForwardFeatures, model_ckpt).forward_features(x)
 
@@ -255,21 +249,10 @@ class TestDINOv2ViTActivationCheckpointing:
         )
 
     def test_every_n_blocks(self) -> None:
-        from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
-            DinoVisionTransformer,
-        )
-
-        model = DinoVisionTransformer(
-            img_size=56,
-            patch_size=14,
-            embed_dim=64,
-            depth=4,
-            num_heads=4,
-            mlp_ratio=2.0,
-        )
-        enable_checkpointing(model, every_n_blocks=2)
+        model = _dinov2_vit()
+        enable_checkpointing(cast(ActivationCheckpointable, model), every_n_blocks=2)
         model.train()
-        x = torch.randn(2, 3, 56, 56, requires_grad=True)
+        x = _dinov2_input(requires_grad=True)
         out = cast(DinoForwardFeatures, model).forward_features(x)
         torch.autograd.backward(out["x_norm_clstoken"].sum())
         assert x.grad is not None
@@ -346,58 +329,51 @@ class TestECViTActivationCheckpointing:
         assert x.grad is not None
 
 
+def _pretrain_kwargs(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
+    data_root, data_meta = helpers.create_mi_dataset(tmp_path, n_cases=2, depths=(6,))
+    pretrain_kwargs: dict[str, Any] = dict(
+        out=tmp_path / "out",
+        data_root=data_root,
+        data_meta=data_meta,
+        series_depth=8,
+        resample_mode="nearest",
+        model="dinov2/_vittest14",
+        method="dinov2",
+        batch_size=2,
+        num_workers=0,
+        epochs=1,
+        accelerator="cpu",
+        transform_args=copy.deepcopy(helpers.MI_DINOV2_TRANSFORM_ARGS),
+    )
+    pretrain_kwargs.update(kwargs)
+    return pretrain_kwargs
+
+
 class TestPretrainActivationCheckpointing:
     def test_pretrain_with_activation_checkpointing(self, tmp_path: Path) -> None:
         from lightly_train._commands import train
 
-        data = tmp_path / "data"
-        helpers.create_images(image_dir=data, files=10)
         train.pretrain(
-            out=tmp_path / "out",
-            data=data,
-            model="dinov2/_vittest14",
-            method="dinov2",
-            batch_size=2,
-            num_workers=0,
-            epochs=1,
-            accelerator="cpu",
-            activation_checkpoint_args={"enabled": True},
+            **_pretrain_kwargs(tmp_path, activation_checkpoint_args={"enabled": True})
         )
         assert (tmp_path / "out" / "checkpoints" / "last.ckpt").exists()
 
     def test_pretrain_without_activation_checkpointing(self, tmp_path: Path) -> None:
         from lightly_train._commands import train
 
-        data = tmp_path / "data"
-        helpers.create_images(image_dir=data, files=10)
-        train.pretrain(
-            out=tmp_path / "out",
-            data=data,
-            model="torchvision/resnet18",
-            method="simclr",
-            batch_size=4,
-            num_workers=0,
-            epochs=1,
-            accelerator="cpu",
-        )
+        train.pretrain(**_pretrain_kwargs(tmp_path))
         assert (tmp_path / "out" / "checkpoints" / "last.ckpt").exists()
 
     def test_pretrain_unsupported_model_raises(self, tmp_path: Path) -> None:
         from lightly_train._commands import train
 
-        data = tmp_path / "data"
-        helpers.create_images(image_dir=data, files=10)
         with pytest.raises(ValueError, match="not supported"):
             train.pretrain(
-                out=tmp_path / "out",
-                data=data,
-                model="torchvision/resnet18",
-                method="simclr",
-                batch_size=4,
-                num_workers=0,
-                epochs=1,
-                accelerator="cpu",
-                activation_checkpoint_args={"enabled": True},
+                **_pretrain_kwargs(
+                    tmp_path,
+                    model=helpers.DummyCustomModel(),
+                    activation_checkpoint_args={"enabled": True},
+                )
             )
 
 
@@ -480,20 +456,8 @@ class TestBlockChunkNotDoubleCheckpointed:
         checkpointing again inside BlockChunk.forward would nest and recompute
         twice.
         """
-        from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
-            DinoVisionTransformer,
-        )
-
-        model = DinoVisionTransformer(
-            img_size=56,
-            patch_size=14,
-            embed_dim=64,
-            depth=4,
-            num_heads=4,
-            mlp_ratio=2.0,
-            block_chunks=2,
-        )
-        enable_checkpointing(model)
+        model = _dinov2_vit(block_chunks=2)
+        enable_checkpointing(cast(ActivationCheckpointable, model))
         model.train()
 
         # A *pre*-hook is required here. Non-reentrant checkpointing aborts the
@@ -508,7 +472,7 @@ class TestBlockChunkNotDoubleCheckpointed:
                 lambda _m, _i, k=idx: counts.__setitem__(k, counts.get(k, 0) + 1)
             )
 
-        x = torch.randn(2, 3, 56, 56, requires_grad=True)
+        x = _dinov2_input(requires_grad=True)
         torch.autograd.backward(
             cast(DinoForwardFeatures, model)
             .forward_features(x)["x_norm_clstoken"]

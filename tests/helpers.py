@@ -197,7 +197,7 @@ def get_method_dinov2() -> DINOv2:
     optim_args = DINOv2AdamWViTArgs()
     dinov2_args = DINOv2Args()
     wrapped_model = package_helpers.get_wrapped_model(
-        model="dinov2/_vittest14", num_input_channels=3
+        model="dinov2/_vittest14", num_input_channels=1
     )
     dinov2_args.resolve_auto(
         scaling_info=ScalingInfo(dataset_size=1000, epochs=100),
@@ -209,7 +209,7 @@ def get_method_dinov2() -> DINOv2:
         optimizer_args=optim_args,
         embedding_model=EmbeddingModel(wrapped_model=wrapped_model),
         global_batch_size=2,
-        num_input_channels=3,
+        num_input_channels=1,
     )
     return dinov2
 
@@ -1065,8 +1065,63 @@ def assert_same_params(
         assert a_defaults == b_defaults
 
 
-def dummy_dinov2_vit_model(patch_size: int = 2, **kwargs: Any) -> DINOv2ViTModelWrapper:
+def dummy_dinov2_vit_model(
+    patch_size: tuple[int, int, int] = (2, 2, 2), **kwargs: Any
+) -> DINOv2ViTModelWrapper:
+    """Tiny 3D DINOv2 ViT. Sizes are (H, W, D), inputs are (B, 1, D, H, W)."""
+    kwargs.setdefault("img_size", (8, 8, 8))
+    kwargs.setdefault("in_chans", 1)
     return DINOv2ViTModelWrapper(model=_vit_test(patch_size, **kwargs))
+
+
+# Small DINOv2 transform sizes for fast end-to-end tests with dinov2/_vittest14, whose
+# patch size is (14, 14, 4). Global views have a 4x4x4 patch grid.
+MI_DINOV2_TRANSFORM_ARGS: dict[str, Any] = {
+    "image_size": (56, 56, 16),
+    "local_view": {"view_size": (28, 28, 8), "num_views": 2},
+}
+
+
+def create_mi_dataset(
+    root: Path,
+    n_cases: int = 4,
+    depths: Sequence[int] = (6, 9),
+    height: int = 20,
+    width: int = 24,
+    identical: bool = False,
+) -> tuple[Path, Path]:
+    """Create a dataset in the KneeNo layout.
+
+    Layout: root/data/<case_id>/<series_name>/<NNN>.jpeg and root/meta.json.
+
+    Args:
+        identical: If True, all series of the same depth contain identical slices.
+
+    Returns:
+        (data_root, data_meta)
+    """
+    data_root = root / "data"
+    metadata: dict[str, dict[str, dict[str, Any]]] = {}
+    rng = np.random.default_rng(0)
+    for case_idx in range(n_cases):
+        case_id = f"case_{case_idx}"
+        metadata[case_id] = {}
+        for series_idx, depth in enumerate(depths):
+            series_name = f"series_{series_idx}"
+            series_dir = data_root / case_id / series_name
+            series_dir.mkdir(parents=True, exist_ok=True)
+            if identical:
+                rng = np.random.default_rng(0)
+            for i in range(depth):
+                slice_np = rng.integers(0, 256, size=(height, width), dtype=np.uint8)
+                Image.fromarray(slice_np).save(series_dir / f"{i:03d}.jpeg")
+            metadata[case_id][series_name] = {
+                "n_images": depth,
+                "resolution": [height, width],
+            }
+    data_meta = root / "meta.json"
+    data_meta.write_text(json.dumps(metadata))
+    return data_root, data_meta
 
 
 def dummy_dinov3_vit_model(patch_size: int = 2, **kwargs: Any) -> DINOv3ViTModelWrapper:

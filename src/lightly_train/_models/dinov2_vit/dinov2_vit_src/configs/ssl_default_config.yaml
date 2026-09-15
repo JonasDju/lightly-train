@@ -70,7 +70,10 @@ train:
   centering: "centering" # or "sinkhorn_knopp"
 student:
   arch: vit_large
-  patch_size: 16
+  patch_size:
+    - 16
+    - 16
+    - 4
   drop_path_rate: 0.3
   layerscale: 1.0e-05
   drop_path_uniform: true

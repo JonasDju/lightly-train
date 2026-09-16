@@ -125,7 +125,7 @@ class RandomRotate90Args(PydanticConfig):
 
 class RandomRotationArgs(PydanticConfig):
     prob: float = Field(ge=0.0, le=1.0)
-    degrees: float | tuple[float, float, float]
+    degrees: float | tuple[float, float]
     interpolation: int = cv2.INTER_AREA
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
@@ -136,9 +136,9 @@ class RandomRotationArgs(PydanticConfig):
             return tuple(v)
         return v
 
-    def degrees_tuple(self) -> tuple[float, float, float]:
+    def degrees_tuple(self) -> tuple[float, float]:
         if isinstance(self.degrees, (int, float)):
-            return (float(self.degrees),) * 3
+            return float(-self.degrees), float(self.degrees)
         return tuple(float(d) for d in self.degrees)  # type: ignore[return-value]
 
 

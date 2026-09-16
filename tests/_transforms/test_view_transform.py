@@ -139,12 +139,20 @@ class TestViewTransform:
             t for t in view_transform.transform.transforms if isinstance(t, RandRotate)
         ]
         assert len(rotations) == 1
-        for value_range in (
-            rotations[0].range_x,
-            rotations[0].range_y,
-            rotations[0].range_z,
-        ):
-            assert max(value_range) == pytest.approx(math.radians(10))
+        assert max(rotations[0].range_x) == pytest.approx(math.radians(10))
+
+    def test_view_transform__rotation_is_in_plane_only(self) -> None:
+        # range_y/range_z (the H-D/W-D planes) must stay at 0: rotating a plane
+        # that mixes the depth axis with an in-plane axis is not a true physical
+        # rotation on anisotropic volumes (it becomes shear + stretch in mm
+        # space unless voxels are cubic).
+        view_transform = _view_transform(random_rotation=_get_random_rotation_args())
+        rotations = [
+            t for t in view_transform.transform.transforms if isinstance(t, RandRotate)
+        ]
+        assert len(rotations) == 1
+        assert max(rotations[0].range_y) == 0.0
+        assert max(rotations[0].range_z) == 0.0
 
     def test_view_transform__reproducible_with_random_state(self) -> None:
         view_transform = _view_transform(
@@ -180,14 +188,14 @@ class TestRandomRotationArgs:
     @pytest.mark.parametrize(
         "degrees, expected",
         [
-            (10, (10.0, 10.0, 10.0)),
-            (7.5, (7.5, 7.5, 7.5)),
-            ((1, 2, 3), (1.0, 2.0, 3.0)),
-            ([1.0, 2.0, 3.0], (1.0, 2.0, 3.0)),
+            (10, (-10.0, 10.0)),
+            (7.5, (-7.5, 7.5)),
+            ((1, 2), (1.0, 2.0)),
+            ([1.0, 2.0], (1.0, 2.0)),
         ],
     )
     def test_degrees_tuple(
-        self, degrees: float | tuple[float, float, float], expected: tuple
+        self, degrees: float | tuple[float, float], expected: tuple
     ) -> None:
         args = RandomRotationArgs(prob=1.0, degrees=degrees)
         assert args.degrees_tuple() == expected

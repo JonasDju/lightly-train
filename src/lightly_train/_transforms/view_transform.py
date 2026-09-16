@@ -28,13 +28,16 @@ from lightning_utilities.core.imports import RequirementCache
 from monai.data import MetaTensor
 from monai.transforms import (
     Transform,
-    RandRotate, RandGaussianSmooth, NormalizeIntensity, Compose
+    RandRotate, NormalizeIntensity, Compose
 )
 
 from lightly_train._configs.config import PydanticConfig
 from lightly_train._transforms.channel_drop import ChannelDrop
+from lightly_train._transforms.monai_wrappers import (
+    AnisotropyAwareRandGaussianSmooth,
+    AnisotropyTrackingRandomResizedCrop3D,
+)
 from lightly_train._transforms.normalize import NormalizeDtypeAware as Normalize
-from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 from lightly_train._transforms.transform import (
     ChannelDropArgs,
     ColorJitterArgs,
@@ -81,7 +84,7 @@ def _get_RandomResizedCrop(args: RandomResizedCropArgs) -> Transform:
     # A lot of though went into the choice of interpolation method here.
     # See details in https://github.com/lightly-ai/lightly-train-old/pull/284
     assert args.scale is not None
-    return RandomResizedCrop3D(
+    return AnisotropyTrackingRandomResizedCrop3D(
         size=(args.size[0], args.size[1], args.size[2]),
         scale=args.scale.as_tuple(),
         interpolation="area",
@@ -172,13 +175,13 @@ class ViewTransform:
         #     ]
 
         if args.random_rotation:
-            # MONAI expects the rotation ranges in radians.
-            degrees_x, degrees_y, degrees_z = args.random_rotation.degrees_tuple()
+            # MONAI expects the rotation ranges in radians, in-plane rotation only
             transform += [
                 RandRotate(
-                    range_x=math.radians(degrees_x),
-                    range_y=math.radians(degrees_y),
-                    range_z=math.radians(degrees_z),
+                    range_x=tuple(
+                        math.radians(deg)
+                        for deg in args.random_rotation.degrees_tuple()
+                    ),
                     prob=args.random_rotation.prob,
                     mode="bilinear",
                     padding_mode="border"
@@ -189,7 +192,7 @@ class ViewTransform:
         # Gaussian blur
         if args.gaussian_blur:
             transform += [
-                RandGaussianSmooth(
+                AnisotropyAwareRandGaussianSmooth(
                     sigma_x=args.gaussian_blur.sigmas,
                     sigma_y=args.gaussian_blur.sigmas,
                     sigma_z=args.gaussian_blur.sigmas,

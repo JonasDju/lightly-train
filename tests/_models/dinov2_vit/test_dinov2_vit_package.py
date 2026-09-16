@@ -12,6 +12,7 @@ import pytest
 import torch
 from pytest_mock import MockerFixture
 
+from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
 from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from lightly_train._models.dinov2_vit.dinov2_vit_src import dinov2_helper
@@ -108,6 +109,24 @@ class TestDINOv2ViTPackage:
         # Train configs are 3D: patch size (H, W, D) = (14, 14, 4).
         assert tuple(model.patch_size) == (14, 14, 4)
         assert model.patch_embed.in_chans == 1
+
+    def test_vittest14__global_crops_size_matches_default_transform_image_size(
+        self,
+    ) -> None:
+        """Regression test: `crops.global_crops_size` in `ssl_default_config.yaml`
+        (which sizes the model's positional embedding) must match
+        `DINOTransformArgs.image_size`'s default (the actual global-view size fed
+        to the model during training). If these drift apart again, the model
+        silently re-interpolates its positional embedding on every single
+        training step -- wasteful, and easy to miss because it isn't an error."""
+        model = DINOv2ViTPackage.get_model("_vittest14", num_input_channels=1)
+        transform_image_size = DINOv2ViTTransformArgs().image_size  # (H, W, D)
+
+        assert model.patch_embed.img_size == (
+            transform_image_size[2],
+            transform_image_size[0],
+            transform_image_size[1],
+        )
 
     def test_tipsv2_model_names(self) -> None:
         assert DINOv2ViTPackage.parse_model_name("vitso400m14-tipsv2") == (

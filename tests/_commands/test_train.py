@@ -227,8 +227,14 @@ def test_pretrain__embed_dim(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("series_depth", [0, -1])
 def test_pretrain__series_depth_not_positive(tmp_path: Path, series_depth: int) -> None:
-    with pytest.raises(NotImplementedError):
-        train.pretrain(**_pretrain_kwargs(tmp_path, series_depth=series_depth))
+    """series_depth<=0 means native per-series depth (kneeno treats every
+    non-positive value the same as 0). The synthetic dataset has series of two
+    different depths (6 and 9); RandomResizedCrop3D always resizes its crop to a
+    fixed output size, so default collation across them works without a
+    depth-bucket sampler."""
+    out = tmp_path / "out"
+    train.pretrain(**_pretrain_kwargs(tmp_path, series_depth=series_depth))
+    assert (out / "checkpoints" / "last.ckpt").exists()
 
 
 def test_pretrain__resample_mode_invalid(tmp_path: Path) -> None:

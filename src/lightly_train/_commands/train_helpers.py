@@ -30,7 +30,6 @@ from lightly_train._activation_checkpointing import ActivationCheckpointingArgs
 from lightly_train._checkpoint import Checkpoint
 from lightly_train._configs import validate
 from lightly_train._data import mi_dataset
-from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._env import Env
 from lightly_train._methods import method_helpers
 from lightly_train._methods.method import Method
@@ -183,10 +182,9 @@ def get_dataloader(
     logger.debug(f"Using batch size per device {batch_size}.")
     timeout = Env.LIGHTLY_TRAIN_DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0
 
-    if isinstance(dataset, MIDataset) and series_depth <= 0:
-        # TODO: Use (distributed?) DepthBucketSampler from KneeNo
-        raise NotImplementedError("DepthBucketSampler not yet implemented for lightly-train. Use a "
-                                  "series_depth > 0 instead.")
+    # No DepthBucketSampler is needed here even for series_depth <= 0 (native
+    # per-series depth): RandomResizedCrop3D always resizes its crop to a fixed
+    # output size
 
     dataloader_kwargs: dict[str, Any] = dict(
         dataset=dataset,

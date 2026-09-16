@@ -118,7 +118,7 @@ crops:
   global_crops_size:
     - 224
     - 224
-    - 24
+    - 16
   local_crops_size:
     - 96
     - 96

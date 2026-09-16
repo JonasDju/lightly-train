@@ -151,24 +151,39 @@ def test_get_dataloader(
 
 
 @pytest.mark.parametrize("series_depth", [0, -1])
-def test_get_dataloader__mi_dataset_requires_series_depth(
+def test_get_dataloader__mi_dataset_series_depth_not_positive(
     tmp_path: Path, series_depth: int
 ) -> None:
-    data_root, data_meta = helpers.create_mi_dataset(tmp_path, n_cases=1)
+    """series_depth<=0 (native per-series depth) needs no depth-bucket sampler:
+    RandomResizedCrop3D always resizes its crop to a fixed output size, so every
+    MIDataset item has the same view shapes regardless of the input volume's
+    native depth, and default collation works even across series of different
+    depths."""
+    data_root, data_meta = helpers.create_mi_dataset(tmp_path, n_cases=4, depths=(6, 9))
+    transform_args = train_helpers.get_transform_args(
+        method="dinov2", transform_args=dict(helpers.MI_DINOV2_TRANSFORM_ARGS)
+    )
+    transform = train_helpers.get_transform(
+        method="dinov2", transform_args_resolved=transform_args
+    )
     dataset = MIDataset(
         data_root=data_root,
         data_meta=data_meta,
-        transform=lambda input: [input],
+        transform=transform,
         series_depth=series_depth,
     )
-    with pytest.raises(NotImplementedError):
-        train_helpers.get_dataloader(
-            dataset=dataset,
-            batch_size=2,
-            num_workers=0,
-            series_depth=series_depth,
-            loader_args=None,
-        )
+    assert {dataset._core.effective_depth(i) for i in range(len(dataset))} == {6, 9}
+
+    dataloader = train_helpers.get_dataloader(
+        dataset=dataset,
+        batch_size=4,
+        num_workers=0,
+        series_depth=series_depth,
+        loader_args=None,
+    )
+    batch = next(iter(dataloader))
+    for view in batch["views"]:
+        assert view.shape[0] == 4
 
 
 @pytest.mark.parametrize("model_name", REPRESENTATIVE_MODEL_NAMES)

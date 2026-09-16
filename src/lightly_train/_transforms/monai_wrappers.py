@@ -5,7 +5,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 #
-"""Anisotropy-aware wrapper around MONAI's ``RandGaussianSmooth``.
+"""Anisotropy-aware wrappers around MONAI's ``RandGaussianSmooth``/``RandGaussianSharpen``.
 
 Knee-MRI volumes are highly anisotropic: the depth axis (``D``, slice count)
 typically has far fewer voxels than the in-plane axes (``H``, ``W``). MONAI's
@@ -24,6 +24,16 @@ and stretching along any axis pair with unequal spacing -- not the rotation
 it's meant to be. ``view_transform.py`` instead uses a plain MONAI ``RandRotate``
 restricted to the H-W in-plane rotation only (``range_y``/``range_z`` left at
 their default 0, since H and W are the two comparable-resolution axes).
+
+``RandGaussianSharpen`` is made anisotropy-aware the same way as
+``RandGaussianSmooth`` (``AnisotropyAwareRandGaussianSharpen`` below), since it too
+takes a per-axis sigma (in fact two: a pre-blur ``sigma1`` and a post-blur
+``sigma2``). The other new MONAI intensity/artifact augmentations in this
+pipeline (``RandAdjustContrast``, ``RandGaussianNoise``, ``RandHistogramShift``,
+``RandGibbsNoise``) are voxelwise or already shape-relative and are used
+unwrapped -- see the "no anisotropy wrapper" note on ``RandGibbsNoiseArgs`` in
+``transform.py`` for the one case (Gibbs ringing) where this was a deliberate
+choice rather than an oversight.
 
 Why a ``MetaTensor`` tag instead of reading ``img.shape`` directly: in the real
 pipeline (``view_transform.py``), ``RandomResizedCrop3D`` runs immediately before
@@ -45,10 +55,11 @@ needs to change -- the consuming code below stays the same.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from typing import Any
 
 from monai.data import MetaTensor
-from monai.transforms import RandGaussianSmooth
+from monai.transforms import RandGaussianSharpen, RandGaussianSmooth
 from numpy.typing import NDArray
 
 from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
@@ -57,6 +68,7 @@ __all__ = [
     "ORIG_SHAPE_META_KEY",
     "AnisotropyTrackingRandomResizedCrop3D",
     "AnisotropyAwareRandGaussianSmooth",
+    "AnisotropyAwareRandGaussianSharpen",
 ]
 
 # (H, W, D) of the volume before RandomResizedCrop3D's crop+resize.
@@ -111,4 +123,33 @@ class AnisotropyAwareRandGaussianSmooth(RandGaussianSmooth):
             h, w, d = _get_anisotropy_shape(img)
             scale_z = d / math.sqrt(h * w)
             self.sigma_z = tuple(s * scale_z for s in self._base_sigma_z)
+        return super().__call__(img, randomize=randomize)
+
+
+class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
+    """``RandGaussianSharpen`` with its two z-axis sigmas (``sigma1_z``, the
+    pre-blur sigma, and ``sigma2_z``, the post-blur sigma) scaled down by the same
+    ``D / sqrt(H * W)`` ratio as ``AnisotropyAwareRandGaussianSmooth``.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # The configured (isotropic) bounds, kept around so each call rescales
+        # from the original value rather than compounding on the previous call's
+        # already-scaled sigma.
+        self._base_sigma1_z = self.sigma1_z
+        self._base_sigma2_z = self.sigma2_z
+
+    def __call__(self, img: Any, randomize: bool = True) -> Any:
+        if randomize:
+            h, w, d = _get_anisotropy_shape(img)
+            scale_z = d / math.sqrt(h * w)
+            self.sigma1_z = tuple(s * scale_z for s in self._base_sigma1_z)
+            # sigma2_z may be a plain float (MONAI then samples it against sigma1_z's
+            # sampled value at call time) or a tuple, unlike sigma1_z which is always
+            # a tuple -- scale whichever form it is.
+            if isinstance(self._base_sigma2_z, Iterable):
+                self.sigma2_z = tuple(s * scale_z for s in self._base_sigma2_z)
+            else:
+                self.sigma2_z = self._base_sigma2_z * scale_z
         return super().__call__(img, randomize=randomize)

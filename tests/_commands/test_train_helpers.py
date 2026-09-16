@@ -46,6 +46,8 @@ from lightly_train._scaling import IMAGENET_SIZE, ScalingInfo
 from lightly_train._transforms.transform import (
     MethodTransformArgs,
     NormalizeArgs,
+    RandGaussianSharpenArgs,
+    RandGibbsNoiseArgs,
     RandomRotationArgs,
 )
 from lightly_train.errors import ConfigValidationError
@@ -525,20 +527,15 @@ def test_get_epochs(
 @pytest.mark.parametrize(
     "transform_dict, expected_result",
     [
-        # Test case for default empty dictionary. The default normalization has a single
-        # channel, which disables the RGB-only transforms.
+        # Test case for default empty dictionary.
         (
             {},
-            DINOv2ViTTransformArgs(
-                num_channels=1, color_jitter=None, random_gray_scale=None
-            ),
+            DINOv2ViTTransformArgs(num_channels=1),
         ),
         # Test case for None input
         (
             None,
-            DINOv2ViTTransformArgs(
-                num_channels=1, color_jitter=None, random_gray_scale=None
-            ),
+            DINOv2ViTTransformArgs(num_channels=1),
         ),
         # Test case for user config. Lists are converted to tuples as on the CLI.
         (
@@ -554,8 +551,6 @@ def test_get_epochs(
                 normalize=NormalizeArgs(mean=(0.3,), std=(0.2,)),
                 random_rotation=RandomRotationArgs(prob=0.5, degrees=30),
                 gaussian_blur=DINOGaussianBlurArgs(prob=0.3),
-                color_jitter=None,
-                random_gray_scale=None,
             ),
         ),
         # Test case of DINOv2ViTTransformArgs input
@@ -564,8 +559,19 @@ def test_get_epochs(
             DINOv2ViTTransformArgs(
                 num_channels=1,
                 image_size=(56, 56, 16),
-                color_jitter=None,
-                random_gray_scale=None,
+            ),
+        ),
+        # Test case for the new MONAI intensity/artifact augmentations, CLI-shaped
+        # (lists instead of tuples, as OmegaConf would produce).
+        (
+            {
+                "gibbs_noise": {"prob": 1.0, "alpha": [0.2, 0.8]},
+                "gaussian_sharpen": {"sigma1": [0.5, 1.5]},
+            },
+            DINOv2ViTTransformArgs(
+                num_channels=1,
+                gibbs_noise=RandGibbsNoiseArgs(prob=1.0, alpha=(0.2, 0.8)),
+                gaussian_sharpen=RandGaussianSharpenArgs(sigma1=(0.5, 1.5)),
             ),
         ),
     ],
@@ -585,6 +591,7 @@ def test_get_transform_args__success(
     [
         {"nonexisting_arg": 1},
         {"image_size": [56, 56]},  # Volumes need a size for all three axes.
+        {"gibbs_noise": {"bogus": 1}},  # Unknown nested key.
     ],
 )
 def test_get_transform_args__failure(transform_dict: dict[str, Any]) -> None:

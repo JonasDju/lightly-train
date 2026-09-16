@@ -185,6 +185,103 @@ class SolarizeArgs(PydanticConfig):
     threshold: float
 
 
+# --- MONAI intensity/artifact augmentation args (3D volume pipeline) ---
+#
+# These mirror MONAI's own `Rand*` transform defaults (see each transform's docstring
+# in `monai.transforms`) so that enabling an augmentation without specifying every
+# parameter still reproduces MONAI's recommended behavior. Unlike the 2D
+# albumentations-based args above, none of these are enabled by default anywhere
+# (every `MethodTransformArgs`/`ViewTransformArgs` field for them defaults to `None`).
+
+
+class RandAdjustContrastArgs(PydanticConfig):
+    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    gamma: tuple[float, float] = Field(default=(0.5, 4.5), strict=False)
+
+
+class RandGaussianNoiseArgs(PydanticConfig):
+    # mean/std follow the [0, 1] intensity convention used by NormalizeArgs. Since
+    # this augmentation runs before NormalizeIntensity (volumes are still in [0, 255]
+    # at that point), view_transform.py scales both by 255 when building the MONAI
+    # transform -- see the comment there.
+    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    mean: float = 0.0
+    std: float = 0.1
+
+
+class RandHistogramShiftArgs(PydanticConfig):
+    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    num_control_points: int | tuple[int, int] = 10
+
+    # Required because of: https://github.com/pydantic/pydantic/issues/10571
+    @pydantic.field_validator("num_control_points", mode="before")
+    @classmethod
+    def cast_list_to_tuple(cls, value: int | Sequence[int]) -> int | tuple[int, int]:
+        if isinstance(value, int):
+            return value
+        elif (
+            isinstance(value, Sequence)
+            and (len(value) == 2)
+            and all(isinstance(v, int) for v in value)
+        ):
+            return tuple(value)  # type: ignore[return-value]
+        else:
+            raise ValueError("num_control_points must be an int or a tuple of ints")
+
+
+class RandGaussianSharpenArgs(PydanticConfig):
+    # One isotropic sigma range per stage; view_transform.py fans each out to
+    # sigma{1,2}_{x,y,z}, the same way GaussianBlurArgs.sigmas feeds
+    # sigma_x/sigma_y/sigma_z, and anisotropy-scales the z component (see
+    # AnisotropyAwareRandGaussianSharpen in monai_wrappers.py).
+    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    sigma1: tuple[float, float] = Field(default=(0.5, 1.0), strict=False)
+    sigma2: float | tuple[float, float] = 0.5
+    alpha: tuple[float, float] = Field(default=(10.0, 30.0), strict=False)
+
+    # Required because of: https://github.com/pydantic/pydantic/issues/10571
+    @pydantic.field_validator("sigma2", mode="before")
+    @classmethod
+    def cast_list_to_tuple(cls, value: float | Sequence[float]) -> float | tuple[float, float]:
+        if isinstance(value, (int, float)):
+            return value
+        elif (
+            isinstance(value, Sequence)
+            and (len(value) == 2)
+            and all(isinstance(v, (int, float)) for v in value)
+        ):
+            return tuple(float(v) for v in value)  # type: ignore[return-value]
+        else:
+            raise ValueError("sigma2 must be a float or a tuple of floats")
+
+
+class RandGibbsNoiseArgs(PydanticConfig):
+    # Note: no anisotropy-aware wrapper. MONAI's k-space mask is a sphere of radius
+    # (1 - alpha) * max(shape) * sqrt(2) / 2 in voxel-index space; on a strongly
+    # anisotropic view (e.g. 224x224x16) that sphere always fully contains the short
+    # depth axis, so alpha only ever truncates in-plane k-space. That matches the
+    # physically expected Gibbs artifact for 2D multi-slice MRI acquisitions (ringing
+    # from in-plane readout/phase-encode truncation, not across slices), so no
+    # rescaling is applied here.
+    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    alpha: float | tuple[float, float] = (0.0, 1.0)
+
+    # Required because of: https://github.com/pydantic/pydantic/issues/10571
+    @pydantic.field_validator("alpha", mode="before")
+    @classmethod
+    def cast_list_to_tuple(cls, value: float | Sequence[float]) -> float | tuple[float, float]:
+        if isinstance(value, (int, float)):
+            return value
+        elif (
+            isinstance(value, Sequence)
+            and (len(value) == 2)
+            and all(isinstance(v, (int, float)) for v in value)
+        ):
+            return tuple(float(v) for v in value)  # type: ignore[return-value]
+        else:
+            raise ValueError("alpha must be a float or a tuple of floats")
+
+
 class NormalizeArgs(PydanticConfig):
     # Strict is set to False because OmegaConf does not support parsing tuples from the
     # CLI. Setting strict to False allows Pydantic to convert lists to tuples.
@@ -306,16 +403,19 @@ class RandomCropArgs(PydanticConfig):
 
 class MethodTransformArgs(PydanticConfig):
     image_size: ImageSizeTuple
-    channel_drop: ChannelDropArgs | None
+    # Defaulted to None (unlike the fields below) so that a subclass that has no use
+    # for these RGB-only 2D transforms (e.g. DINOTransformArgs, for 3D single-channel
+    # MRI volumes) can simply not re-declare them instead of wiring up dead defaults.
+    channel_drop: ChannelDropArgs | None = None
     num_channels: int | Literal["auto"]
     random_resize: RandomResizeArgs | None
     random_flip: RandomFlipArgs | None
     random_rotation: RandomRotationArgs | None
-    color_jitter: ColorJitterArgs | None
-    random_gray_scale: float | None
+    color_jitter: ColorJitterArgs | None = None
+    random_gray_scale: float | None = None
     normalize: NormalizeArgs
     gaussian_blur: GaussianBlurArgs | None
-    solarize: SolarizeArgs | None
+    solarize: SolarizeArgs | None = None
 
     def resolve_auto(self) -> None:
         if self.num_channels == "auto":

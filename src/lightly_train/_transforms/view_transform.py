@@ -28,21 +28,26 @@ from lightning_utilities.core.imports import RequirementCache
 from monai.data import MetaTensor
 from monai.transforms import (
     Transform,
-    RandRotate, NormalizeIntensity, Compose
+    RandRotate, NormalizeIntensity, Compose,
+    RandAdjustContrast, RandGaussianNoise, RandHistogramShift, RandGibbsNoise,
 )
 
 from lightly_train._configs.config import PydanticConfig
-from lightly_train._transforms.channel_drop import ChannelDrop
 from lightly_train._transforms.monai_wrappers import (
+    AnisotropyAwareRandGaussianSharpen,
     AnisotropyAwareRandGaussianSmooth,
     AnisotropyTrackingRandomResizedCrop3D,
 )
 from lightly_train._transforms.normalize import NormalizeDtypeAware as Normalize
 from lightly_train._transforms.transform import (
-    ChannelDropArgs,
     ColorJitterArgs,
     GaussianBlurArgs,
     NormalizeArgs,
+    RandAdjustContrastArgs,
+    RandGaussianNoiseArgs,
+    RandGaussianSharpenArgs,
+    RandGibbsNoiseArgs,
+    RandHistogramShiftArgs,
     RandomFlipArgs,
     RandomResizeArgs,
     RandomResizedCropArgs,
@@ -69,15 +74,16 @@ class ToTensor(Transform):
 
 
 class ViewTransformArgs(PydanticConfig):
-    channel_drop: ChannelDropArgs | None
     random_resized_crop: RandomResizedCropArgs  # only its .scale attribute can be None
     random_flip: RandomFlipArgs | None
     random_rotation: RandomRotationArgs | None
-    color_jitter: ColorJitterArgs | None
-    random_gray_scale: float | None
     gaussian_blur: GaussianBlurArgs | None
-    solarize: SolarizeArgs | None
     normalize: NormalizeArgs
+    gaussian_sharpen: RandGaussianSharpenArgs | None = None
+    gibbs_noise: RandGibbsNoiseArgs | None = None
+    histogram_shift: RandHistogramShiftArgs | None = None
+    adjust_contrast: RandAdjustContrastArgs | None = None
+    gaussian_noise: RandGaussianNoiseArgs | None = None
 
 
 def _get_RandomResizedCrop(args: RandomResizedCropArgs) -> Transform:
@@ -197,6 +203,62 @@ class ViewTransform:
                     sigma_y=args.gaussian_blur.sigmas,
                     sigma_z=args.gaussian_blur.sigmas,
                     prob=args.gaussian_blur.prob
+                )
+            ]
+
+        # The remaining MONAI intensity/artifact augmentations, all opt-in (None by
+        # default). Order matters: spatial filters first (sharpen, alongside the
+        # blur above), then the k-space acquisition artifact (Gibbs), then intensity
+        # remapping (histogram shift, contrast), then additive noise last so nothing
+        # downstream smooths it away
+        if args.gaussian_sharpen:
+            transform += [
+                AnisotropyAwareRandGaussianSharpen(
+                    sigma1_x=args.gaussian_sharpen.sigma1,
+                    sigma1_y=args.gaussian_sharpen.sigma1,
+                    sigma1_z=args.gaussian_sharpen.sigma1,
+                    sigma2_x=args.gaussian_sharpen.sigma2,
+                    sigma2_y=args.gaussian_sharpen.sigma2,
+                    sigma2_z=args.gaussian_sharpen.sigma2,
+                    alpha=args.gaussian_sharpen.alpha,
+                    prob=args.gaussian_sharpen.prob,
+                )
+            ]
+
+        if args.gibbs_noise:
+            transform += [
+                RandGibbsNoise(
+                    prob=args.gibbs_noise.prob,
+                    alpha=args.gibbs_noise.alpha,
+                )
+            ]
+
+        if args.histogram_shift:
+            transform += [
+                RandHistogramShift(
+                    num_control_points=args.histogram_shift.num_control_points,
+                    prob=args.histogram_shift.prob,
+                )
+            ]
+
+        if args.adjust_contrast:
+            transform += [
+                RandAdjustContrast(
+                    prob=args.adjust_contrast.prob,
+                    gamma=args.adjust_contrast.gamma,
+                )
+            ]
+
+        if args.gaussian_noise:
+            transform += [
+                RandGaussianNoise(
+                    prob=args.gaussian_noise.prob,
+                    # mean/std are in the [0, 1] intensity convention (see
+                    # RandGaussianNoiseArgs), but this runs before NormalizeIntensity
+                    # while the volume is still in [0, 255] -- scale up to match, same
+                    # as NormalizeIntensity's own subtrahend/divisor below.
+                    mean=args.gaussian_noise.mean * 255,
+                    std=args.gaussian_noise.std * 255,
                 )
             ]
 

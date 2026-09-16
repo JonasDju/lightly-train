@@ -198,9 +198,21 @@ _PRETRAIN_HELP_MSG = f"""
             - transform_args.random_flip.vertical_prob (float)
             - transform_args.random_rotation.prob (float)
             - transform_args.random_rotation.degrees (int)
-            - transform_args.random_gray_scale (float)
             - transform_args.normalize.mean (float, float, float)
             - transform_args.normalize.std (float, float, float)
+            - transform_args.gaussian_sharpen.prob (float)
+            - transform_args.gaussian_sharpen.sigma1 (float, float)
+            - transform_args.gaussian_sharpen.sigma2 (float) or (float, float)
+            - transform_args.gaussian_sharpen.alpha (float, float)
+            - transform_args.gibbs_noise.prob (float)
+            - transform_args.gibbs_noise.alpha (float) or (float, float)
+            - transform_args.histogram_shift.prob (float)
+            - transform_args.histogram_shift.num_control_points (int) or (int, int)
+            - transform_args.adjust_contrast.prob (float)
+            - transform_args.adjust_contrast.gamma (float, float)
+            - transform_args.gaussian_noise.prob (float)
+            - transform_args.gaussian_noise.mean (float)
+            - transform_args.gaussian_noise.std (float)
         loader_args (dict):
             Additional arguments for the PyTorch DataLoader.
         trainer_args (dict):

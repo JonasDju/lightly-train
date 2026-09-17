@@ -19,6 +19,9 @@ from torch.utils.data import DataLoader
 from lightly_train._commands import train_helpers
 from lightly_train._data import mi_dataset
 from lightly_train._data.mi_dataset import MIDataset
+from lightly_train._transforms.monai_wrappers import (
+    AnisotropyTrackingRandomResizedCrop3D,
+)
 from lightly_train._transforms.transform import MethodTransform
 from lightly_train.types import TransformInput, TransformOutput
 
@@ -190,8 +193,18 @@ class TestWorkerSeeding:
         dataset = _dinov2_dataset(tmp_path, n_cases=1)
         mi_dataset.reseed_randomizables(dataset, rng=np.random.RandomState(0))
         global_0, global_1 = dataset.transform.transforms[:2]  # type: ignore[attr-defined]
-        crop_0 = global_0.transform.transforms[0]
-        crop_1 = global_1.transform.transforms[0]
+        # Found by type, not a fixed index: NormalizeIntensity/ToNumpy now precede
+        # the crop in ViewTransform's Compose (see view_transform.py).
+        crop_0 = next(
+            t
+            for t in global_0.transform.transforms
+            if isinstance(t, AnisotropyTrackingRandomResizedCrop3D)
+        )
+        crop_1 = next(
+            t
+            for t in global_1.transform.transforms
+            if isinstance(t, AnisotropyTrackingRandomResizedCrop3D)
+        )
         assert crop_0.R is not crop_1.R
         assert crop_0.get_params((1, 64, 64, 16)) != crop_1.get_params((1, 64, 64, 16))
 

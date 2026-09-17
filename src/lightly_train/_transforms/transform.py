@@ -200,10 +200,6 @@ class RandAdjustContrastArgs(PydanticConfig):
 
 
 class RandGaussianNoiseArgs(PydanticConfig):
-    # mean/std follow the [0, 1] intensity convention used by NormalizeArgs. Since
-    # this augmentation runs before NormalizeIntensity (volumes are still in [0, 255]
-    # at that point), view_transform.py scales both by 255 when building the MONAI
-    # transform -- see the comment there.
     prob: float = Field(default=0.1, ge=0.0, le=1.0)
     mean: float = 0.0
     std: float = 0.1

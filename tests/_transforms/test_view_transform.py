@@ -21,6 +21,7 @@ from monai.transforms import (
     RandGibbsNoise,
     RandHistogramShift,
     RandRotate,
+    ToNumpy,
 )
 
 from lightly_train._transforms.monai_wrappers import AnisotropyAwareRandGaussianSharpen
@@ -276,7 +277,12 @@ class TestViewTransform:
         # Not just any RandGaussianSharpen -- must be the anisotropy-aware wrapper.
         assert type(sharpens[0]) is AnisotropyAwareRandGaussianSharpen
 
-    def test_view_transform__gaussian_noise_mean_and_std_scaled_by_255(self) -> None:
+    def test_view_transform__gaussian_noise_mean_and_std_pass_through_unscaled(
+        self,
+    ) -> None:
+        # No * 255 scaling: RandGaussianNoise runs after NormalizeIntensity (which
+        # is now first in the pipeline), so its mean/std are interpreted directly in
+        # the already-normalized intensity distribution.
         view_transform = _view_transform(
             gaussian_noise=RandGaussianNoiseArgs(prob=1.0, mean=0.1, std=0.2)
         )
@@ -286,8 +292,8 @@ class TestViewTransform:
             if isinstance(t, RandGaussianNoise)
         ]
         assert len(noises) == 1
-        assert noises[0].mean == pytest.approx(0.1 * 255)
-        assert noises[0].std == pytest.approx(0.2 * 255)
+        assert noises[0].mean == pytest.approx(0.1)
+        assert noises[0].std == pytest.approx(0.2)
 
     def test_view_transform__monai_ops_order(self) -> None:
         view_transform = _view_transform(
@@ -300,8 +306,13 @@ class TestViewTransform:
             gaussian_noise=_get_gaussian_noise_args(),
         )
         op_types = [type(t) for t in view_transform.transform.transforms]
-        # Spatial filters (blur, sharpen) -> k-space artifact (Gibbs) -> intensity
-        # remap (histogram shift, contrast) -> additive noise last -> normalize/tensor.
+        # NormalizeIntensity + ToNumpy come first (before the crop, to avoid
+        # quantizing raw uint8 volumes to the crop's input dtype -- see the comment
+        # in ViewTransform.__init__). Then: crop -> rotate -> spatial filters (blur,
+        # sharpen) -> k-space artifact (Gibbs) -> intensity remap (histogram shift,
+        # contrast) -> additive noise last -> tensor.
+        assert op_types[0] is NormalizeIntensity
+        assert op_types[1] is ToNumpy
         expected_order = [
             RandRotate,
             AnisotropyAwareRandGaussianSharpen,  # gaussian_blur precedes it below
@@ -309,7 +320,6 @@ class TestViewTransform:
             RandHistogramShift,
             RandAdjustContrast,
             RandGaussianNoise,
-            NormalizeIntensity,
             ToTensor,
         ]
         # gaussian_blur (AnisotropyAwareRandGaussianSmooth) sits right before sharpen;
@@ -343,6 +353,28 @@ class TestViewTransform:
         out_enabled = enabled({"image": volume})["image"]
 
         assert not torch.allclose(out_disabled, out_enabled)
+
+    def test_view_transform__normalize_first_avoids_uint8_quantization(self) -> None:
+        # NormalizeIntensity (+ToNumpy bridge) must be the first two ops, ahead of
+        # the crop: RandomResizedCrop3D round-trips its output back to the input
+        # dtype, clipping/rounding to the integer range for integer inputs. If
+        # Normalize ran after the crop (as it used to), a uint8 volume -- what
+        # KneeNo returns under resample_mode="nearest" -- would be quantized to at
+        # most 256 distinct levels right at the first op.
+        view_transform = _view_transform(
+            random_resized_crop=_get_random_resized_crop_args(
+                scale=RandomResizeArgs(min_scale=0.5, max_scale=1.0)
+            )
+        )
+        assert type(view_transform.transform.transforms[0]) is NormalizeIntensity
+        assert type(view_transform.transform.transforms[1]) is ToNumpy
+
+        img = _volume(np.uint8)  # (1, 20, 24, 10) -> cropped/resized to (1, 16, 16, 6)
+        out = view_transform({"image": img})["image"]
+        # A uint8 input surviving the old (Normalize-last) ordering would be bounded
+        # by 256 distinct levels at the crop step; with Normalize first the crop
+        # sees float input and preserves full interpolation precision.
+        assert len(torch.unique(out)) > 500
 
     def test_view_transform__reproducible_with_random_state__new_ops(self) -> None:
         view_transform = _view_transform(

@@ -28,7 +28,7 @@ from lightning_utilities.core.imports import RequirementCache
 from monai.data import MetaTensor
 from monai.transforms import (
     Transform,
-    RandRotate, NormalizeIntensity, Compose,
+    RandRotate, NormalizeIntensity, Compose, ToNumpy,
     RandAdjustContrast, RandGaussianNoise, RandHistogramShift, RandGibbsNoise,
 )
 
@@ -165,6 +165,26 @@ class ViewTransform:
             )
         transform: list[Transform] = []
 
+        # Normalize first, before any resampling. RandomResizedCrop3D (below) is a
+        # from-scratch NumPy transform that round-trips its output back to the input
+        # dtype, clipping/rounding to the integer range if the input is an integer
+        # type -- so if this ran last (as upstream lightly-train's 2D pipeline does),
+        # a `uint8` volume (what KneeNo returns under resample_mode="nearest") would
+        # get quantized to 256 discrete levels at the very first op, before rotate/
+        # blur/sharpen/etc. ever see it. NormalizeIntensity promotes to float32
+        # regardless of input dtype, so running it first means the crop always sees
+        # float input and never hits that integer round-trip. ToNumpy bridges
+        # NormalizeIntensity's MetaTensor output back to a plain ndarray, since
+        # RandomResizedCrop3D cannot consume a MetaTensor directly.
+        transform += [
+            NormalizeIntensity(
+                subtrahend=[m * 255 for m in args.normalize.mean],
+                divisor=[s * 255 for s in args.normalize.std],
+                channel_wise=True,
+            ),
+            ToNumpy(),
+        ]
+
         # .scale here corresponds to MethodTransformArgs.random_resize and may be None
         # .size here corresponds to MethodTransformArgs.image_size and may not be None
         if args.random_resized_crop.scale is None:
@@ -210,7 +230,9 @@ class ViewTransform:
         # default). Order matters: spatial filters first (sharpen, alongside the
         # blur above), then the k-space acquisition artifact (Gibbs), then intensity
         # remapping (histogram shift, contrast), then additive noise last so nothing
-        # downstream smooths it away
+        # downstream smooths it away. All of these run after NormalizeIntensity
+        # (moved to the front above), so their intensity-scale parameters are
+        # interpreted directly in the network's own input distribution.
         if args.gaussian_sharpen:
             transform += [
                 AnisotropyAwareRandGaussianSharpen(
@@ -253,22 +275,11 @@ class ViewTransform:
             transform += [
                 RandGaussianNoise(
                     prob=args.gaussian_noise.prob,
-                    # mean/std are in the [0, 1] intensity convention (see
-                    # RandGaussianNoiseArgs), but this runs before NormalizeIntensity
-                    # while the volume is still in [0, 255] -- scale up to match, same
-                    # as NormalizeIntensity's own subtrahend/divisor below.
-                    mean=args.gaussian_noise.mean * 255,
-                    std=args.gaussian_noise.std * 255,
+                    mean=args.gaussian_noise.mean,
+                    std=args.gaussian_noise.std,
                 )
             ]
 
-        transform += [
-            NormalizeIntensity(
-                subtrahend=[m * 255 for m in args.normalize.mean],
-                divisor=[s * 255 for s in args.normalize.std],
-                channel_wise=True,
-            )
-        ]
         transform += [ToTensor()]
 
         self.transform = Compose(transform)

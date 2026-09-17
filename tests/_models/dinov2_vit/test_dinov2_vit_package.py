@@ -26,6 +26,7 @@ from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer i
     vit_so400m,
 )
 
+from ... import helpers
 from ...helpers import DummyCustomModel
 
 
@@ -184,6 +185,65 @@ class TestDINOv2ViTPackage:
             expected.parameters(), actual.parameters()
         ):
             assert torch.equal(expected_param, actual_param)
+
+    @pytest.mark.parametrize(
+        ("model_name", "arch", "pretrained_name"),
+        [
+            ("vits14-reg4-2dinit", "vit_small", "vits14"),
+            ("vitb14-reg4-2dinit", "vit_base", "vitb14"),
+            ("vitl14-reg4-2dinit", "vit_large", "vitl14"),
+        ],
+    )
+    def test_2dinit_model_configs(
+        self, model_name: str, arch: str, pretrained_name: str
+    ) -> None:
+        """The `-2dinit` entries pair a 3D train config with a public 2D checkpoint.
+
+        `ffn_layer` and `block_chunks` must match what the public ViT-S/B/L checkpoints
+        use, otherwise every block parameter is named differently (`mlp.w12` instead of
+        `mlp.fc1`, `blocks.0.0` instead of `blocks.0`) and nothing loads at all. The
+        stock `vitb14_reg4` / `vitl14_reg4` train configs do *not* match.
+        """
+        config = load_and_merge_config(MODELS[model_name]["config"])
+        assert config.student.arch == arch
+        assert config.student.ffn_layer == "mlp"
+        assert config.student.block_chunks == 0
+        assert config.student.num_register_tokens == 4
+        # Train configs are 3D: patch size (H, W, D).
+        assert list(config.student.patch_size) == [14, 14, 4]
+        assert len(config.crops.global_crops_size) == 3
+        # Same checkpoint as the corresponding pretrained entry.
+        assert MODELS[model_name]["url"] == MODELS[pretrained_name]["url"]
+        assert MODELS[model_name]["url"].endswith("_reg4_pretrain.pth")
+        assert not MODELS[model_name]["list"]
+
+    def test_load_weights__2d_checkpoint(self, tmp_path: Path) -> None:
+        """A 2D DINOv2 checkpoint restores the blocks and leaves tokenization random."""
+        model = _vit_test_3d()
+        before = {key: value.clone() for key, value in model.state_dict().items()}
+        checkpoint = helpers.dinov2_2d_checkpoint(model)
+        torch.save(checkpoint, tmp_path / "dinov2_vits14_reg4_pretrain.pth")
+
+        dinov2_helper.load_weights(
+            model=model,
+            checkpoint_dir=tmp_path,
+            url=MODELS["vits14-reg4-2dinit"]["url"],
+        )
+
+        after = model.state_dict()
+        for key in [
+            "patch_embed.proj.weight",
+            "patch_embed.proj.bias",
+            "pos_embed",
+            "pos_embed_grid",
+            "cls_token",
+            "mask_token",
+        ]:
+            assert torch.equal(after[key], before[key])
+        block_keys = [key for key in after if key.startswith("blocks.")]
+        assert block_keys
+        for key in block_keys + ["norm.weight", "norm.bias"]:
+            assert torch.equal(after[key], checkpoint[key])
 
     def test_get_model_wrapper(self) -> None:
         model = _vit_test_3d()

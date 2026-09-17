@@ -39,6 +39,7 @@ from lightly_train._methods.simclr.simclr import SimCLR, SimCLRArgs
 from lightly_train._models import package_helpers
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
 from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
+    DinoVisionTransformer,
     _vit_test,
 )
 from lightly_train._models.dinov3.dinov3_convnext import DINOv3VConvNeXtModelWrapper
@@ -1072,6 +1073,35 @@ def dummy_dinov2_vit_model(
     kwargs.setdefault("img_size", (8, 8, 8))
     kwargs.setdefault("in_chans", 1)
     return DINOv2ViTModelWrapper(model=_vit_test(patch_size, **kwargs))
+
+
+def dinov2_2d_checkpoint(
+    model: DinoVisionTransformer, num_register_tokens: int | None = None
+) -> dict[str, Tensor]:
+    """A state_dict shaped like an original 2D DINOv2 checkpoint, for ``model``.
+
+    Same keys as the 3D model, but with a ``Conv2d`` patch embedding kernel, a 2D
+    (518px / patch 14 -> 37x37) positional embedding and no ``pos_embed_grid`` buffer.
+    Verified against the real ``dinov2_vits14_reg4_pretrain.pth`` key list.
+
+    Args:
+        num_register_tokens: Overrides the number of register tokens in the checkpoint.
+            ``0`` drops the key entirely, as in the ``-noreg`` checkpoints.
+    """
+    embed_dim = model.embed_dim
+    checkpoint = {
+        key: torch.randn_like(value)
+        for key, value in model.state_dict().items()
+        if key != "pos_embed_grid"
+    }
+    checkpoint["patch_embed.proj.weight"] = torch.randn(embed_dim, 3, 14, 14)
+    checkpoint["patch_embed.proj.bias"] = torch.randn(embed_dim)
+    checkpoint["pos_embed"] = torch.randn(1, 1 + 37 * 37, embed_dim)
+    if num_register_tokens == 0:
+        checkpoint.pop("register_tokens", None)
+    elif num_register_tokens is not None:
+        checkpoint["register_tokens"] = torch.randn(1, num_register_tokens, embed_dim)
+    return checkpoint
 
 
 # Small DINOv2 transform sizes for fast end-to-end tests with dinov2/_vittest14, whose

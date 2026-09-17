@@ -81,6 +81,9 @@ class BlockChunk(nn.ModuleList):
 
 
 class DinoVisionTransformer(nn.Module):
+    # Declared for type checkers; set by register_buffer in __init__.
+    pos_embed_grid: torch.Tensor
+
     def __init__(
         self,
         img_size=224,
@@ -161,6 +164,15 @@ class DinoVisionTransformer(nn.Module):
         self.pos_embed = nn.Parameter(
             torch.zeros(1, num_patches + self.num_tokens, embed_dim)
         )
+
+        # The (D, H, W) patch grid pos_embed was sized for.
+        # Used by _model_helpers.interpolate_pos_embed_hook.
+        self.register_buffer(
+            "pos_embed_grid",
+            torch.tensor(self.patch_embed.patches_resolution, dtype=torch.long),
+            persistent=True,
+        )
+
         self.precalculated_pos_embed = None
         assert num_register_tokens >= 0
         self.register_tokens = (

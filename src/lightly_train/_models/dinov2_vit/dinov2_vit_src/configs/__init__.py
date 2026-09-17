@@ -142,8 +142,29 @@ MODELS: dict[str, _Model] = {
         list=False,
     ),
     "vitg14-reg4-2dinit": _Model(
-        url="https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitg14_reg4_pretrain.pth",
+        url="https://dl.fbaipublicfiles.com/dinov2/dinov2_vitg14/dinov2_vitg14_reg4_pretrain.pth",
         config="train/vitg14_reg4_2dinit",
+        list=False,
+    ),
+    # Same as the -reg4-2dinit entries above, but paired with the public "-noreg" checkpoints
+    "vits14-noreg-2dinit": _Model(
+        url="https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_pretrain.pth",
+        config="train/vits14_2dinit",
+        list=False,
+    ),
+    "vitb14-noreg-2dinit": _Model(
+        url="https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth",
+        config="train/vitb14_2dinit",
+        list=False,
+    ),
+    "vitl14-noreg-2dinit": _Model(
+        url="https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth",
+        config="train/vitl14_2dinit",
+        list=False,
+    ),
+    "vitg14-noreg-2dinit": _Model(
+        url="https://dl.fbaipublicfiles.com/dinov2/dinov2_vitg14/dinov2_vitg14_pretrain.pth",
+        config="train/vitg14_2dinit",
         list=False,
     ),
     # Models with `-pretrained` suffix for backwards compatibility.

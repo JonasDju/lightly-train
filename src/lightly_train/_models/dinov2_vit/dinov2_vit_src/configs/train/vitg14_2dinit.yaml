@@ -1,6 +1,6 @@
-# Same as vitl14.yaml, but with ffn_layer forced to mlp and block_chunks to 0: the
-# public dinov2_vitl14_pretrain.pth checkpoint uses a plain MLP FFN and flat
-# (unchunked) blocks, not swiglufused / block_chunks=4 as vitl14.yaml claims.
+# Same as vitg14.yaml, but with the block_chunks forced to 0.
+# The public ViT-G checkpoint uses block_chunks = 0.
+# block_chunks > 0 would make the checkpoint unloadable
 dino:
   head_n_prototypes: 131072
   head_bottleneck_dim: 384
@@ -8,21 +8,18 @@ ibot:
   separate_head: true
   head_n_prototypes: 131072
 train:
-  batch_size_per_gpu: 32
+  batch_size_per_gpu: 12
   dataset_path: ImageNet22k
   centering: sinkhorn_knopp
 student:
-  arch: vit_large
+  arch: vit_giant2
   patch_size:
     - 14
     - 14
     - 4
   drop_path_rate: 0.4
-  ffn_layer: mlp
+  ffn_layer: swiglufused
   block_chunks: 0
-  num_register_tokens: 4
-  interpolate_antialias: true
-  interpolate_offset: 0.0
 teacher:
   momentum_teacher: 0.994
 optim:

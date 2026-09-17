@@ -20,9 +20,6 @@ student:
   drop_path_rate: 0.4
   ffn_layer: mlp
   block_chunks: 0
-  num_register_tokens: 4
-  interpolate_antialias: true
-  interpolate_offset: 0.0
 teacher:
   momentum_teacher: 0.994
 optim:

@@ -1,0 +1,13 @@
+# Same as vitb14.yaml, but with the FFN of the public 2D DINOv2
+# ViT-B/14 checkpoint, so that its transformer blocks can be loaded into this 3D
+# model (see MODELS["vitb14-2dinit"]). The public ViT-S/B/L checkpoints use plain MLP
+# FFNs. ffn_layer: swiglufused would make the checkpoint unloadable.
+student:
+  arch: vit_base
+  patch_size:
+    - 14
+    - 14
+    - 4
+  drop_path_rate: 0.2
+  ffn_layer: mlp
+  block_chunks: 0

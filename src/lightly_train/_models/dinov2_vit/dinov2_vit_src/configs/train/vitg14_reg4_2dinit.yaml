@@ -1,5 +1,5 @@
 # Same as vitg14_reg4.yaml, but with the block_chunks forced to 0.
-# The public ViT-S/B/L checkpoints use block_chunks = 0.
+# The public ViT-G checkpoint uses block_chunks = 0.
 # block_chunks > 0 would make the checkpoint unloadable
 dino:
   head_n_prototypes: 131072

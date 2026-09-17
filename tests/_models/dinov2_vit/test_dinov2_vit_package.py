@@ -187,34 +187,54 @@ class TestDINOv2ViTPackage:
             assert torch.equal(expected_param, actual_param)
 
     @pytest.mark.parametrize(
-        ("model_name", "arch", "pretrained_name"),
+        ("model_name", "arch", "ffn_layer", "num_register_tokens", "pretrained_name"),
         [
-            ("vits14-reg4-2dinit", "vit_small", "vits14"),
-            ("vitb14-reg4-2dinit", "vit_base", "vitb14"),
-            ("vitl14-reg4-2dinit", "vit_large", "vitl14"),
+            # -reg4-: matched against the public *_reg4_pretrain.pth checkpoints.
+            ("vits14-reg4-2dinit", "vit_small", "mlp", 4, "vits14"),
+            ("vitb14-reg4-2dinit", "vit_base", "mlp", 4, "vitb14"),
+            ("vitl14-reg4-2dinit", "vit_large", "mlp", 4, "vitl14"),
+            # ViT-g/14 really does use SwiGLU upstream, reg or noreg -- only
+            # block_chunks (4 -> 0) needed correcting for it, not ffn_layer.
+            ("vitg14-reg4-2dinit", "vit_giant2", "swiglufused", 4, "vitg14"),
+            # -noreg-: matched against the public *_pretrain.pth checkpoints (no
+            # register tokens).
+            ("vits14-noreg-2dinit", "vit_small", "mlp", 0, "vits14-noreg"),
+            ("vitb14-noreg-2dinit", "vit_base", "mlp", 0, "vitb14-noreg"),
+            ("vitl14-noreg-2dinit", "vit_large", "mlp", 0, "vitl14-noreg"),
+            ("vitg14-noreg-2dinit", "vit_giant2", "swiglufused", 0, "vitg14-noreg"),
         ],
     )
     def test_2dinit_model_configs(
-        self, model_name: str, arch: str, pretrained_name: str
+        self,
+        model_name: str,
+        arch: str,
+        ffn_layer: str,
+        num_register_tokens: int,
+        pretrained_name: str,
     ) -> None:
         """The `-2dinit` entries pair a 3D train config with a public 2D checkpoint.
 
-        `ffn_layer` and `block_chunks` must match what the public ViT-S/B/L checkpoints
-        use, otherwise every block parameter is named differently (`mlp.w12` instead of
-        `mlp.fc1`, `blocks.0.0` instead of `blocks.0`) and nothing loads at all. The
-        stock `vitb14_reg4` / `vitl14_reg4` train configs do *not* match.
+        `ffn_layer` and `block_chunks` must match what the corresponding public
+        checkpoint actually uses, otherwise every block parameter is named differently
+        (`mlp.w12` instead of `mlp.fc1`, `blocks.0.0` instead of `blocks.0`) and nothing
+        loads at all. The stock `vitb14_reg4` / `vitl14_reg4` / `vitb14` / `vitl14`
+        train configs do *not* match (verified against the real downloaded checkpoints,
+        not just against the `eval/*.yaml` configs); `vitg14*` needed no `ffn_layer`
+        correction since ViT-g/14 genuinely is SwiGLU upstream.
         """
         config = load_and_merge_config(MODELS[model_name]["config"])
         assert config.student.arch == arch
-        assert config.student.ffn_layer == "mlp"
+        assert config.student.ffn_layer == ffn_layer
         assert config.student.block_chunks == 0
-        assert config.student.num_register_tokens == 4
+        assert config.student.num_register_tokens == num_register_tokens
         # Train configs are 3D: patch size (H, W, D).
         assert list(config.student.patch_size) == [14, 14, 4]
         assert len(config.crops.global_crops_size) == 3
         # Same checkpoint as the corresponding pretrained entry.
         assert MODELS[model_name]["url"] == MODELS[pretrained_name]["url"]
-        assert MODELS[model_name]["url"].endswith("_reg4_pretrain.pth")
+        assert MODELS[model_name]["url"].startswith(
+            f"https://dl.fbaipublicfiles.com/dinov2/dinov2_{model_name.split('-')[0]}/"
+        )
         assert not MODELS[model_name]["list"]
 
     def test_load_weights__2d_checkpoint(self, tmp_path: Path) -> None:

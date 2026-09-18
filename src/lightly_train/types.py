@@ -25,7 +25,7 @@ PackageModel = Any
 
 # Types for the new transforms.
 ImageDtypes = Union[np.uint8, np.float32]
-NDArrayImage = NDArray[ImageDtypes]  # (H, W) or (H, W, C)
+NDArrayImage = NDArray[ImageDtypes]  # Changed to channel first (expected by MONAI): (C, H, W, D)
 NDArrayMask = NDArray[Union[np.uint8, np.uint16, np.int_]]  # (H, W) or (H, W, C)
 NDArrayBBoxes = NDArray[np.float64]  # (n_boxes, 4)
 NDArrayOBBoxes = NDArray[
@@ -71,8 +71,8 @@ ImageFilename = str
 
 class DatasetItem(TypedDict):
     filename: ImageFilename
-    views: list[Tensor]  # One tensor per view, of shape (3, H, W) each.
-    masks: NotRequired[list[Tensor]]  # One tensor per view, of shape (H, W) each
+    views: list[Tensor]  # One tensor per view, of shape (1, D, H, W) each.
+    masks: NotRequired[list[Tensor]]  # One tensor per view, of shape (D, H, W) each
     geometries: NotRequired[list[Tensor]]  # One tensor per view, of shape (8,) each.
 
 
@@ -80,10 +80,10 @@ class DatasetItem(TypedDict):
 # variable names of the DatasetItem by the dataloader collate function.
 class Batch(TypedDict):
     filename: list[ImageFilename]  # length==batch_size
-    views: list[Tensor]  # One tensor per view, of shape (batch_size, 3, H, W) each.
+    views: list[Tensor]  # One tensor per view, of shape (batch_size, 1, D, H, W) each.
     masks: NotRequired[
         list[Tensor]
-    ]  # One tensor per view, of shape (batch_size, H, W) each.
+    ]  # One tensor per view, of shape (batch_size, D, H, W) each.
     geometries: NotRequired[
         list[Tensor]
     ]  # One tensor per view, of shape (batch_size, 8) each.
@@ -240,5 +240,5 @@ def _try_convert_to_tuple(value: Any) -> Any:
 # The BeforeValidator is required because strict=False doesn't work with older Pydantic
 # versions when the tuple is used in a union, see: https://github.com/lightly-ai/lightly-train/pull/444
 ImageSizeTuple = Annotated[
-    Tuple[int, int], Field(strict=False), BeforeValidator(_try_convert_to_tuple)
+    Tuple[int, int, int], Field(strict=False), BeforeValidator(_try_convert_to_tuple)
 ]

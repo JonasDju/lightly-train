@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from torch import Tensor
-from torch.nn import Conv2d, Identity, Module
+from torch.nn import Identity, Module, Conv3d
 
 from lightly_train._models.model_wrapper import ModelWrapper
 
@@ -29,21 +29,18 @@ class EmbeddingModel(Module):
         space.
 
         Args:
-            model_wrapper:
+            wrapped_model:
                 A feature extractor that implements the `ModelWrapper` interface.
             embed_dim:
                 The dimensionality of the embedding space. If None, the output of the
                 feature extractor is used as the embedding.
-            pool:
-                Whether to apply the pooling layer of the feature extractor. If False,
-                the features are embedded and returned without pooling.
         """
         super().__init__()
         self.wrapped_model = wrapped_model
         self.embed_head = (
             Identity()
             if embed_dim is None
-            else Conv2d(
+            else Conv3d(
                 in_channels=self.wrapped_model.feature_dim(),
                 out_channels=embed_dim,
                 kernel_size=1,
@@ -67,9 +64,12 @@ class EmbeddingModel(Module):
 
         Args:
             x: Input images with shape (B, C, H_in, W_in).
+            pool:
+                Whether to apply the pooling layer of the feature extractor. If False,
+                the features are embedded and returned without pooling.
 
         Returns:
-            Embeddings with shape (B, embed_dim, H_out, W_out). H_out and W_out depend
+            Embeddings with shape (B, embed_dim, D_out, H_out, W_out). D_out, H_out and W_out depend
             on the pooling layer of the feature extractor and are 1 in most cases.
         """
         features_out = self.wrapped_model.forward_features(x)

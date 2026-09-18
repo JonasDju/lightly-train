@@ -30,7 +30,7 @@ class DINOv2LocalViewRandomResizeArgs(DINOLocalViewRandomResizeArgs):
 
 class DINOv2ViTLocalViewTransformArgs(DINOLocalViewTransformArgs):
     num_views: int = 8
-    view_size: ImageSizeTuple = (98, 98)
+    view_size: ImageSizeTuple = (98, 98, 8)
     random_resize: DINOv2LocalViewRandomResizeArgs | None = Field(
         default_factory=DINOv2LocalViewRandomResizeArgs
     )

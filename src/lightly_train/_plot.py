@@ -15,6 +15,8 @@ from lightly_train.types import Batch
 
 def plot_example_augmentations(train_batch: Batch, max_examples: int = 10) -> PILImage:
     views = train_batch["views"]
+    # 3D views have shape (B, C, D, H, W). Plot the center depth slice of each volume.
+    views = [view[:, :, view.shape[2] // 2] if view.ndim == 5 else view for view in views]
     n_views = len(views)
     batch1 = views[0]
     n_examples = min(max_examples, len(batch1))

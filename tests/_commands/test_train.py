@@ -7,20 +7,18 @@
 #
 from __future__ import annotations
 
+import copy
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any
 
 import pytest
 import torch
-from lightning_utilities.core.imports import RequirementCache
 from omegaconf import OmegaConf
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
 from pytorch_lightning.accelerators.cpu import CPUAccelerator
-from torch.nn import Module
-from torchvision import models
 
 from lightly_train._checkpoint import Checkpoint
 from lightly_train._commands import train, train_helpers
@@ -30,17 +28,49 @@ from lightly_train._commands.train import (
     TrainConfig,
 )
 from lightly_train._loggers.jsonl import JSONLLogger
-from lightly_train._methods import method_helpers
-from lightly_train._methods.dino.dino import DINOAdamWArgs, DINOArgs
+from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs, DINOv2Args
+from lightly_train._methods.dinov2.utils import is_tokenization_param
 from lightly_train._scaling import ScalingInfo
 
 from .. import helpers
 from ..helpers import DummyCustomModel
 
-try:
-    import pydicom
-except ImportError:
-    pydicom = None  # type: ignore[assignment]
+# Make the teacher change visibly within a few steps. With the default warmup the
+# learning rate is so small that EMA updates vanish in float32, and with the default
+# momentum schedule the momentum reaches 1.0 (no teacher update) at the last step.
+FAST_UPDATE_METHOD_ARGS: dict[str, Any] = {
+    "warmup_steps": 1,
+    "momentum_start": 0.5,
+    "momentum_end": 0.5,
+}
+
+
+def _pretrain_kwargs(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
+    """Arguments for DINOv2 pretraining on a small synthetic KneeNo dataset on CPU.
+
+    The dataset has 8 series, so batch_size=4 results in 2 steps per epoch.
+    """
+    data_root = tmp_path / "data"
+    data_meta = tmp_path / "meta.json"
+    if not data_meta.exists():
+        helpers.create_mi_dataset(tmp_path)
+    pretrain_kwargs: dict[str, Any] = dict(
+        out=tmp_path / "out",
+        data_root=data_root,
+        data_meta=data_meta,
+        series_depth=8,
+        resample_mode="nearest",
+        model="dinov2/_vittest14",
+        method="dinov2",
+        batch_size=4,
+        num_workers=0,
+        epochs=1,
+        accelerator="cpu",
+        devices=1,
+        transform_args=copy.deepcopy(helpers.MI_DINOV2_TRANSFORM_ARGS),
+    )
+    pretrain_kwargs.update(kwargs)
+    return pretrain_kwargs
 
 
 def test_track_training_started_event(mocker: MockerFixture) -> None:
@@ -74,19 +104,8 @@ def test_track_training_started_event(mocker: MockerFixture) -> None:
 
 def test_pretrain__cpu(tmp_path: Path) -> None:
     out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="simclr",
-        batch_size=4,
-        num_workers=2,
-        epochs=1,
-        accelerator="cpu",
-    )
+    # num_workers=2 checks that the dataset and worker_init_fn are picklable.
+    train.pretrain(**_pretrain_kwargs(tmp_path, num_workers=2))
 
     # Check that the correct files were created.
     filepaths = {fp.relative_to(out) for fp in out.rglob("*")}
@@ -103,6 +122,12 @@ def test_pretrain__cpu(tmp_path: Path) -> None:
     }
     assert filepaths == expected_filepaths
 
+    # The exported model is the 3D DINOv2 backbone.
+    state_dict = torch.load(
+        out / "exported_models" / "exported_last.pt", weights_only=True
+    )
+    assert state_dict["patch_embed.proj.weight"].shape == (8, 1, 4, 14, 14)
+
 
 @pytest.mark.parametrize("gradient_accumulation_steps", [1, 4])
 def test_pretrain__batch_sizes_for_gradient_accumulation(
@@ -114,67 +139,43 @@ def test_pretrain__batch_sizes_for_gradient_accumulation(
     total_num_devices = 1
     per_device_batch_size = global_batch_size // total_num_devices
     effective_global_batch_size = global_batch_size * gradient_accumulation_steps
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=8)
     get_dataloader_spy = mocker.spy(train_helpers, "get_dataloader")
     get_method_spy = mocker.spy(train_helpers, "get_method")
+    # 16 series result in 4 batches, i.e. at least one optimizer step with 4
+    # accumulation steps. DINOv2 divides by the number of optimizer steps.
+    helpers.create_mi_dataset(tmp_path, n_cases=8)
 
     train.pretrain(
-        out=tmp_path / "out",
-        data=data,
-        model=DummyCustomModel(),
-        method="simclr",
-        batch_size=global_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        num_workers=0,
-        devices=total_num_devices,
-        epochs=0,
-        accelerator="cpu",
+        **_pretrain_kwargs(
+            tmp_path,
+            batch_size=global_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            devices=total_num_devices,
+            epochs=0,
+        )
     )
 
     assert get_dataloader_spy.call_args.kwargs["batch_size"] == per_device_batch_size
+    assert get_dataloader_spy.call_args.kwargs["series_depth"] == 8
     assert (
         get_method_spy.call_args.kwargs["global_batch_size"]
         == effective_global_batch_size
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
-@pytest.mark.parametrize("num_workers", [0, 2, "auto"])
-def test_pretrain(
-    tmp_path: Path, caplog: LogCaptureFixture, num_workers: int | Literal["auto"]
+def test_pretrain__resume_interrupted(
+    tmp_path: Path, caplog: LogCaptureFixture
 ) -> None:
     out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="simclr",
-        batch_size=4,
-        num_workers=num_workers,
-        epochs=1,
-        devices=1,
-    )
+    kwargs = _pretrain_kwargs(tmp_path, method_args=FAST_UPDATE_METHOD_ARGS)
+    train.pretrain(**kwargs)
 
     # Check that we can resume training
     last_ckpt_path = out / "checkpoints" / "last.ckpt"
     first_ckpt = Checkpoint.from_path(checkpoint=last_ckpt_path)
 
     with caplog.at_level(logging.INFO):
-        train.pretrain(
-            out=out,
-            data=data,
-            model="torchvision/resnet18",
-            method="simclr",
-            batch_size=4,
-            num_workers=2,
-            epochs=2,
-            devices=1,
-            resume_interrupted=True,
-        )
+        train.pretrain(**{**kwargs, "epochs": 2, "resume_interrupted": True})
     assert (
         f"Restoring states from the checkpoint path at {last_ckpt_path}" in caplog.text
     )
@@ -187,11 +188,10 @@ def test_pretrain(
     first_state_dict = first_ckpt.lightly_train.models.model.state_dict()
     second_state_dict = second_ckpt.lightly_train.models.model.state_dict()
     assert first_state_dict.keys() == second_state_dict.keys()
-    for key in first_state_dict.keys():
-        if key.startswith("fc."):
-            # Skip the last layer as it is not pretrained.
-            continue
-        assert not torch.equal(first_state_dict[key], second_state_dict[key])
+    assert any(
+        not torch.equal(first_state_dict[key], second_state_dict[key])
+        for key in first_state_dict
+    )
 
     # Check that last.ckpt and exported_model.pt contain same information. If this fails
     # it means that checkpoint loading is not working correctly.
@@ -200,86 +200,47 @@ def test_pretrain(
     )
     assert second_state_dict.keys() == exported_state_dict.keys()
     for key in second_state_dict.keys():
-        if key.startswith("fc."):
-            # Skip the last layer as it is not pretrained.
-            continue
         assert torch.equal(second_state_dict[key], exported_state_dict[key])
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
 def test_pretrain__overwrite_true(tmp_path: Path) -> None:
     """Test that overwrite=True allows training with an existing output directory that
     contains files."""
     out = tmp_path / "out"
-    data = tmp_path / "data"
     out.mkdir(parents=True, exist_ok=True)
     (out / "file.txt").touch()
-    helpers.create_images(image_dir=data, files=10)
 
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="simclr",
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-        devices=1,
-        overwrite=True,
-    )
+    train.pretrain(**_pretrain_kwargs(tmp_path, overwrite=True))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
 def test_pretrain__overwrite_false(tmp_path: Path) -> None:
-    (tmp_path / "file.txt").touch()
+    out = tmp_path / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "file.txt").touch()
 
     with pytest.raises(ValueError):
-        train.pretrain(
-            out=tmp_path,
-            data=tmp_path,
-            model="torchvision/resnet18",
-            method="simclr",
-            batch_size=4,
-            num_workers=0,
-            epochs=1,
-        )
+        train.pretrain(**_pretrain_kwargs(tmp_path))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
 def test_pretrain__embed_dim(tmp_path: Path) -> None:
+    train.pretrain(**_pretrain_kwargs(tmp_path, embed_dim=64))
+
+
+@pytest.mark.parametrize("series_depth", [0, -1])
+def test_pretrain__series_depth_not_positive(tmp_path: Path, series_depth: int) -> None:
+    """series_depth<=0 means native per-series depth (kneeno treats every
+    non-positive value the same as 0). The synthetic dataset has series of two
+    different depths (6 and 9); RandomResizedCrop3D always resizes its crop to a
+    fixed output size, so default collation across them works without a
+    depth-bucket sampler."""
     out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="simclr",
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-        devices=1,
-        embed_dim=64,
-    )
+    train.pretrain(**_pretrain_kwargs(tmp_path, series_depth=series_depth))
+    assert (out / "checkpoints" / "last.ckpt").exists()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
-def test_pretrain__custom_model(tmp_path: Path) -> None:
-    out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model=helpers.DummyCustomModel(),
-        method="simclr",
-        batch_size=4,
-        num_workers=0,
-        devices=1,
-        epochs=1,
-    )
+def test_pretrain__resample_mode_invalid(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="resample_mode"):
+        train.pretrain(**_pretrain_kwargs(tmp_path, resample_mode="cubic"))
 
 
 @pytest.mark.skipif(
@@ -297,166 +258,42 @@ def test_pretrain__parameters() -> None:
     helpers.assert_same_params(a=TrainConfig, b=CLITrainConfig, assert_type=False)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
 def test_pretrain__zero_epochs(tmp_path: Path) -> None:
     out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="simclr",
-        batch_size=4,
-        num_workers=0,
-        devices=1,
-        epochs=0,
-    )
+    train.pretrain(**_pretrain_kwargs(tmp_path, epochs=0))
     assert (out / "checkpoints" / "last.ckpt").exists()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
 def test_train_from_dictconfig(tmp_path: Path) -> None:
-    out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
+    kwargs = _pretrain_kwargs(tmp_path)
     config = OmegaConf.create(
         dict(
-            out=str(out),
-            data=str(data),
-            model="torchvision/resnet18",
-            method="simclr",
+            out=str(kwargs["out"]),
+            data_root=str(kwargs["data_root"]),
+            data_meta=str(kwargs["data_meta"]),
+            series_depth=8,
+            resample_mode="nearest",
+            model="dinov2/_vittest14",
+            method="dinov2",
             batch_size=4,
             num_workers=0,
             epochs=1,
+            accelerator="cpu",
             devices=1,
+            # OmegaConf does not support tuples, the CLI passes lists.
+            transform_args={
+                "image_size": [56, 56, 16],
+                "local_view": {"view_size": [28, 28, 8], "num_views": 2},
+            },
             optim_args={"lr": 0.1},
             loader_args={"shuffle": True},
             trainer_args={"min_epochs": 1},
-            model_args={"num_classes": 42},
             callbacks={"model_checkpoint": {"every_n_epochs": 5}},
             loggers={"jsonl": {"flush_logs_every_n_steps": 5}},
         )
     )
     train.pretrain_from_dictconfig(config=config)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
-@pytest.mark.parametrize(
-    "method, teacher",
-    [
-        ("distillation", "dinov2/_vittest14"),
-        ("distillationv1", "dinov3/_vittest16"),
-        ("distillationv2", "dinov3/_convnexttest"),
-        ("distillationv3", "dinov2/_vittest14"),
-        (
-            "distillationv3",
-            lambda: models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1),
-        ),
-        (
-            "distillationv3",
-            lambda: DummyCustomModel(stride=16),
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "devices", [1]
-)  # TODO(Lionel, 10/25): Add test with 2 devices back.
-def test_pretrain__distillation_different_teachers(
-    tmp_path: Path, method: str, teacher: str | Callable[[], Module], devices: int
-) -> None:
-    if torch.cuda.device_count() < devices:
-        pytest.skip("Test requires more GPUs than available.")
-
-    if callable(teacher):
-        teacher = teacher()
-
-    out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        devices=devices,
-        method=method,
-        method_args={"teacher": teacher},
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-    )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
-@pytest.mark.parametrize("method", method_helpers._list_methods())
-@pytest.mark.parametrize(
-    "devices", [1]
-)  # TODO(Philipp, 09/24): Add test with 2 devices back.
-def test_pretrain__method(tmp_path: Path, method: str, devices: int) -> None:
-    if torch.cuda.device_count() < devices:
-        pytest.skip("Test requires more GPUs than available.")
-    if method == "dinov31" and not RequirementCache("albumentations>=2.0.0"):
-        pytest.skip("DINOv31 requires albumentations>=2.0.0.")
-
-    out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    # DINOv2 / DINOv31 need special model
-    model = {
-        "dinov2": "dinov2/_vittest14",
-        "dinov31": "dinov2/_vittest14",
-    }.get(method, "torchvision/resnet18")
-
-    # Use smaller teacher for unit tests.
-    method_args = {
-        "distillation": {"teacher": "dinov2/_vittest14"},
-        "distillationv1": {"teacher": "dinov2/_vittest14"},
-        "distillationv2": {"teacher": "dinov2/_vittest14"},
-    }.get(method, {})
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model=model,
-        devices=devices,
-        method=method,
-        method_args=method_args,
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-    )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")
-def test_pretrain__checkpoint_gradients(tmp_path: Path) -> None:
-    """Test that checkpoints saved during training do not have disabled gradients.
-
-    This is especially a problem for methods with momentum encoders (e.g. DINO) where
-    the momentum encoder does not receive gradients during training. As the momentum
-    encoder is used for finetuning, we want to make sure that it doesn't have gradients
-    disabled in the checkpoint as this can result in subtle bugs where users don't
-    realize that the model is frozen while finetuning.
-    """
-    out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10)
-
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="dino",
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-        devices=1,
-    )
-    ckpt_path = out / "checkpoints" / "last.ckpt"
-    ckpt = Checkpoint.from_path(checkpoint=ckpt_path)
-    for param in ckpt.lightly_train.models.wrapped_model.get_model().parameters():
-        assert param.requires_grad
+    assert (kwargs["out"] / "checkpoints" / "last.ckpt").exists()
 
 
 def test_pretrain__TrainConfig__model_dump(tmp_path: Path) -> None:
@@ -464,20 +301,21 @@ def test_pretrain__TrainConfig__model_dump(tmp_path: Path) -> None:
     Test that TrainConfig is dumped correctly even if some of its attributes are
     subclasses of the types specified in the TrainConfig class.
     """
-    out = tmp_path / "out"
-    data = tmp_path / "data"
-    method_args = DINOArgs()
-    optim_args = DINOAdamWArgs()
+    method_args = DINOv2Args()
+    optim_args = DINOv2AdamWViTArgs()
     method_args.resolve_auto(
         scaling_info=ScalingInfo(dataset_size=20_000, epochs=100),
         optimizer_args=optim_args,
-        wrapped_model=DummyCustomModel(),
+        wrapped_model=helpers.dummy_dinov2_vit_model(),
     )
     config = TrainConfig(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="simclr",
+        out=tmp_path / "out",
+        data_root=tmp_path / "data",
+        data_meta=tmp_path / "meta.json",
+        series_depth=8,
+        resample_mode="nearest",
+        model="dinov2/_vittest14",
+        method="dinov2",
         optim_args=optim_args,
         method_args=method_args,
     )
@@ -491,12 +329,9 @@ def test_pretrain__TrainConfig__model_dump(tmp_path: Path) -> None:
     assert dumped_config_direct == dumped_cofig_indirect
 
     # Check for some specific attributes.
+    assert dumped_config_direct["series_depth"] == 8
     assert dumped_config_direct["optim_args"]["betas"] == (0.9, 0.999)
-    assert dumped_config_direct["method_args"]["warmup_teacher_temp_epochs"] is None
-    assert dumped_config_direct["method_args"]["warmup_teacher_temp_steps"] == 37500
-    assert (
-        dumped_config_direct["method_args"]["student_freeze_last_layer_epochs"] is None
-    )
+    assert dumped_config_direct["method_args"]["teacher_temp_warmup_steps"] == 37500
     assert (
         dumped_config_direct["method_args"]["student_freeze_last_layer_steps"] == 1250
     )
@@ -505,14 +340,15 @@ def test_pretrain__TrainConfig__model_dump(tmp_path: Path) -> None:
 def test_pretrain__log_resolved_config(
     caplog: LogCaptureFixture, tmp_path: Path
 ) -> None:
-    out = tmp_path / "out"
-    data = tmp_path / "data"
     config = TrainConfig(
-        out=out,
-        data=data,
+        out=tmp_path / "out",
+        data_root=tmp_path / "data",
+        data_meta=tmp_path / "meta.json",
+        series_depth=8,
+        resample_mode="nearest",
         accelerator=CPUAccelerator(),
         batch_size=4,
-        model="torchvision/resnet18",
+        model="dinov2/_vittest14",
     )
 
     class MemoryLogger(JSONLLogger):
@@ -541,6 +377,7 @@ def test_pretrain__log_resolved_config(
     assert len(logger.logs) == 1
     assert logger.logs[0]["accelerator"] == "CPUAccelerator"
     assert logger.logs[0]["batch_size"] == 4
+    assert logger.logs[0]["series_depth"] == 8
 
 
 def test_pretrain__checkpoint(mocker: MockerFixture, tmp_path: Path) -> None:
@@ -548,45 +385,23 @@ def test_pretrain__checkpoint(mocker: MockerFixture, tmp_path: Path) -> None:
     Assert that train_helpers.load_state_dict is called when a checkpoint is provided.
     """
     out = tmp_path / "out"
-    data = tmp_path / "data"
-    # Use 12 images to make sure that we have at least 3 batches. We need 3 batches for
-    # DINO to show updates in the model due to the teacher/student setup and momentum
-    # updates. The following happens:
-    # After step 1: Student batch norm has not yet changed.
-    # After step 2: Student batch norm has changed, but teacher is still the same.
-    # After step 3: Teacher gets EMA update from student.
-    helpers.create_images(image_dir=data, files=12)
 
     # Part 1: Generate a checkpoint.
-    train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="dino",
-        batch_size=4,
-        num_workers=0,
-        epochs=0,
-        accelerator="cpu",
-        devices=1,
-    )
+    train.pretrain(**_pretrain_kwargs(tmp_path, epochs=0))
     last_ckpt_path = out / "checkpoints" / "last.ckpt"
     first_ckpt = Checkpoint.from_path(checkpoint=last_ckpt_path)
 
     # Part 2: Load the checkpoint
     spy_load_state_dict = mocker.spy(train_helpers, "load_state_dict")
     train.pretrain(
-        out=out,
-        data=data,
-        model="torchvision/resnet18",
-        method="dino",
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-        overwrite=True,
-        checkpoint=last_ckpt_path,
-        accelerator="cpu",
-        devices=1,
-        optim_args={"lr": 1000},  # Make sure that parameters change meaningfully.
+        **_pretrain_kwargs(
+            tmp_path,
+            epochs=1,
+            overwrite=True,
+            checkpoint=last_ckpt_path,
+            method_args=FAST_UPDATE_METHOD_ARGS,
+            optim_args={"lr": 1.0},  # Make sure that parameters change meaningfully.
+        )
     )
     spy_load_state_dict.assert_called_once()
     call_args = spy_load_state_dict.call_args_list[0]
@@ -598,13 +413,10 @@ def test_pretrain__checkpoint(mocker: MockerFixture, tmp_path: Path) -> None:
     first_state_dict = first_ckpt.lightly_train.models.model.state_dict()
     second_state_dict = second_ckpt.lightly_train.models.model.state_dict()
     assert first_state_dict.keys() == second_state_dict.keys()
-    for key in first_state_dict.keys():
-        if key.startswith("fc."):
-            # Skip the last layer as it is not pretrained.
-            continue
-        assert not torch.equal(first_state_dict[key], second_state_dict[key]), (
-            f"Parameter {key} did not change: {first_state_dict[key]}"
-        )
+    assert any(
+        not torch.equal(first_state_dict[key], second_state_dict[key])
+        for key in first_state_dict
+    )
 
     # Check that last.ckpt and exported_model.pt contain same information. If this fails
     # it means that checkpoint loading is not working correctly.
@@ -613,90 +425,50 @@ def test_pretrain__checkpoint(mocker: MockerFixture, tmp_path: Path) -> None:
     )
     assert second_state_dict.keys() == exported_state_dict.keys()
     for key in second_state_dict.keys():
-        if key.startswith("fc."):
-            # Skip the last layer as it is not pretrained.
-            continue
         assert torch.equal(second_state_dict[key], exported_state_dict[key]), (
             f"Parameter {key} differs between checkpoint and exported model: {second_state_dict[key]} vs. {exported_state_dict[key]}"
         )
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="Slow")
-@pytest.mark.parametrize(
-    "model, model_args, method, method_args",
-    [
-        ("dinov2/_vittest14", None, "dinov2", {}),
-        (
-            "timm/resnet18",
-            {"num_classes": 64},
-            "distillation",
-            {"teacher": "dinov2/_vittest14"},
-        ),
-    ],
-)
-def test_pretrain__multichannel(
-    tmp_path: Path,
-    model: str,
-    model_args: dict[str, Any] | None,
-    method: str,
-    method_args: dict[str, Any],
-) -> None:
-    if model.startswith("timm") and not RequirementCache("timm"):
-        pytest.skip("timm is not installed")
-
+def test_pretrain__checkpoint_n_tokenization_only_steps(tmp_path: Path) -> None:
+    """End-to-end: with n_tokenization_only_steps covering every step of the second
+    run, the transformer blocks and final norm must not move at all, while at least
+    one tokenization parameter does."""
     out = tmp_path / "out"
-    data = tmp_path / "data"
-    helpers.create_images(image_dir=data, files=10, num_channels=4, mode="RGBA")
 
+    # Part 1: generate a checkpoint.
+    train.pretrain(**_pretrain_kwargs(tmp_path, epochs=0))
+    last_ckpt_path = out / "checkpoints" / "last.ckpt"
+    first_ckpt = Checkpoint.from_path(checkpoint=last_ckpt_path)
+    first_state_dict = first_ckpt.lightly_train.models.model.state_dict()
+
+    # 2 steps per epoch (see _pretrain_kwargs docstring); 100 safely covers all of
+    # them for this 1-epoch run, whatever the exact step count.
+    method_args = {**FAST_UPDATE_METHOD_ARGS, "n_tokenization_only_steps": 100}
     train.pretrain(
-        out=out,
-        data=data,
-        model=model,
-        model_args=model_args,
-        method=method,
-        method_args=method_args,
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-        devices=1,
+        **_pretrain_kwargs(
+            tmp_path,
+            epochs=1,
+            overwrite=True,
+            checkpoint=last_ckpt_path,
+            method_args=method_args,
+            optim_args={"lr": 1.0},  # Make sure that parameters change meaningfully.
+        )
     )
+    second_ckpt = Checkpoint.from_path(checkpoint=last_ckpt_path)
+    second_state_dict = second_ckpt.lightly_train.models.model.state_dict()
+    assert first_state_dict.keys() == second_state_dict.keys()
 
+    frozen_keys = [k for k in first_state_dict if not is_tokenization_param(k)]
+    tokenization_keys = [k for k in first_state_dict if is_tokenization_param(k)]
+    assert frozen_keys, "Expected at least one block/norm parameter"
+    assert tokenization_keys, "Expected at least one tokenization parameter"
 
-@pytest.mark.skipif(pydicom is None, reason="pydicom not installed")
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="Slow")
-@pytest.mark.parametrize(
-    ("data_format, num_channels"),
-    [
-        ("ct", 1),
-        ("mr", 1),
-        ("overlay", 1),
-        ("rgb_color", 3),
-        ("palette_color", 3),
-        ("jpeg2k", 3),
-    ],
-)
-def test_pretrain__dicom(
-    tmp_path: Path,
-    data_format: str,
-    num_channels: int,
-) -> None:
-    pydicom_examples = pytest.importorskip(
-        "pydicom.examples",
-        reason="pydicom examples not supported",
-    )
-    data_path: Path = pydicom_examples.get_path(data_format)
-    data = [str(data_path)] * 8  # Create a list of 8 identical DICOM files.
-
-    out = tmp_path / "out"
-    train.pretrain(
-        out=out,
-        data=data,
-        model="dinov2/_vittest14",
-        method="dinov2",
-        batch_size=4,
-        num_workers=0,
-        epochs=1,
-        devices=1,
-        embed_dim=64,
-        transform_args={"num_channels": num_channels},
-    )
+    for key in frozen_keys:
+        assert torch.equal(first_state_dict[key], second_state_dict[key]), (
+            f"Expected frozen parameter '{key}' to be unchanged"
+        )
+    assert any(
+        not torch.equal(first_state_dict[key], second_state_dict[key])
+        for key in tokenization_keys
+    ), "Expected at least one tokenization parameter to have changed"

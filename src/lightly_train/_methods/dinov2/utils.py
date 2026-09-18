@@ -41,26 +41,29 @@ from lightly_train._optim.trainable_modules import TrainableModules
 class MaskingGenerator:
     def __init__(
         self,
-        input_size: int | tuple[int, int],
+        input_size: int | tuple[int, int, int],
         max_num_patches: int,
-        min_num_patches: int = 4,
+        min_num_patches: int = 8,
         min_aspect: float = 0.3,
         max_aspect: float | None = None,
     ) -> None:
         if not isinstance(input_size, tuple):
-            input_size = (input_size,) * 2
-        self.height, self.width = input_size
+            input_size = (input_size,) * 3
+        self.depth, self.height, self.width = input_size
 
-        self.num_patches = self.height * self.width
+        self.num_patches = self.depth * self.height * self.width
 
         self.min_num_patches = min_num_patches
         self.max_num_patches = max_num_patches
 
         max_aspect = max_aspect or 1 / min_aspect
+        # reused independently for the (height/depth) and (width/depth) ratios. The
+        # sampled ratios are relative to the aspect ratios of the patch grid itself.
         self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
 
     def __repr__(self) -> str:
-        repr_str = "Generator(%d, %d -> [%d ~ %d], max = %.3f ~ %.3f)" % (
+        repr_str = "Generator(%d, %d, %d -> [%d ~ %d], max = %.3f ~ %.3f)" % (
+            self.depth,
             self.height,
             self.width,
             self.min_num_patches,
@@ -70,31 +73,46 @@ class MaskingGenerator:
         )
         return repr_str
 
-    def get_shape(self) -> tuple[int, int]:
-        return self.height, self.width
+    def get_shape(self) -> tuple[int, int, int]:
+        return self.depth, self.height, self.width
 
     def _mask(self, mask: np.ndarray, max_mask_patches: int) -> int:  # type: ignore[type-arg]
         delta = 0
         for _ in range(10):
-            target_area = random.uniform(self.min_num_patches, max_mask_patches)
-            aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
-            h = int(round(math.sqrt(target_area * aspect_ratio)))
-            w = int(round(math.sqrt(target_area / aspect_ratio)))
-            if w < self.width and h < self.height:
+            target_volume = random.uniform(self.min_num_patches, max_mask_patches)
+
+            # Sample two aspect ratios (height/depth and (width/depth)
+            # independently such that d * h * w == target_volume. The ratios are
+            # anchored to the grid's own aspect ratios, otherwise cuboids rarely fit
+            # into anisotropic grids (e.g. 4x16x16)
+            aspect_ratio_hd = math.exp(random.uniform(*self.log_aspect_ratio)) * (
+                self.height / self.depth
+            )
+            aspect_ratio_wd = math.exp(random.uniform(*self.log_aspect_ratio)) * (
+                self.width / self.depth
+            )
+
+            d = int(round((target_volume / (aspect_ratio_hd * aspect_ratio_wd)) ** (1 / 3)))
+            h = int(round(d * aspect_ratio_hd))
+            w = int(round(d * aspect_ratio_wd))
+
+            if 0 < d < self.depth and 0 < h < self.height and 0 < w < self.width:
+                front = random.randint(0, self.depth - d)
                 top = random.randint(0, self.height - h)
                 left = random.randint(0, self.width - w)
 
-                num_masked = mask[top : top + h, left : left + w].sum()
-                # Overlap
-                if 0 < h * w - num_masked <= max_mask_patches:
-                    for i in range(top, top + h):
-                        for j in range(left, left + w):
-                            if mask[i, j] == 0:
-                                mask[i, j] = 1
-                                delta += 1
+                block = mask[front: front + d, top: top + h, left: left + w]
+                num_masked = int(block.sum())
+                block_size = d * h * w
 
-                if delta > 0:
-                    break
+                # Only accept the cuboid if the number of newly
+                # masked voxels is at least one and stays within budget.
+                if 0 < block_size - num_masked <= max_mask_patches:
+                    mask[front: front + d, top: top + h, left: left + w] = True
+                    delta = block_size - num_masked
+
+            if delta > 0:
+                break
         return delta
 
     def __call__(self, num_masking_patches: int = 0) -> np.ndarray:  # type: ignore[type-arg]
@@ -137,7 +155,7 @@ def create_collated_masks(
 
     random.shuffle(masks_list)
 
-    collated_masks = torch.stack(masks_list).flatten(1)  # [G*B, H/p*W/p]
+    collated_masks = torch.stack(masks_list).flatten(1)  # [G*B, patD*patH*patW]
     mask_indices_list = collated_masks.flatten().nonzero().flatten()  # [M,]
     masks_weight = (
         (1 / collated_masks.sum(-1).clamp(min=1.0))
@@ -150,6 +168,23 @@ def create_collated_masks(
         "mask_indices_list": mask_indices_list,
         "masks_weight": masks_weight,
     }
+
+
+def is_tokenization_param(name: str) -> bool:
+    """Whether a backbone parameter turns a volume into tokens.
+
+    Exactly the set that ``_model_helpers.interpolate_pos_embed_hook`` leaves randomly
+    initialized when loading a 2D checkpoint into the 3D model (see
+    ``_model_helpers._TOKENIZATION_KEYS``, plus ``patch_embed`` itself), which is what
+    ``DINOv2Args.n_tokenization_only_steps`` exists to train.
+    """
+    return (
+        "pos_embed" in name
+        or "patch_embed" in name
+        or "mask_token" in name
+        or "cls_token" in name
+        or "register_tokens" in name
+    )
 
 
 def get_vit_lr_decay_rate(
@@ -170,13 +205,7 @@ def get_vit_lr_decay_rate(
     """
 
     layer_id = num_layers + 1
-    if (
-        "pos_embed" in name
-        or "patch_embed" in name
-        or "mask_token" in name
-        or "cls_token" in name
-        or "register_tokens" in name
-    ):
+    if is_tokenization_param(name):
         layer_id = 0
     elif ".blocks." in name and ".residual." not in name:
         layer_id = int(name[name.find(".blocks.") :].split(".")[2]) + 1
@@ -261,10 +290,16 @@ def get_fused_param_groups(param_groups: list[dict[str, Any]]) -> list[dict[str,
     fused = {}
     for group in param_groups:
         ids = {k: v for k, v in group.items() if k not in ["params", "name"]}
-        # Add head and last_layer because they are treated differently in
-        # DINOv2.on_before_optimizer_step
+        # Add head, last_layer and tokenization because they are treated differently
+        # in DINOv2.on_before_optimizer_step. Without the "tokenization" key, a group
+        # of tokenization parameters (pos_embed, cls_token, ...) can fuse with block
+        # weight groups that happen to share the same lr/weight_decay (e.g. whenever
+        # layerwise_decay == 1.0, since every layer then gets the same lr) and the
+        # tokenization-only freeze in on_before_optimizer_step would then either
+        # freeze the tokenization too, or fail to freeze the blocks it was fused with.
         ids["head"] = "head" in group["name"]
         ids["last_layer"] = "last_layer" in group["name"]
+        ids["tokenization"] = is_tokenization_param(group["name"])
         group_id = "_".join(f"{k}={v}" for k, v in ids.items())
         if group_id not in fused:
             fused[group_id] = group

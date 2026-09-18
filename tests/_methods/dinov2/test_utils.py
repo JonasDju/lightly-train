@@ -7,8 +7,9 @@
 #
 from __future__ import annotations
 
+import math
+import random
 import re
-from typing import Union
 
 import numpy as np
 import pytest
@@ -16,28 +17,49 @@ import torch
 
 from lightly_train._methods.dinov2 import utils
 from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs
-from lightly_train._methods.dinov2.utils import MaskingGenerator, create_collated_masks
+from lightly_train._methods.dinov2.utils import (
+    MaskingGenerator,
+    create_collated_masks,
+    is_tokenization_param,
+)
+from lightly_train._optim.trainable_modules import TrainableModules
 
 from ... import helpers
+from ...helpers import dummy_dinov2_vit_model
+
+
+@pytest.fixture(autouse=True)
+def _seed() -> None:
+    random.seed(0)
 
 
 class TestMaskingGenerator:
     def setup_method(self) -> None:
-        self.grid_size = 16
+        # Cubic grid, the 3D analogue of the square grid used by the 2D tests.
+        self.grid_size = 8
+        self.num_patches = self.grid_size**3
 
     @pytest.mark.parametrize("grid_size", [14, 16])
     def test_get_shape_and_repr(self, grid_size: int) -> None:
         masking_generator = MaskingGenerator(
-            input_size=(grid_size, grid_size), max_num_patches=int(0.5 * grid_size**2)
+            input_size=(4, grid_size, grid_size),
+            max_num_patches=int(0.5 * 4 * grid_size**2),
         )
 
-        assert masking_generator.get_shape() == (grid_size, grid_size)
+        assert masking_generator.get_shape() == (4, grid_size, grid_size)
+        assert masking_generator.num_patches == 4 * grid_size**2
 
         repr_str = repr(masking_generator)
-        # (the log‐aspect‐ratio values depend on min_aspect/max_aspect; we just check overall pattern)
         assert re.match(
-            rf"Generator\({grid_size},\s*{grid_size}\s*->\s*\[\d+\s*~\s*\d+\],\s*max\s*=\s*[-\d\.]+\s*~\s*[-\d\.]+\)",
+            rf"Generator\(4,\s*{grid_size},\s*{grid_size}\s*->\s*\[\d+\s*~\s*\d+\],\s*max\s*=\s*[-\d\.]+\s*~\s*[-\d\.]+\)",
             repr_str,
+        )
+
+    def test_init__int_input_size(self) -> None:
+        assert MaskingGenerator(input_size=5, max_num_patches=10).get_shape() == (
+            5,
+            5,
+            5,
         )
 
     @pytest.mark.parametrize(
@@ -48,12 +70,12 @@ class TestMaskingGenerator:
         ],
         [
             (0, 0, 0.0),
-            (0, 128, 0.0),
-            (4, 4, 1.0),
-            (4, 128, 0.125),
-            (4, 128, 0.25),
-            (4, 128, 0.5),
-            (4, 128, 1.0),
+            (0, 64, 0.0),
+            (8, 8, 1.0),
+            (8, 64, 0.125),
+            (8, 64, 0.25),
+            (8, 64, 0.5),
+            (8, 64, 1.0),
         ],
     )
     def test_masking_generator_call(
@@ -62,10 +84,10 @@ class TestMaskingGenerator:
         n_masked_patch_tokens_max: int,
         masking_ratio: float,
     ) -> None:
-        n_masked_patch_tokens = int(masking_ratio * self.grid_size**2)
+        n_masked_patch_tokens = int(masking_ratio * self.num_patches)
 
         masking_generator = MaskingGenerator(
-            input_size=(self.grid_size, self.grid_size),
+            input_size=(self.grid_size,) * 3,
             min_num_patches=n_masked_patch_tokens_min,
             max_num_patches=n_masked_patch_tokens_max,
         )
@@ -73,52 +95,32 @@ class TestMaskingGenerator:
         mask = masking_generator(n_masked_patch_tokens)
 
         assert mask.dtype == np.bool_
-        assert mask.shape == (self.grid_size, self.grid_size)
+        assert mask.shape == (self.grid_size,) * 3
         assert n_masked_patch_tokens_min <= mask.sum() <= n_masked_patch_tokens
 
     @pytest.mark.parametrize(
-        "aspect_ratio, masking_percentage, is_masked",
+        "aspect_ratio, n_masked_patch_tokens, is_masked",
         [
-            (
-                0.1,
-                0.005,
-                False,
-            ),  # min masking_percentage allowed for height>=1 is 0.5**2 / (A*G**2) = 0.0098 > 0.005
-            (0.1, 0.05, True),
-            (
-                0.1,
-                0.5,
-                False,
-            ),  # max masking_percentage allowed for width<=G is (G+0.5)**2*A / (G**2) = 0.106 < 0.5
-            (
-                2.0,
-                0.001,
-                False,
-            ),  # min masking_percentage allowed for width>=1 is 0.5**2*A / (G**2) = 0.0019 > 0.001
-            (2.0, 0.01, True),
-            (
-                2.0,
-                1.0,
-                False,
-            ),  # max masking_percentage allowed for height<=G is (G+0.5)**2 / (A*G**2) = 0.532 < 1.0
+            # d = round((V / A^2)^(1/3)), h = w = round(d * A) on an 8x8x8 grid. The
+            # cuboid is only accepted if 0 < d, h, w < 8 and d * h * w <= V.
+            (1.0, 1, True),  # 1x1x1
+            (1.0, 27, True),  # 3x3x3
+            (1.0, 512, False),  # 8x8x8 does not fit strictly inside the grid
+            (4.0, 16, True),  # 1x4x4
+            (4.0, 2, False),  # d rounds to 0, or a 1x4x4 block exceeds the budget
+            (0.5, 2, True),  # 2x1x1
+            (0.5, 64, True),  # 6x3x3 = 54
+            (2.0, 16, False),  # 2x4x4 = 32 exceeds the budget
         ],
     )
     def test_masking_generator__aspect_ratio_validity(
         self,
         aspect_ratio: float,
-        masking_percentage: Union[float, int],
+        n_masked_patch_tokens: int,
         is_masked: bool,
     ) -> None:
-        # For testing purposes use a masking_percentage to reparameterize the number of masked patches allowed, in this case, let A be the aspect ratio and G the grid size.:
-        # 1. the minimum masking_percentage allowed should also be 0.5**2 / (A*G**2) to ensure that the height to be at least 1
-        # 2. the minimum masking_percentage allowed should be 0.5**2*A / G**2 to ensure that the width to be at least 1
-        # 3. the maximum masking_percentage allowed should be (G+0.5)**2 / (A*G**2) to ensure that the height does not exceed the grid_size
-        # 4. the maximum masking_percentage allowed should also be (G+0.5)**2*A / G**2 to ensure that the width does not exceed the grid_size
-        # the exact masking_percentage can be slightly different due to int()
-        n_masked_patch_tokens = int(masking_percentage * self.grid_size**2)
-
         masking_generator = MaskingGenerator(
-            input_size=(self.grid_size, self.grid_size),
+            input_size=(self.grid_size,) * 3,
             min_num_patches=n_masked_patch_tokens,
             max_num_patches=n_masked_patch_tokens,
             min_aspect=aspect_ratio,
@@ -128,29 +130,66 @@ class TestMaskingGenerator:
         mask = masking_generator(n_masked_patch_tokens)
         assert mask.any() == is_masked
 
-    @pytest.mark.parametrize("square_size", [2, 3, 4])
-    def test_masking_generator__aspect_ratio_square(self, square_size: int) -> None:
-        """With aspect ratio 1.0 and num_mask=min_num_masks_per_block we expect a single, square masked block."""
-
+    @pytest.mark.parametrize("cube_size", [2, 3, 4])
+    def test_masking_generator__aspect_ratio_cube(self, cube_size: int) -> None:
+        """With aspect ratio 1.0 and num_mask=min_num_masks_per_block we expect a single, cubic masked block."""
         masking_generator = MaskingGenerator(
-            input_size=(self.grid_size, self.grid_size),
-            max_num_patches=square_size**2,
-            min_num_patches=square_size**2,
+            input_size=(self.grid_size,) * 3,
+            max_num_patches=cube_size**3,
+            min_num_patches=cube_size**3,
             min_aspect=1.0,
             max_aspect=1.0,
         )
 
-        mask = masking_generator(square_size**2)
-        assert mask.sum(axis=0).max() == square_size
-        assert mask.sum(axis=1).max() == square_size
+        mask = masking_generator(cube_size**3)
+        assert mask.sum() == cube_size**3
+        coords = np.argwhere(mask)
+        extent = coords.max(axis=0) - coords.min(axis=0) + 1
+        assert tuple(extent) == (cube_size,) * 3
+
+    def test_masking_generator__cuboid_anchored_to_grid(self) -> None:
+        """Without aspect ratio jitter the block has the aspect ratio of the grid."""
+        masking_generator = MaskingGenerator(
+            input_size=(2, 8, 8),
+            max_num_patches=16,
+            min_num_patches=16,
+            min_aspect=1.0,
+            max_aspect=1.0,
+        )
+        mask = masking_generator(16)
+        coords = np.argwhere(mask)
+        extent = coords.max(axis=0) - coords.min(axis=0) + 1
+        assert tuple(extent) == (1, 4, 4)
+
+    @pytest.mark.parametrize("grid", [(4, 16, 16), (6, 16, 16), (8, 8, 8)])
+    @pytest.mark.parametrize("ratio", [0.1, 0.3, 0.5])
+    def test_masking_generator__achieves_target_ratio(
+        self, grid: tuple[int, int, int], ratio: float
+    ) -> None:
+        """Regression test: on anisotropic grids such as the default 4x16x16 grid of
+        the global views, unanchored aspect ratios produced masks far below the
+        requested ratio and many empty masks."""
+        num_patches = math.prod(grid)
+        masking_generator = MaskingGenerator(
+            input_size=grid, max_num_patches=int(0.5 * num_patches)
+        )
+        ratios = np.array(
+            [
+                masking_generator(int(ratio * num_patches)).sum() / num_patches
+                for _ in range(100)
+            ]
+        )
+        assert ratios.mean() >= 0.9 * ratio
+        assert (ratios == 0).mean() <= 0.05
 
 
 class TestCreateCollatedMasks:
     def setup_method(self) -> None:
-        self.grid_size = 16
+        self.grid = (4, 16, 16)
+        self.num_patches = math.prod(self.grid)
         self.masking_generator = MaskingGenerator(
-            input_size=(self.grid_size, self.grid_size),
-            max_num_patches=int(0.5 * self.grid_size**2),
+            input_size=self.grid,
+            max_num_patches=int(0.5 * self.num_patches),
         )
 
     @pytest.mark.parametrize("expected_n_crops", [1, 2, 4, 8])
@@ -167,9 +206,8 @@ class TestCreateCollatedMasks:
 
         collated_masks = masks["collated_masks"]
         assert collated_masks.dtype == torch.bool
-
-        mask_shape = collated_masks.shape
-        assert mask_shape == (expected_n_crops, self.grid_size**2)
+        assert collated_masks.shape == (expected_n_crops, self.num_patches)
+        assert masks["mask_indices_list"].shape == masks["masks_weight"].shape
 
     @pytest.mark.parametrize("expected_n_masked_crops", [0, 1, 2, 3, 4])
     def test_create_collated_masks__n_masked_crops(
@@ -210,7 +248,6 @@ class TestCreateCollatedMasks:
             if n_masked_patch_tokens == 0:
                 continue
 
-            # Check if the number of masked patches is within the specified range
             # Divide lower bound by 4 because the bound is not strict as fewer patches than
             # min_image_mask_ratio * num_patches can be masked. This is because there is a
             # limited number of attempts to find a valid mask that satisfies all constraints.
@@ -337,3 +374,53 @@ def test_get_optimizer_with_decay() -> None:
         },
     ]
     assert groups == expected_groups
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("pos_embed", True),
+        ("pos_embed_grid", True),
+        ("cls_token", True),
+        ("mask_token", True),
+        ("register_tokens", True),
+        ("patch_embed.proj.weight", True),
+        ("patch_embed.proj.bias", True),
+        ("blocks.0.2.attn.qkv.weight", False),
+        ("blocks.5.mlp.fc1.weight", False),
+        ("norm.weight", False),
+        ("dino_head.mlp.0.weight", False),
+    ],
+)
+def test_is_tokenization_param(name: str, expected: bool) -> None:
+    assert is_tokenization_param(name) is expected
+
+
+@pytest.mark.parametrize("layerwise_decay", [0.9, 1.0])
+def test_get_fused_param_groups__never_mixes_tokenization(
+    layerwise_decay: float,
+) -> None:
+    """Regression test: with layerwise_decay=1.0 every layer gets the same lr, so
+    without the "tokenization" fusion key, pos_embed/cls_token/mask_token fuse into
+    the same group as decayed block weights (verified: 4 groups instead of 10, with
+    12 block weight tensors sharing a group with the tokenization). A name-based
+    tokenization-only freeze in DINOv2.on_before_optimizer_step is only correct if no
+    fused group mixes tokenization and non-tokenization parameters."""
+    vit_wrapper = dummy_dinov2_vit_model()
+    vit = vit_wrapper.get_model()
+    id_to_name = {id(p): n for n, p in vit.named_parameters()}
+
+    optim = utils.get_optimizer_with_decay(
+        optim_args=DINOv2AdamWViTArgs(),
+        trainable_modules=TrainableModules(modules=[vit]),
+        layerwise_decay=layerwise_decay,
+        patch_embed_lr_multiplier=0.2,
+    )
+
+    for group in optim.param_groups:
+        names = [id_to_name[id(p)] for p in group["params"]]
+        kinds = {is_tokenization_param(n) for n in names}
+        assert len(kinds) == 1, (
+            f"Group '{group['name']}' mixes tokenization and non-tokenization "
+            f"params: {names}"
+        )

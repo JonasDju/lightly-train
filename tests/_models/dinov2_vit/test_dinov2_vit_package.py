@@ -12,6 +12,7 @@ import pytest
 import torch
 from pytest_mock import MockerFixture
 
+from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
 from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from lightly_train._models.dinov2_vit.dinov2_vit_src import dinov2_helper
@@ -25,7 +26,12 @@ from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer i
     vit_so400m,
 )
 
+from ... import helpers
 from ...helpers import DummyCustomModel
+
+
+def _vit_test_3d() -> DinoVisionTransformer:
+    return _vit_test(patch_size=(2, 2, 2), img_size=(8, 8, 8), in_chans=1)
 
 
 class TestDINOv2ViTPackage:
@@ -74,11 +80,11 @@ class TestDINOv2ViTPackage:
         assert (model_name in model_names) is listed
 
     def test_is_supported_model__model_true(self) -> None:
-        model = _vit_test()
+        model = _vit_test_3d()
         assert DINOv2ViTPackage.is_supported_model(model)
 
     def test_is_supported_model__wrapped_model_true(self) -> None:
-        model = _vit_test()
+        model = _vit_test_3d()
         wrapped_model = DINOv2ViTModelWrapper(model=model)
         assert DINOv2ViTPackage.is_supported_model(wrapped_model)
 
@@ -96,12 +102,32 @@ class TestDINOv2ViTPackage:
             "_vittest14",
             "vits14-notpretrained",
             "vits14-noreg-notpretrained",
-            "vitb14-noreg-notpretrained",
         ],
     )
     def test_get_model(self, model_name: str) -> None:
-        model = DINOv2ViTPackage.get_model(model_name=model_name)
+        model = DINOv2ViTPackage.get_model(model_name=model_name, num_input_channels=1)
         assert isinstance(model, DinoVisionTransformer)
+        # Train configs are 3D: patch size (H, W, D) = (14, 14, 4).
+        assert tuple(model.patch_size) == (14, 14, 4)
+        assert model.patch_embed.in_chans == 1
+
+    def test_vittest14__global_crops_size_matches_default_transform_image_size(
+        self,
+    ) -> None:
+        """Regression test: `crops.global_crops_size` in `ssl_default_config.yaml`
+        (which sizes the model's positional embedding) must match
+        `DINOTransformArgs.image_size`'s default (the actual global-view size fed
+        to the model during training). If these drift apart again, the model
+        silently re-interpolates its positional embedding on every single
+        training step -- wasteful, and easy to miss because it isn't an error."""
+        model = DINOv2ViTPackage.get_model("_vittest14", num_input_channels=1)
+        transform_image_size = DINOv2ViTTransformArgs().image_size  # (H, W, D)
+
+        assert model.patch_embed.img_size == (
+            transform_image_size[2],
+            transform_image_size[0],
+            transform_image_size[1],
+        )
 
     def test_tipsv2_model_names(self) -> None:
         assert DINOv2ViTPackage.parse_model_name("vitso400m14-tipsv2") == (
@@ -145,9 +171,9 @@ class TestDINOv2ViTPackage:
         assert constructor.call_args.kwargs["mlp_ratio"] == 4304 / 1152
 
     def test_load_weights__pytorch_checkpoint(self, tmp_path: Path) -> None:
-        expected = _vit_test()
+        expected = _vit_test_3d()
         torch.save(expected.state_dict(), tmp_path / "tipsv2.pt")
-        actual = _vit_test()
+        actual = _vit_test_3d()
 
         dinov2_helper.load_weights(
             model=actual,
@@ -160,8 +186,87 @@ class TestDINOv2ViTPackage:
         ):
             assert torch.equal(expected_param, actual_param)
 
+    @pytest.mark.parametrize(
+        ("model_name", "arch", "ffn_layer", "num_register_tokens", "pretrained_name"),
+        [
+            # -reg4-: matched against the public *_reg4_pretrain.pth checkpoints.
+            ("vits14-reg4-2dinit", "vit_small", "mlp", 4, "vits14"),
+            ("vitb14-reg4-2dinit", "vit_base", "mlp", 4, "vitb14"),
+            ("vitl14-reg4-2dinit", "vit_large", "mlp", 4, "vitl14"),
+            # ViT-g/14 really does use SwiGLU upstream, reg or noreg -- only
+            # block_chunks (4 -> 0) needed correcting for it, not ffn_layer.
+            ("vitg14-reg4-2dinit", "vit_giant2", "swiglufused", 4, "vitg14"),
+            # -noreg-: matched against the public *_pretrain.pth checkpoints (no
+            # register tokens).
+            ("vits14-noreg-2dinit", "vit_small", "mlp", 0, "vits14-noreg"),
+            ("vitb14-noreg-2dinit", "vit_base", "mlp", 0, "vitb14-noreg"),
+            ("vitl14-noreg-2dinit", "vit_large", "mlp", 0, "vitl14-noreg"),
+            ("vitg14-noreg-2dinit", "vit_giant2", "swiglufused", 0, "vitg14-noreg"),
+        ],
+    )
+    def test_2dinit_model_configs(
+        self,
+        model_name: str,
+        arch: str,
+        ffn_layer: str,
+        num_register_tokens: int,
+        pretrained_name: str,
+    ) -> None:
+        """The `-2dinit` entries pair a 3D train config with a public 2D checkpoint.
+
+        `ffn_layer` and `block_chunks` must match what the corresponding public
+        checkpoint actually uses, otherwise every block parameter is named differently
+        (`mlp.w12` instead of `mlp.fc1`, `blocks.0.0` instead of `blocks.0`) and nothing
+        loads at all. The stock `vitb14_reg4` / `vitl14_reg4` / `vitb14` / `vitl14`
+        train configs do *not* match (verified against the real downloaded checkpoints,
+        not just against the `eval/*.yaml` configs); `vitg14*` needed no `ffn_layer`
+        correction since ViT-g/14 genuinely is SwiGLU upstream.
+        """
+        config = load_and_merge_config(MODELS[model_name]["config"])
+        assert config.student.arch == arch
+        assert config.student.ffn_layer == ffn_layer
+        assert config.student.block_chunks == 0
+        assert config.student.num_register_tokens == num_register_tokens
+        # Train configs are 3D: patch size (H, W, D).
+        assert list(config.student.patch_size) == [14, 14, 4]
+        assert len(config.crops.global_crops_size) == 3
+        # Same checkpoint as the corresponding pretrained entry.
+        assert MODELS[model_name]["url"] == MODELS[pretrained_name]["url"]
+        assert MODELS[model_name]["url"].startswith(
+            f"https://dl.fbaipublicfiles.com/dinov2/dinov2_{model_name.split('-')[0]}/"
+        )
+        assert not MODELS[model_name]["list"]
+
+    def test_load_weights__2d_checkpoint(self, tmp_path: Path) -> None:
+        """A 2D DINOv2 checkpoint restores the blocks and leaves tokenization random."""
+        model = _vit_test_3d()
+        before = {key: value.clone() for key, value in model.state_dict().items()}
+        checkpoint = helpers.dinov2_2d_checkpoint(model)
+        torch.save(checkpoint, tmp_path / "dinov2_vits14_reg4_pretrain.pth")
+
+        dinov2_helper.load_weights(
+            model=model,
+            checkpoint_dir=tmp_path,
+            url=MODELS["vits14-reg4-2dinit"]["url"],
+        )
+
+        after = model.state_dict()
+        for key in [
+            "patch_embed.proj.weight",
+            "patch_embed.proj.bias",
+            "pos_embed",
+            "pos_embed_grid",
+            "cls_token",
+            "mask_token",
+        ]:
+            assert torch.equal(after[key], before[key])
+        block_keys = [key for key in after if key.startswith("blocks.")]
+        assert block_keys
+        for key in block_keys + ["norm.weight", "norm.bias"]:
+            assert torch.equal(after[key], checkpoint[key])
+
     def test_get_model_wrapper(self) -> None:
-        model = _vit_test()
+        model = _vit_test_3d()
         fe = DINOv2ViTPackage.get_model_wrapper(model=model)
         assert isinstance(fe, DINOv2ViTModelWrapper)
 

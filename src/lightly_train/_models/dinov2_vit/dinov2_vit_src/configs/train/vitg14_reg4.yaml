@@ -10,7 +10,10 @@ train:
   centering: sinkhorn_knopp
 student:
   arch: vit_giant2
-  patch_size: 14
+  patch_size:
+    - 14
+    - 14
+    - 4
   drop_path_rate: 0.4
   ffn_layer: swiglufused
   block_chunks: 4
@@ -26,4 +29,7 @@ optim:
   warmup_epochs: 80
   layerwise_decay: 1.0
 crops:
-  local_crops_size: 98
+  local_crops_size:
+    - 98
+    - 98
+    - 8

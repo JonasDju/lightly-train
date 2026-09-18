@@ -70,7 +70,10 @@ train:
   centering: "centering" # or "sinkhorn_knopp"
 student:
   arch: vit_large
-  patch_size: 16
+  patch_size:
+    - 16
+    - 16
+    - 4
   drop_path_rate: 0.3
   layerscale: 1.0e-05
   drop_path_uniform: true
@@ -112,7 +115,13 @@ crops:
   local_crops_scale:
   - 0.05
   - 0.32
-  global_crops_size: 224
-  local_crops_size: 96
+  global_crops_size:
+    - 224
+    - 224
+    - 16
+  local_crops_size:
+    - 96
+    - 96
+    - 8
 evaluation:
   eval_period_iterations: 12500

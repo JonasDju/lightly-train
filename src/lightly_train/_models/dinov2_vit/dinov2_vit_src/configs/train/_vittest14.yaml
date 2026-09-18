@@ -1,6 +1,9 @@
 student:
   arch: _vit_test
-  patch_size: 14
+  patch_size:
+    - 14
+    - 14
+    - 4
   embed_dim: 8
   depth: 3
   num_heads: 2

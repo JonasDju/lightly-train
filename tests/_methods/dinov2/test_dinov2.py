@@ -7,6 +7,7 @@
 #
 from __future__ import annotations
 
+import logging
 import math
 from typing import Literal
 
@@ -15,11 +16,13 @@ import torch
 from pytest_mock import MockerFixture
 from torch import Size
 
+from lightly_train._methods.dinov2 import dinov2 as dinov2_module
 from lightly_train._methods.dinov2.dinov2 import (
     DINOv2,
     DINOv2AdamWViTArgs,
     DINOv2Args,
 )
+from lightly_train._methods.dinov2.utils import is_tokenization_param
 from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._optim.optimizer_args import OptimizerArgs
 from lightly_train._optim.optimizer_type import OptimizerType
@@ -48,7 +51,7 @@ def setup_dinov2_helper(
         optimizer_args=optimizer_args,
         embedding_model=emb_model,
         global_batch_size=batch_size,
-        num_input_channels=3,
+        num_input_channels=1,
     )
 
     trainer_mock = mocker.Mock()
@@ -93,8 +96,10 @@ class TestDINOv2:
         emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
         b = 16
 
-        views = [torch.rand(b, 3, 8, 8) for _ in range(2)] + [
-            torch.rand(b, 3, 4, 4) for _ in range(n_local_crops)
+        # Views are (B, C, D, H, W). The dummy model has patch size 2, so global views
+        # have a 4x4x4 patch grid.
+        views = [torch.rand(b, 1, 8, 8, 8) for _ in range(2)] + [
+            torch.rand(b, 1, 4, 4, 4) for _ in range(n_local_crops)
         ]
         batch: Batch = {
             "views": views,
@@ -133,6 +138,28 @@ class TestDINOv2:
         assert out.log_dict["train_loss/dino_local_loss"].shape == Size([])
         assert out.log_dict["train_loss/ibot_loss"].shape == Size([])
         assert out.log_dict["train_loss/koleo_loss"].shape == Size([])
+        assert torch.isfinite(out.loss)
+
+    def test_train_step_impl__anisotropic_views(self, mocker: MockerFixture) -> None:
+        # Patch size (H, W, D) = (4, 2, 2) with views (D, H, W) = (4, 16, 8) gives a
+        # (2, 4, 4) patch grid. The mask grid must match the patch embedding grid.
+        emb_model = EmbeddingModel(
+            wrapped_model=dummy_dinov2_vit_model(
+                patch_size=(4, 2, 2), img_size=(16, 8, 4)
+            )
+        )
+        b = 4
+        views = [torch.rand(b, 1, 4, 16, 8) for _ in range(2)] + [
+            torch.rand(b, 1, 2, 8, 4) for _ in range(2)
+        ]
+        batch: Batch = {"views": views, "filename": [f"img_{i}" for i in range(b)]}
+        dinov2 = setup_dinov2_helper(
+            DINOv2Args(mask_probability=1.0), mocker, emb_model, b
+        )
+        spy = mocker.spy(dinov2_module, "MaskingGenerator")
+        out = dinov2.training_step_impl(batch, 0)
+        assert spy.call_args.kwargs["input_size"] == (2, 4, 4)
+        assert torch.isfinite(out.loss)
 
     def test_layerwise_decay_optimizer(self, mocker: MockerFixture) -> None:
         emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
@@ -222,6 +249,178 @@ class TestDINOv2:
         # Last Batch
         target_lr = dinov2_args.min_lr
         check_param_groups()
+
+    @pytest.mark.parametrize("layerwise_decay", [0.9, 1.0])
+    def test_on_before_optimizer_step__tokenization_only(
+        self, mocker: MockerFixture, layerwise_decay: float
+    ) -> None:
+        """While global_step < n_tokenization_only_steps, only the tokenization and
+        the projection heads train; the transformer blocks and the final norm are
+        held at lr=0."""
+        # student_freeze_last_layer_steps defaults to 1250 and would independently
+        # freeze the last_layer group at these global_steps; disable it so this test
+        # isolates the n_tokenization_only_steps rule.
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(
+            n_tokenization_only_steps=10,
+            layerwise_decay=layerwise_decay,
+            student_freeze_last_layer_steps=0,
+        )
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+
+        optim = dinov2.configure_optimizers()[0][0]  # type: ignore[index, literal-required]
+        dinov2.on_before_optimizer_step(optim)
+
+        for group in optim.param_groups:
+            name = group["name"]
+            if "head" not in name and not is_tokenization_param(name):
+                assert group["lr"] == 0.0, f"Expected '{name}' to be frozen"
+            else:
+                assert group["lr"] > 0.0, f"Expected '{name}' to keep training"
+
+    def test_on_before_optimizer_step__tokenization_only_ends(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Once global_step reaches n_tokenization_only_steps, every group trains
+        again -- the freeze is derived from global_step, not a one-way transition
+        that would need an explicit "unfreeze"."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(
+            n_tokenization_only_steps=10, student_freeze_last_layer_steps=0
+        )
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 10
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+
+        optim = dinov2.configure_optimizers()[0][0]  # type: ignore[index, literal-required]
+        dinov2.on_before_optimizer_step(optim)
+
+        for group in optim.param_groups:
+            assert group["lr"] > 0.0, f"Expected '{group['name']}' to be unfrozen"
+
+    def test_on_before_optimizer_step__tokenization_only_default_off(
+        self, mocker: MockerFixture
+    ) -> None:
+        """n_tokenization_only_steps=0 (the default) must leave training exactly as
+        it was before this option existed: nothing is frozen by this rule."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(student_freeze_last_layer_steps=0)
+        assert dinov2_args.n_tokenization_only_steps == 0
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+
+        optim = dinov2.configure_optimizers()[0][0]  # type: ignore[index, literal-required]
+        dinov2.on_before_optimizer_step(optim)
+
+        for group in optim.param_groups:
+            assert group["lr"] > 0.0, f"Expected '{group['name']}' to be unfrozen"
+
+    def test_on_train_start__logs_tokenization_only_active(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The status log at training start must compare against the current
+        (possibly resumed) global_step, not against 0. This has to be on_train_start,
+        not on_fit_start: Lightning restores the fit_loop's global_step/current_epoch
+        (restore_training_state) only after on_fit_start but before on_train_start --
+        see the comment on DINOv2.on_train_start."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=10)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 3  # e.g. a resumed run
+        dinov2.trainer = trainer_mock
+
+        with caplog.at_level(logging.INFO):
+            dinov2.on_train_start()
+
+        assert dinov2._tokenization_only_active is True
+        assert "Training only the tokenization" in caplog.text
+        assert "7 more step(s)" in caplog.text
+        assert "currently at step 3" in caplog.text
+
+    @pytest.mark.parametrize(
+        "n_tokenization_only_steps, global_step",
+        [
+            (0, 0),  # disabled entirely
+            (10, 10),  # resumed exactly at the boundary
+            (10, 15),  # resumed past the boundary
+        ],
+    )
+    def test_on_train_start__logs_all_layers(
+        self,
+        mocker: MockerFixture,
+        caplog: pytest.LogCaptureFixture,
+        n_tokenization_only_steps: int,
+        global_step: int,
+    ) -> None:
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=n_tokenization_only_steps)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = global_step
+        dinov2.trainer = trainer_mock
+
+        with caplog.at_level(logging.INFO):
+            dinov2.on_train_start()
+
+        assert dinov2._tokenization_only_active is False
+        assert "Training all layers" in caplog.text
+        assert "Training only the tokenization" not in caplog.text
+
+    def test_on_before_optimizer_step__logs_unfreeze_once(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The "unfreezing" message must fire exactly once, at the step the freeze
+        actually ends, not on every subsequent step."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=10)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+        dinov2.on_train_start()  # starts active, as in a fresh run
+
+        optim_mock = mocker.Mock(param_groups=[])
+        with caplog.at_level(logging.INFO):
+            for step in (0, 5, 9, 10, 11):
+                trainer_mock.global_step = step
+                caplog.clear()
+                dinov2.on_before_optimizer_step(optim_mock)
+                if step == 10:
+                    assert "Unfreezing the transformer blocks" in caplog.text
+                else:
+                    assert "Unfreezing the transformer blocks" not in caplog.text
+
+    def test_on_before_optimizer_step__no_unfreeze_log_if_already_unfrozen(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A run that starts already past the tokenization-only phase (e.g. resumed
+        past it) must not log an "unfreezing" event -- nothing happened during this
+        run to report."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=10)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 15
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+        dinov2.on_train_start()  # starts already unfrozen
+
+        optim_mock = mocker.Mock(param_groups=[])
+        with caplog.at_level(logging.INFO):
+            dinov2.on_before_optimizer_step(optim_mock)
+
+        assert "Unfreezing the transformer blocks" not in caplog.text
 
 
 class TestDINOv2Args:

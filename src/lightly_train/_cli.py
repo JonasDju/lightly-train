@@ -50,7 +50,9 @@ _HELP_MSG = """
     See the documentation for more information: https://docs.lightly.ai/train/stable/
     """
 
-_train_cfg = CLITrainConfig(out="", data="", model="")
+_train_cfg = CLITrainConfig(
+    out="", data_root="", data_meta="", series_depth=0, resample_mode="", model=""
+)
 _PRETRAIN_HELP_MSG = f"""
     Pretrain a model with self-supervised learning or distill from a teacher model.
 
@@ -71,9 +73,14 @@ _PRETRAIN_HELP_MSG = f"""
     Options:
         out (str, required):
             Output directory to save logs, checkpoints, and other artifacts.
-        data (str, required):
-            Path to a directory containing images or a sequence of image directories and
-            files.
+        data_root (str, required):
+            Root directory of the KneeNo dataset (<case_id>/<series_name>/<NNN>.jpeg).
+        data_meta (str, required):
+            Path to the KneeNo metadata JSON file.
+        series_depth (int, required):
+            Resample every series to this many slices. Must be > 0.
+        resample_mode (str, required):
+            How to resample along depth: 'nearest' or 'interpolate'.
         model (str, required):
             Model name for pretraining. For example 'torchvision/resnet50'.
             Run `lightly-train list_models` to see all supported models.
@@ -191,9 +198,21 @@ _PRETRAIN_HELP_MSG = f"""
             - transform_args.random_flip.vertical_prob (float)
             - transform_args.random_rotation.prob (float)
             - transform_args.random_rotation.degrees (int)
-            - transform_args.random_gray_scale (float)
             - transform_args.normalize.mean (float, float, float)
             - transform_args.normalize.std (float, float, float)
+            - transform_args.gaussian_sharpen.prob (float)
+            - transform_args.gaussian_sharpen.sigma1 (float, float)
+            - transform_args.gaussian_sharpen.sigma2 (float) or (float, float)
+            - transform_args.gaussian_sharpen.alpha (float, float)
+            - transform_args.gibbs_noise.prob (float)
+            - transform_args.gibbs_noise.alpha (float) or (float, float)
+            - transform_args.histogram_shift.prob (float)
+            - transform_args.histogram_shift.num_control_points (int) or (int, int)
+            - transform_args.adjust_contrast.prob (float)
+            - transform_args.adjust_contrast.gamma (float, float)
+            - transform_args.gaussian_noise.prob (float)
+            - transform_args.gaussian_noise.mean (float)
+            - transform_args.gaussian_noise.std (float)
         loader_args (dict):
             Additional arguments for the PyTorch DataLoader.
         trainer_args (dict):

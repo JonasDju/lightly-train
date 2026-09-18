@@ -96,7 +96,15 @@ def test_cli__list_methods(caplog: LogCaptureFixture) -> None:
 def test__PRETRAIN_HELP_MSG__parameters() -> None:
     """Test that the pretrain help message contains all parameters from CLITrainConfig."""
     _assert_help_msg_contains_params(
-        msg=_cli._PRETRAIN_HELP_MSG, config=CLITrainConfig(out="", data="", model="")
+        msg=_cli._PRETRAIN_HELP_MSG,
+        config=CLITrainConfig(
+            out="",
+            data_root="",
+            data_meta="",
+            series_depth=0,
+            resample_mode="",
+            model="",
+        ),
     )
 
 

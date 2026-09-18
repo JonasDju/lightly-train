@@ -33,6 +33,7 @@ from lightly_train._commands.common_helpers import ModelFormat
 from lightly_train._configs import omegaconf_utils, validate
 from lightly_train._configs.config import PydanticConfig
 from lightly_train._configs.validate import no_auto
+from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._events import tracker
 from lightly_train._license import LICENSE_INFO
 from lightly_train._loggers import logger_helpers
@@ -53,7 +54,10 @@ logger = logging.getLogger(__name__)
 def pretrain(
     *,
     out: PathLike,
-    data: PathLike | Sequence[PathLike],
+    data_root: PathLike,
+    data_meta: PathLike,
+    series_depth: int,
+    resample_mode: str,
     model: str | Module | ModelWrapper | Any,
     method: str = "distillation",
     method_args: dict[str, Any] | None = None,
@@ -257,7 +261,10 @@ def pretrain(
 def train(
     *,
     out: PathLike,
-    data: PathLike | Sequence[PathLike],
+    data_root: PathLike,
+    data_meta: PathLike,
+    series_depth: int,
+    resample_mode: str,
     model: str | Module | ModelWrapper | Any,
     method: str = "distillation",
     method_args: dict[str, Any] | None = None,
@@ -324,7 +331,8 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
         )
 
     logger.info(
-        f"Args: {common_helpers.pretty_format_args(args=config.model_dump(), limit_keys={'data'})}"
+        # data_root and data_meta are single paths, so no sequence needs to be limited.
+        f"Args: {common_helpers.pretty_format_args(args=config.model_dump(), limit_keys=set())}"
     )
     logger.info(f"Using output directory '{out_dir}'.")
 
@@ -350,23 +358,26 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
     # file in the output directory and recover it on resume.
     with common_helpers.verify_out_dir_equal_on_all_local_ranks(
         out=out_dir
-    ), common_helpers.get_dataset_temp_mmap_path(
-        data=config.data,
-        out=out_dir,
-        resume_interrupted=config.resume_interrupted,
-        overwrite=config.overwrite,
-    ) as mmap_filepath, _float32_matmul_precision.float32_matmul_precision(
+    ), _float32_matmul_precision.float32_matmul_precision(
         float32_matmul_precision=config.float32_matmul_precision
     ):
-        dataset = common_helpers.get_dataset(
-            data=config.data,
+        dataset = MIDataset(
+            data_root=config.data_root,
+            data_meta=config.data_meta,
             transform=transform_instance,
-            num_channels=no_auto(transform_instance.transform_args.num_channels),
-            mmap_filepath=mmap_filepath,
-            out_dir=out_dir,
-            resume_interrupted=config.resume_interrupted,
-            overwrite=config.overwrite,
+            series_depth=config.series_depth,
+            resample_mode=config.resample_mode,
         )
+
+        # dataset = common_helpers.get_dataset(
+        #     data=config.data,
+        #     transform=transform_instance,
+        #     num_channels=no_auto(transform_instance.transform_args.num_channels),
+        #     mmap_filepath=mmap_filepath,
+        #     out_dir=out_dir,
+        #     resume_interrupted=config.resume_interrupted,
+        #     overwrite=config.overwrite,
+        # )
         dataset_size = train_helpers.get_dataset_size(dataset=dataset)
         config.epochs = train_helpers.get_epochs(
             method=config.method,
@@ -471,6 +482,7 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             dataset=dataset,
             batch_size=per_device_batch_size,
             num_workers=config.num_workers,
+            series_depth=config.series_depth,
             loader_args=config.loader_args,
         )
         method_cls = method_helpers.get_method_cls(method=config.method)
@@ -492,6 +504,12 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             method=config.method,
             method_args=config.method_args,
             normalize_args=transform_instance.transform_args.normalize,
+        )
+        train_helpers.validate_tokenization_only_steps(
+            method_args=config.method_args,
+            model=config.model,
+            checkpoint=config.checkpoint,
+            resume_interrupted=config.resume_interrupted,
         )
         method_instance = train_helpers.get_method(
             method_cls=method_cls,
@@ -552,7 +570,10 @@ def train_from_dictconfig(config: DictConfig) -> None:
 
 class TrainConfig(PydanticConfig):
     out: PathLike
-    data: PathLike | Sequence[PathLike]
+    data_root: PathLike
+    data_meta: PathLike
+    series_depth: int
+    resample_mode: str
     model: str | Module | ModelWrapper | Any
     method: str = "distillation"
     method_args: dict[str, Any] | MethodArgs | None = None
@@ -602,7 +623,8 @@ class FunctionTrainConfig(TrainConfig):
 class CLITrainConfig(FunctionTrainConfig):
     # CLI configuration with simpler types for better error messages.
     out: str
-    data: str | Sequence[str]
+    data_root: str
+    data_meta: str
     model: str
     checkpoint: str | None = None
     accelerator: str = "auto"
@@ -621,12 +643,12 @@ def log_resolved_config(config: TrainConfig, loggers: list[Logger]) -> None:
     """
     log_string = (
         "Resolved configuration:\n"
-        f"{common_helpers.pretty_format_args(args=config.model_dump(), limit_keys={'data'})}\n"
+        f"{common_helpers.pretty_format_args(args=config.model_dump(), limit_keys=set())}\n"
     )
     logger.info(log_string)
 
     hyperparams = common_helpers.sanitize_config_dict(
-        common_helpers.remove_excessive_args(config.model_dump(), limit_keys={"data"})
+        common_helpers.remove_excessive_args(config.model_dump(), limit_keys=set())
     )
     for logger_instance in loggers:
         logger_instance.log_hyperparams(params=hyperparams)

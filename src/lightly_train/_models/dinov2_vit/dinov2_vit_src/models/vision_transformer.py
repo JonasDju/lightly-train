@@ -29,9 +29,9 @@ from lightly_train._activation_checkpointing import maybe_checkpoint
 from lightly_train._export.onnx_helpers import is_in_precalculate_for_onnx_export
 from lightly_train._models import _model_helpers
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers import (
-    MemEffAttention,
     Mlp,
     PatchEmbed,
+    SDPAttention,
     SwiGLUFFNFused,
 )
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers import (
@@ -81,6 +81,9 @@ class BlockChunk(nn.ModuleList):
 
 
 class DinoVisionTransformer(nn.Module):
+    # Declared for type checkers; set by register_buffer in __init__.
+    pos_embed_grid: torch.Tensor
+
     def __init__(
         self,
         img_size=224,
@@ -161,6 +164,15 @@ class DinoVisionTransformer(nn.Module):
         self.pos_embed = nn.Parameter(
             torch.zeros(1, num_patches + self.num_tokens, embed_dim)
         )
+
+        # The (D, H, W) patch grid pos_embed was sized for.
+        # Used by _model_helpers.interpolate_pos_embed_hook.
+        self.register_buffer(
+            "pos_embed_grid",
+            torch.tensor(self.patch_embed.patches_resolution, dtype=torch.long),
+            persistent=True,
+        )
+
         self.precalculated_pos_embed = None
         assert num_register_tokens >= 0
         self.register_tokens = (
@@ -248,7 +260,7 @@ class DinoVisionTransformer(nn.Module):
             nn.init.normal_(self.register_tokens, std=1e-6)
         named_apply(init_weights_vit_timm, self)
 
-    def interpolate_pos_encoding(self, x, w, h):
+    def interpolate_pos_encoding(self, x, d, h, w):
         # When exporting torch.nn.functional.interpolate with antialias=True to ONNX the resulting ONNX model
         # does the antialiasing calculations slightly different. In order to avoid different results we calculate
         # the scaled positional encoding during the export and cache it in the model. Note that this only works
@@ -265,38 +277,40 @@ class DinoVisionTransformer(nn.Module):
                 )
             return self.precalculated_pos_embed
 
+        # x:   B N C
         previous_dtype = x.dtype
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
-        if npatch == N and w == h:
+        if npatch == N and (d, h, w) == self.patch_embed.patches_resolution:
             result = self.pos_embed.to(previous_dtype)
         else:
             pos_embed = self.pos_embed.float()
             class_pos_embed = pos_embed[:, 0]
             patch_pos_embed = pos_embed[:, 1:]
             dim = x.shape[-1]
-            w0 = w // self.patch_size
-            h0 = h // self.patch_size
-            M = int(math.sqrt(N))  # Recover the number of patches in each dimension
-            assert N == M * M
+
+            peD, peH, peW = self.patch_embed.patches_resolution # Recover the number of patches in each dimension
+            assert N == peD * peH * peW
+
             kwargs = {}
             if self.interpolate_offset:
                 # Historical kludge: add a small number to avoid floating point error in the interpolation, see https://github.com/facebookresearch/dino/issues/8
                 # Note: still needed for backward-compatibility, the underlying operators are using both output size and scale factors
-                sx = float(w0 + self.interpolate_offset) / M
-                sy = float(h0 + self.interpolate_offset) / M
-                kwargs["scale_factor"] = (sx, sy)
+                sx = float(d + self.interpolate_offset) / peD
+                sy = float(h + self.interpolate_offset) / peH
+                sz = float(w + self.interpolate_offset) / peW
+                kwargs["scale_factor"] = (sx, sy, sz)
             else:
                 # Simply specify an output size instead of a scale factor
-                kwargs["size"] = (w0, h0)
+                kwargs["size"] = (d, h, w)
             patch_pos_embed = nn.functional.interpolate(
-                patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2),
-                mode="bicubic",
-                antialias=self.interpolate_antialias,
+                patch_pos_embed.reshape(1, peD, peH, peW, dim).permute(0, 4, 1, 2, 3),
+                mode="trilinear",
                 **kwargs,
             )
-            assert (w0, h0) == patch_pos_embed.shape[-2:]
-            patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+
+            assert (d, h, w) == patch_pos_embed.shape[-3:]
+            patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 4, 1).view(1, -1, dim)
             result = torch.cat(
                 (class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1
             ).to(previous_dtype)
@@ -305,16 +319,15 @@ class DinoVisionTransformer(nn.Module):
         return result
 
     def prepare_tokens_with_masks(self, x, masks=None):
-        # TODO(Thomas, 07/25): Fix swapped h and w.
-        B, nc, _, _ = x.shape
-        x, w, h = self.patch_embed(x)
+        B, nc, _, _, _ = x.shape
+        x, d, h, w = self.patch_embed(x)
         if masks is not None:
             x = torch.where(
                 masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x
             )
 
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        x = x + self.interpolate_pos_encoding(x, d, h, w)
 
         if self.register_tokens is not None:
             x = torch.cat(
@@ -332,7 +345,7 @@ class DinoVisionTransformer(nn.Module):
         x = [
             self.prepare_tokens_with_masks(x, masks)
             for x, masks in zip(x_list, masks_list)
-        ]
+        ]                                                               # List[(B, N, C)]
         for i, blk in enumerate(self.blocks):
             x = maybe_checkpoint(
                 blk,
@@ -362,7 +375,7 @@ class DinoVisionTransformer(nn.Module):
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
-        x = self.prepare_tokens_with_masks(x, masks)
+        x = self.prepare_tokens_with_masks(x, masks) # B N C
 
         for i, blk in enumerate(self.blocks):
             x = maybe_checkpoint(
@@ -465,13 +478,14 @@ class DinoVisionTransformer(nn.Module):
             outputs = self._get_intermediate_layers_not_chunked(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
-        class_tokens = [out[:, 0] for out in outputs]
-        outputs = [out[:, 1 + self.num_register_tokens :] for out in outputs]
+        class_tokens = [out[:, 0] for out in outputs]                           # B embed_dim
+        outputs = [out[:, 1 + self.num_register_tokens :] for out in outputs]   # B N embed_dim
         if reshape:
-            B, _, w, h = x.shape
+            B, dim, patD, patH, patW = self.patch_embed.compute_out_dims(x)
+            assert(all(out.shape[1] == patD * patH * patW for out in outputs))
             outputs = [
-                out.reshape(B, w // self.patch_size, h // self.patch_size, -1)
-                .permute(0, 3, 1, 2)
+                out.reshape(B, patD, patH, patW, dim)
+                .permute(0, 4, 1, 2, 3)                     # B embed_dim D H W
                 .contiguous()
                 for out in outputs
             ]
@@ -502,7 +516,7 @@ def vit_small(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTrans
         depth=12,
         num_heads=6,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -516,7 +530,7 @@ def vit_base(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTransf
         depth=12,
         num_heads=12,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -530,7 +544,7 @@ def vit_large(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTrans
         depth=24,
         num_heads=16,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -547,7 +561,7 @@ def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTran
         depth=40,
         num_heads=24,
         mlp_ratio=4,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -564,7 +578,7 @@ def vit_so400m(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTran
         depth=27,
         num_heads=16,
         mlp_ratio=4304 / 1152,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )
@@ -578,7 +592,7 @@ def _vit_test(patch_size=16, num_register_tokens=0, **kwargs) -> DinoVisionTrans
         depth=3,
         num_heads=2,
         mlp_ratio=1,
-        block_fn=partial(Block, attn_class=MemEffAttention),
+        block_fn=partial(Block, attn_class=SDPAttention),
         num_register_tokens=num_register_tokens,
         **kwargs,
     )

@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 from lightly_train._activation_checkpointing import ActivationCheckpointingArgs
 from lightly_train._checkpoint import Checkpoint
 from lightly_train._configs import validate
+from lightly_train._data import mi_dataset
 from lightly_train._env import Env
 from lightly_train._methods import method_helpers
 from lightly_train._methods.method import Method
@@ -162,6 +163,7 @@ def get_dataloader(
     dataset: Dataset[DatasetItem],
     batch_size: int,
     num_workers: int,
+    series_depth: int,
     loader_args: dict[str, Any] | None,
 ) -> DataLoader[DatasetItem]:
     """Creates a dataloader for the given dataset.
@@ -179,6 +181,11 @@ def get_dataloader(
     """
     logger.debug(f"Using batch size per device {batch_size}.")
     timeout = Env.LIGHTLY_TRAIN_DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0
+
+    # No DepthBucketSampler is needed here even for series_depth <= 0 (native
+    # per-series depth): RandomResizedCrop3D always resizes its crop to a fixed
+    # output size
+
     dataloader_kwargs: dict[str, Any] = dict(
         dataset=dataset,
         batch_size=batch_size,
@@ -186,6 +193,8 @@ def get_dataloader(
         num_workers=num_workers,
         drop_last=True,
         timeout=timeout,
+        # Reseed the random transforms in every worker, see mi_dataset.worker_init_fn.
+        worker_init_fn=mi_dataset.worker_init_fn,
     )
     if loader_args is not None:
         logger.debug(f"Using additional dataloader arguments {loader_args}.")
@@ -409,6 +418,36 @@ def get_method_args(
         wrapped_model=wrapped_model,
     )
     return args
+
+
+def validate_tokenization_only_steps(
+    method_args: MethodArgs,
+    model: Any,
+    checkpoint: PathLike | None,
+    resume_interrupted: bool,
+) -> None:
+    """Reject a tokenization-only warmup phase with nothing pretrained to warm up to.
+
+    ``DINOv2Args.n_tokenization_only_steps`` only makes sense when the transformer
+    blocks it holds fixed already contain useful weights: either they were just
+    loaded from a ``*-2dinit`` model (a public 2D DINOv2 checkpoint), or this run
+    continues one of our own (``checkpoint=`` or ``resume_interrupted``). Silently
+    ignored for methods other than DINOv2/DINOv3.1, whose args have no such field.
+    """
+    n_tokenization_only_steps = getattr(method_args, "n_tokenization_only_steps", 0)
+    if n_tokenization_only_steps <= 0:
+        return
+    model_is_2dinit = isinstance(model, str) and model.endswith("-2dinit")
+    if model_is_2dinit or checkpoint is not None or resume_interrupted:
+        return
+    raise ValueError(
+        f"method_args.n_tokenization_only_steps={n_tokenization_only_steps} but "
+        f"model='{model}' is not a '*-2dinit' model and neither checkpoint= nor "
+        "resume_interrupted=True is set. Freezing the transformer blocks only makes "
+        "sense when they already hold pretrained weights: use a '*-2dinit' model "
+        "name, or set checkpoint=<path> / resume_interrupted=True to continue a run "
+        "of your own."
+    )
 
 
 def get_method(

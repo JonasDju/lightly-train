@@ -43,6 +43,7 @@ from lightly_train._methods.dinov2.utils import (
     MaskingGenerator,
     create_collated_masks,
     get_optimizer_with_decay,
+    is_tokenization_param,
 )
 from lightly_train._methods.method import Method, TrainingStepResult
 from lightly_train._methods.method_args import MethodArgs
@@ -91,6 +92,18 @@ class DINOv2Args(MethodArgs):
     # head to be trained while the backbone is frozen. This is important because the
     # DINOv2 pretrained weights do not include the projection head.
     student_freeze_backbone_steps: int = 0
+
+    # train only the tokenization
+    # Useful when starting from 2D DINOv2 pretrained weights (a `*-2dinit` model),
+    # where the transformer blocks are pretrained but the whole tokenization
+    # (patch_embed, pos_embed, cls_token, mask_token, register_tokens) is randomly
+    # initialized. Holds the blocks and the final norm fixed for the first N steps so
+    # the tokenization -- and the projection heads, which are random too -- can catch
+    # up before they start dragging the pretrained blocks around. Also useful for
+    # the high-res adaptation phase to keep the blocks frozen why the interpolated
+    # pos-embeds settle. 0 (the default) disables this and trains everything from
+    # the start, same as before this option existed.
+    n_tokenization_only_steps: int = 0
 
     # loss
     dino_loss_weight: float = 1.0
@@ -256,6 +269,13 @@ class DINOv2(Method):
         )
         self.koleo_loss = KoLeoLoss()
 
+        # Tracks whether the tokenization-only phase is currently active, so
+        # on_before_optimizer_step can detect the exact step it ends and log it once.
+        # Set for real in on_train_start, which knows the (possibly resumed)
+        # self.trainer.global_step; this default only matters before that runs (e.g.
+        # in unit tests that call on_before_optimizer_step directly).
+        self._tokenization_only_active = False
+
     def training_step_impl(self, batch: Batch, batch_idx: int) -> TrainingStepResult:
         # Teacher temperature scheduling
         teacher_temp = linear_warmup_schedule(
@@ -266,7 +286,7 @@ class DINOv2(Method):
         )
 
         # Get the views
-        views = batch["views"]
+        views = batch["views"] # (G+L) * [B, C, D, H, W]
         # Calculate the number of crops
         n_global_crops = 2
         n_local_crops = len(views) - n_global_crops
@@ -275,19 +295,23 @@ class DINOv2(Method):
 
         global_views = torch.cat(
             views[:n_global_crops]
-        )  # G * [B, C, H, W] -> [G*B, C, H, W]
+        )  # (G+L) * [B, C, D, H, W] -> [G*B, C, D, H, W]
 
         # Masking
         # TODO(Jonas 06/25): put the masking into a separate method
         n_crops = global_views.shape[0]  # G*B
         batch_size = n_crops // n_global_crops
-        h = global_views.shape[2] // self._patch_size
-        w = global_views.shape[3] // self._patch_size
+
+        # Patch size is stored as (H, W, D). Round up like PatchEmbed, which resizes
+        # inputs to the next multiple of the patch size.
+        d = math.ceil(global_views.shape[2] / self._patch_size[2])
+        h = math.ceil(global_views.shape[3] / self._patch_size[0])
+        w = math.ceil(global_views.shape[4] / self._patch_size[1])
 
         mask_generator = MaskingGenerator(
-            input_size=(h, w),
+            input_size=(d, h, w),
             max_num_patches=int(
-                0.5 * h * w
+                0.5 * d * h * w
             ),  # NOTE: max patch ratio 0.5 is carried over from the original DINOv2 code, can be tuned
         )
         n_masked_crops = int(n_crops * self.method_args.mask_probability)
@@ -299,13 +323,13 @@ class DINOv2(Method):
             mask_generator=mask_generator,
         )
 
-        collated_masks = masks["collated_masks"].to(
+        collated_masks = masks["collated_masks"].to(                                   # [G*B, patD*patH*patW]
             device=self.device, non_blocking=True
         )
-        mask_indices_list = masks["mask_indices_list"].to(
+        mask_indices_list = masks["mask_indices_list"].to(                             # [M,]
             device=self.device, non_blocking=True
         )
-        masks_weight = masks["masks_weight"].to(device=self.device, non_blocking=True)
+        masks_weight = masks["masks_weight"].to(device=self.device, non_blocking=True) # [M,]
         n_masked_patches = mask_indices_list.shape[0]
 
         # Process global views through teacher and student networks
@@ -318,7 +342,7 @@ class DINOv2(Method):
                 mask_indices_list,
                 n_masked_patches,
                 teacher_temp,
-            )  # [G, B, D], [M, D]
+            )  # [G, B, out_dim], [M, out_dim]
         )
         (
             student_cls_tokens_global,
@@ -328,16 +352,16 @@ class DINOv2(Method):
             x=global_views,
             masks=collated_masks,
             mask_indices_list=mask_indices_list,
-        )  # [G*B, D], [M, D]
+        )  # [G*B, out_dim], [G*B, emb_dim], [M, out_dim]
 
         # TODO(Jonas 06/25): clarify if we actually need this list variant --> simplify interface
         # Compute the DINO loss
         dino_global_loss = (
             self.dino_loss.forward(
-                student_output_list=[student_cls_tokens_global],  # [[G*B, D]]
+                student_output_list=[student_cls_tokens_global],  # [[G*B, out_dim]]
                 teacher_out_softmaxed_centered_list=[
                     teacher_cls_tokens_centered.flatten(0, 1)
-                ],  # [[G*B, D]], these were chunked and stacked in reverse so A is matched to B,
+                ],  # [[G*B, out_dim]], these were chunked and stacked in reverse so A is matched to B,
             )
             * 2
             / (n_global_crops_loss_terms + n_local_crops_loss_terms)
@@ -349,18 +373,18 @@ class DINOv2(Method):
         if n_local_crops > 0:
             local_views = torch.cat(
                 views[n_global_crops:]
-            )  # L * [B, C, H, W] -> [L*B, C, H, W]
+            )  # (G+L) * [B, C, D, H, W] -> [L*B, C, D, H, W]
             student_cls_tokens_local = self._forward_student_local(
                 local_views
-            )  # [L*B, D]
+            )  # [L*B, out_dim]
 
             # TODO(Jonas 06/25): ideally move everything to tensor only no list
             dino_local_loss = (
                 self.dino_loss.forward(
                     student_output_list=student_cls_tokens_local.chunk(
                         n_local_crops
-                    ),  # [L, B, D]
-                    teacher_out_softmaxed_centered_list=teacher_cls_tokens_centered,  # [G, B, D]
+                    ),  # [L, B, out_dim]
+                    teacher_out_softmaxed_centered_list=teacher_cls_tokens_centered, # [G, B, out_dim]
                 )
                 / (n_global_crops_loss_terms + n_local_crops_loss_terms)
             )
@@ -376,8 +400,8 @@ class DINOv2(Method):
 
         koleo_loss = sum(
             self.koleo_loss(token)
-            for token in student_cls_tokens_global_before_head.chunk(2)
-        )  # [G, B, D], only use global views
+            for token in student_cls_tokens_global_before_head.chunk(2)     # Shouldn't this be n_global_crops?
+        )  # [G, B, emb_dim], only use global views
 
         loss = (
             self.method_args.dino_loss_weight * dino_global_loss
@@ -407,31 +431,30 @@ class DINOv2(Method):
     ) -> tuple[Tensor, Tensor]:
         tokens = self.teacher_embedding_model.wrapped_model.forward_features(
             x
-        )  # input [G*B, C, ...]
+        )  # input [G*B, C, pixD, pixH, pixW]
 
         # process the cls tokens
         # watch out: these are chunked and cat'd in reverse so A is matched to B in the global crops dino loss
-        cls_tokens = tokens["cls_token"]  # [G*B, C]
+        cls_tokens = tokens["cls_token"]  # [G*B, emb_dim]
         cls_tokens = torch.cat(
             (cls_tokens[batch_size:], cls_tokens[:batch_size])
-        )  # [G*B, C]
+        )  # [G*B, emb_dim]
         cls_tokens_after_dino = self.teacher_head.dino_head.forward(
             cls_tokens
-        )  # [G*B, D]
+        )  # [G*B, out_dim]
 
         # process the masked patch tokens
-        patch_tokens = tokens["features"]  # [G*B, C, H/p, W/p]
-        # TODO(Jonas 06/25): why not flattening the patch tokens here all in one go?
-        patch_tokens = patch_tokens.flatten(2).permute(0, 2, 1)  # [G*B, H/p*W/p, C]
+        patch_tokens = tokens["features"]  # [G*B, emb_dim, patD, patH, patW]
+        patch_tokens = patch_tokens.flatten(2).permute(0, 2, 1)  # [G*B, patD*patH*patW, emb_dim]
 
         masked_patch_tokens = torch.index_select(
-            patch_tokens.flatten(0, 1),  # [G*B*H/p*W/p, C]
+            patch_tokens.flatten(0, 1),  # [G*B*patD*patH*patW, emb_dim]
             dim=0,
             index=mask_indices_list,
-        )  # [M, C]
+        )  # [M, emb_dim]
         masked_patch_tokens_after_ibot = self.teacher_head.ibot_head.forward(
             masked_patch_tokens
-        )  # [M, D]
+        )  # [M, out_dim]
 
         # centering
         # TODO(Jonas 06/25): instantiate the centering method in the loss and remove the logic from here
@@ -439,7 +462,7 @@ class DINOv2(Method):
             # TODO(Jonas 06/25): reshape the return inside the loss
             cls_tokens_centered = self.dino_loss.softmax_center_teacher(
                 cls_tokens_after_dino, teacher_temp=teacher_temp
-            ).view(2, -1, *cls_tokens_after_dino.shape[1:])  # [G, B, D]
+            ).view(2, -1, *cls_tokens_after_dino.shape[1:])  # [G, B, out_dim]
             self.dino_loss.update_center(cls_tokens_after_dino)
 
             # TODO(Jonas 06/25): change the code inside the loss to avoid the unsqueeze
@@ -447,14 +470,14 @@ class DINOv2(Method):
             masked_patch_tokens_centered = self.ibot_loss.softmax_center_teacher(
                 masked_patch_tokens_after_ibot,
                 teacher_temp=teacher_temp,
-            )  # [M, D]
+            )  # [M, out_dim]
             masked_patch_tokens_centered = masked_patch_tokens_centered.squeeze(0)
             self.ibot_loss.update_center(masked_patch_tokens_after_ibot)
         elif self.method_args.center_method == "sinkhorn_knopp":
             # TODO(Jonas 06/25): reshape the return inside the loss
             cls_tokens_centered = self.dino_loss.sinkhorn_knopp_teacher(
                 cls_tokens_after_dino, teacher_temp=teacher_temp
-            ).view(2, -1, *cls_tokens_after_dino.shape[1:])  # [G, B, D]
+            ).view(2, -1, *cls_tokens_after_dino.shape[1:])  # [G, B, out_dim]
 
             masked_patch_tokens_centered = self.ibot_loss.sinkhorn_knopp_teacher(
                 masked_patch_tokens_after_ibot,
@@ -463,7 +486,7 @@ class DINOv2(Method):
                 n_masked_patches_tensor=torch.tensor(
                     [n_masked_patches], dtype=torch.long
                 ).to(device=self.device, non_blocking=True),
-            )  # [M, D]
+            )  # [M, out_dim]
         else:
             raise ValueError(
                 f"Unknown centering method: {self.method_args.center_method}"
@@ -480,41 +503,40 @@ class DINOv2(Method):
         wrapped_model: DINOv2ViTModelWrapper = (
             self.student_embedding_model.wrapped_model  # type: ignore[assignment]
         )
-        tokens = wrapped_model.forward_features(x=x, masks=masks)  # input [G*B, C, ...]
+        tokens = wrapped_model.forward_features(x=x, masks=masks)  # input [G*B, C, pixD, pixH, pixW]
 
         # process the cls tokens
-        cls_tokens = tokens["cls_token"]  # [G*B, C]
+        cls_tokens = tokens["cls_token"]  # [G*B, emb_dim]
         cls_tokens_after_dino = self.student_head.dino_head.forward(
             cls_tokens
-        )  # [G*B, D]
+        )  # [G*B, out_dim]
 
         # process the patch tokens
-        patch_tokens = tokens["features"]  # [G*B, C, H/p, W/p]
-        # TODO(Jonas 06/25): why not flattening the patch tokens here all in one go?
-        patch_tokens = patch_tokens.flatten(2).permute(0, 2, 1)  # [G*B, H/p*W/p, C]
+        patch_tokens = tokens["features"]  # [G*B, emb_dim, patD, patH, patW]
+        patch_tokens = patch_tokens.flatten(2).permute(0, 2, 1)  # [G*B, patD*patH*patW, emb_dim]
 
         masked_patch_tokens = torch.index_select(
-            patch_tokens.flatten(0, 1),  # [G*B*H/p*W/p, C]
+            patch_tokens.flatten(0, 1),  # [G*B*patD*patH*patW, emb_dim]
             dim=0,
             index=mask_indices_list,
-        )  # [M, C]
+        )  # [M, emb_dim]
         masked_patch_tokens_after_ibot = self.student_head.ibot_head.forward(
             masked_patch_tokens
-        )  # [M, D]
+        )  # [M, out_dim]
 
         return cls_tokens_after_dino, cls_tokens, masked_patch_tokens_after_ibot
 
     def _forward_student_local(self, x: Tensor) -> Tensor:
         tokens = self.student_embedding_model.wrapped_model.forward_features(
             x
-        )  # input [L*B, C, ...]
+        )  # input [L*B, C, pixD, pixH, pixW]
 
         # process the cls tokens
         # TODO(Jonas 06/25): unnecessary assignment, can be removed
-        cls_tokens = tokens["cls_token"]  # [L*B, C]
+        cls_tokens = tokens["cls_token"]  # [L*B, emb_dim]
         cls_tokens_after_dino: Tensor = self.student_head.dino_head.forward(
             cls_tokens
-        )  # [L*B, D]
+        )  # [L*B, out_dim]
 
         return cls_tokens_after_dino
 
@@ -606,6 +628,18 @@ class DINOv2(Method):
             end_value=self.method_args.weight_decay_end,
         )
 
+        # Optionally train only the tokenization, freezing the transformer blocks and
+        # the final norm. Derived from global_step on every call rather than applied
+        # once, so it is automatically correct when resuming at any step and needs no
+        # matching "unfreeze" step. Log the one call where this flips from True to
+        # False, i.e. the step the blocks actually unfreeze.
+        tokenization_only_active = (
+            self.trainer.global_step < self.method_args.n_tokenization_only_steps
+        )
+        if self._tokenization_only_active and not tokenization_only_active:
+            self._log_tokenization_only_unfrozen()
+        self._tokenization_only_active = tokenization_only_active
+
         updates = []
         for group in optimizer.param_groups:
             update = {}
@@ -630,6 +664,15 @@ class DINOv2(Method):
                 self.trainer.global_step
                 < self.method_args.student_freeze_last_layer_steps
                 and "last_layer" in group["name"]
+            ):
+                update["lr"] = 0.0
+
+            # Optionally train only the tokenization, freezing the transformer blocks
+            # and the final norm.
+            if (
+                tokenization_only_active
+                and "head" not in group["name"]
+                and not is_tokenization_param(group["name"])
             ):
                 update["lr"] = 0.0
 
@@ -686,7 +729,48 @@ class DINOv2(Method):
             f"batch size {self.global_batch_size}."
         )
 
+    @rank_zero_only  # type: ignore[misc]
+    def _log_tokenization_only_status(self) -> None:
+        n_tokenization_only_steps = self.method_args.n_tokenization_only_steps
+        global_step = self.trainer.global_step
+        if self._tokenization_only_active:
+            remaining_steps = n_tokenization_only_steps - global_step
+            logger.info(
+                "Training only the tokenization (patch_embed, pos_embed, cls_token, "
+                "mask_token, register_tokens) and the projection heads. The "
+                "transformer blocks and final norm are frozen for "
+                f"{remaining_steps} more step(s), until step "
+                f"{n_tokenization_only_steps} (currently at step {global_step})."
+            )
+        else:
+            logger.info(
+                "Training all layers, including the transformer blocks and final "
+                "norm (n_tokenization_only_steps="
+                f"{n_tokenization_only_steps}, currently at step {global_step})."
+            )
+
+    @rank_zero_only  # type: ignore[misc]
+    def _log_tokenization_only_unfrozen(self) -> None:
+        logger.info(
+            "Unfreezing the transformer blocks and final norm at step "
+            f"{self.trainer.global_step} (n_tokenization_only_steps="
+            f"{self.method_args.n_tokenization_only_steps}). Now training all "
+            "layers."
+        )
+
     def on_fit_start(self) -> None:
         # Warn if total steps < 125k.
         if self.trainer.estimated_stepping_batches < self.RECOMMENDED_MIN_STEPS:
             self.warn_if_steps_too_low()
+
+    def on_train_start(self) -> None:
+        # Log whether the tokenization-only phase is active. Compared against the
+        # current global_step rather than 0, so this is accurate after a resumed run
+        # (resume_interrupted=True) as well as a fresh one. Note that the
+        # checkpoint=<path> loading path (as opposed to resume_interrupted=True) does
+        # not restore global_step, it always restarts at step 0, same as the
+        # pre-existing student_freeze_backbone_steps/student_freeze_last_layer_steps.
+        self._tokenization_only_active = (
+            self.trainer.global_step < self.method_args.n_tokenization_only_steps
+        )
+        self._log_tokenization_only_status()

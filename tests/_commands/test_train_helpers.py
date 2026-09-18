@@ -22,18 +22,21 @@ from torch.utils.data import Dataset
 from torchvision.datasets import FakeData
 
 from lightly_train._commands import train_helpers
+from lightly_train._data import mi_dataset
+from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods import method_helpers
+from lightly_train._methods.dino.dino_transform import DINOGaussianBlurArgs
+from lightly_train._methods.dinov2.dinov2 import DINOv2Args
+from lightly_train._methods.dinov2.dinov2_transform import (
+    DINOv2ViTTransform,
+    DINOv2ViTTransformArgs,
+)
 from lightly_train._methods.distillationv3.distillationv3 import DistillationV3Args
 from lightly_train._methods.simclr.simclr import (
     SimCLR,
     SimCLRArgs,
     SimCLRSGDArgs,
-)
-from lightly_train._methods.simclr.simclr_transform import (
-    SimCLRColorJitterArgs,
-    SimCLRTransform,
-    SimCLRTransformArgs,
 )
 from lightly_train._models import package_helpers
 from lightly_train._models.embedding_model import EmbeddingModel
@@ -44,6 +47,8 @@ from lightly_train._scaling import IMAGENET_SIZE, ScalingInfo
 from lightly_train._transforms.transform import (
     MethodTransformArgs,
     NormalizeArgs,
+    RandGaussianSharpenArgs,
+    RandGibbsNoiseArgs,
     RandomRotationArgs,
 )
 from lightly_train.errors import ConfigValidationError
@@ -78,25 +83,25 @@ class MockDataset(Dataset[DatasetItem]):
 
 
 def test_get_transform__method() -> None:
-    transform_args = SimCLRTransformArgs()
+    transform_args = DINOv2ViTTransformArgs()
     transform_args.resolve_auto()
     assert isinstance(
         train_helpers.get_transform(
-            method="simclr", transform_args_resolved=transform_args
+            method="dinov2", transform_args_resolved=transform_args
         ),
-        SimCLRTransform,
+        DINOv2ViTTransform,
     )
 
 
 def test_get_transform__method_and_transform_dict() -> None:
-    transform_args = SimCLRTransformArgs(random_gray_scale=0.42)
+    transform_args = DINOv2ViTTransformArgs(image_size=(56, 56, 16))
     transform_args.resolve_auto()
     transform = train_helpers.get_transform(
-        method="simclr",
+        method="dinov2",
         transform_args_resolved=transform_args,
     )
-    assert isinstance(transform, SimCLRTransform)
-    assert transform.transform_args.random_gray_scale == 0.42
+    assert isinstance(transform, DINOv2ViTTransform)
+    assert transform.transform_args.image_size == (56, 56, 16)
 
 
 @pytest.mark.parametrize(
@@ -130,19 +135,58 @@ def test_get_dataloader(
     loader_args: dict[str, Any] | None,
     expected_batch_size: int,
 ) -> None:
-    dataset = MockDataset(torch.rand(16, 3, 32, 32))
+    dataset = MockDataset(torch.rand(16, 1, 8, 16, 16))
     dataloader = train_helpers.get_dataloader(
         dataset=dataset,
         batch_size=batch_size,
         num_workers=0,
+        series_depth=8,
         loader_args=loader_args,
     )
+    assert dataloader.worker_init_fn is mi_dataset.worker_init_fn
     assert len(dataloader) == 16 // expected_batch_size
     batches = list(dataloader)
     assert len(batches) == 16 // expected_batch_size
     assert all(
-        view.shape == (expected_batch_size, 3, 32, 32) for view in batches[0]["views"]
+        view.shape == (expected_batch_size, 1, 8, 16, 16)
+        for view in batches[0]["views"]
     )
+
+
+@pytest.mark.parametrize("series_depth", [0, -1])
+def test_get_dataloader__mi_dataset_series_depth_not_positive(
+    tmp_path: Path, series_depth: int
+) -> None:
+    """series_depth<=0 (native per-series depth) needs no depth-bucket sampler:
+    RandomResizedCrop3D always resizes its crop to a fixed output size, so every
+    MIDataset item has the same view shapes regardless of the input volume's
+    native depth, and default collation works even across series of different
+    depths."""
+    data_root, data_meta = helpers.create_mi_dataset(tmp_path, n_cases=4, depths=(6, 9))
+    transform_args = train_helpers.get_transform_args(
+        method="dinov2", transform_args=dict(helpers.MI_DINOV2_TRANSFORM_ARGS)
+    )
+    transform = train_helpers.get_transform(
+        method="dinov2", transform_args_resolved=transform_args
+    )
+    dataset = MIDataset(
+        data_root=data_root,
+        data_meta=data_meta,
+        transform=transform,
+        series_depth=series_depth,
+    )
+    assert {dataset._core.effective_depth(i) for i in range(len(dataset))} == {6, 9}
+
+    dataloader = train_helpers.get_dataloader(
+        dataset=dataset,
+        batch_size=4,
+        num_workers=0,
+        series_depth=series_depth,
+        loader_args=None,
+    )
+    batch = next(iter(dataloader))
+    for view in batch["views"]:
+        assert view.shape[0] == 4
 
 
 @pytest.mark.parametrize("model_name", REPRESENTATIVE_MODEL_NAMES)
@@ -166,6 +210,17 @@ def test_get_embedding_model(
         and not model_name.startswith("torchvision/")
     ):
         assert model.get_model().num_classes == model_args["num_classes"]
+
+
+@pytest.mark.parametrize("embed_dim", [None, 64])
+def test_get_embedding_model__dinov2(embed_dim: int | None) -> None:
+    x = torch.rand(1, 1, 16, 56, 56)  # (B, C, D, H, W)
+    model = package_helpers.get_wrapped_model("dinov2/_vittest14", num_input_channels=1)
+    embedding_model = train_helpers.get_embedding_model(model, embed_dim=embed_dim)
+    embedding = embedding_model.forward(x)
+    assert embedding.shape == (1, embedding_model.embed_dim, 1, 1, 1)
+    features = embedding_model.forward(x, pool=False)
+    assert features.shape == (1, embedding_model.embed_dim, 4, 4, 4)
 
 
 @pytest.mark.parametrize("embed_dim", [None, 64])
@@ -473,32 +528,51 @@ def test_get_epochs(
 @pytest.mark.parametrize(
     "transform_dict, expected_result",
     [
-        # Test case for default empty dictionary
-        ({}, SimCLRTransformArgs(num_channels=3)),
+        # Test case for default empty dictionary.
+        (
+            {},
+            DINOv2ViTTransformArgs(num_channels=1),
+        ),
         # Test case for None input
-        (None, SimCLRTransformArgs(num_channels=3)),
-        # Test case for user config
+        (
+            None,
+            DINOv2ViTTransformArgs(num_channels=1),
+        ),
+        # Test case for user config. Lists are converted to tuples as on the CLI.
         (
             {
-                "normalize": {"mean": (0.5, 0.5, 0.5), "std": (0.5, 0.5, 0.5)},
+                "image_size": [56, 56, 16],
+                "normalize": {"mean": [0.3], "std": [0.2]},
                 "random_rotation": {"prob": 0.5, "degrees": 30},
-                "color_jitter": {"brightness": 0.1},
+                "gaussian_blur": {"prob": 0.3},
             },
-            SimCLRTransformArgs(
-                num_channels=3,
-                normalize=NormalizeArgs(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+            DINOv2ViTTransformArgs(
+                num_channels=1,
+                image_size=(56, 56, 16),
+                normalize=NormalizeArgs(mean=(0.3,), std=(0.2,)),
                 random_rotation=RandomRotationArgs(prob=0.5, degrees=30),
-                color_jitter=SimCLRColorJitterArgs(brightness=0.1),
+                gaussian_blur=DINOGaussianBlurArgs(prob=0.3),
             ),
         ),
-        # Test case of SimCLRTransformArgs input
+        # Test case of DINOv2ViTTransformArgs input
         (
-            SimCLRTransformArgs(
-                normalize=NormalizeArgs(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+            DINOv2ViTTransformArgs(image_size=(56, 56, 16)),
+            DINOv2ViTTransformArgs(
+                num_channels=1,
+                image_size=(56, 56, 16),
             ),
-            SimCLRTransformArgs(
-                num_channels=3,
-                normalize=NormalizeArgs(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ),
+        # Test case for the new MONAI intensity/artifact augmentations, CLI-shaped
+        # (lists instead of tuples, as OmegaConf would produce).
+        (
+            {
+                "gibbs_noise": {"prob": 1.0, "alpha": [0.2, 0.8]},
+                "gaussian_sharpen": {"sigma1": [0.5, 1.5]},
+            },
+            DINOv2ViTTransformArgs(
+                num_channels=1,
+                gibbs_noise=RandGibbsNoiseArgs(prob=1.0, alpha=(0.2, 0.8)),
+                gaussian_sharpen=RandGaussianSharpenArgs(sigma1=(0.5, 1.5)),
             ),
         ),
     ],
@@ -508,16 +582,24 @@ def test_get_transform_args__success(
     expected_result: MethodTransformArgs,
 ) -> None:
     transform_args = train_helpers.get_transform_args(
-        method="simclr", transform_args=transform_dict
+        method="dinov2", transform_args=transform_dict
     )
     assert transform_args == expected_result
 
 
-def test_get_transform_args__failure() -> None:
+@pytest.mark.parametrize(
+    "transform_dict",
+    [
+        {"nonexisting_arg": 1},
+        {"image_size": [56, 56]},  # Volumes need a size for all three axes.
+        {"gibbs_noise": {"bogus": 1}},  # Unknown nested key.
+    ],
+)
+def test_get_transform_args__failure(transform_dict: dict[str, Any]) -> None:
     with pytest.raises(ConfigValidationError):
         train_helpers.get_transform_args(
-            method="simclr",
-            transform_args={"nonexisting_arg": 1},
+            method="dinov2",
+            transform_args=transform_dict,
         )
 
 
@@ -670,6 +752,77 @@ def test_load_checkpoint__checkpoint_and_resume(
             embedding_model=mocker.MagicMock(),
             method=mocker.MagicMock(),
         )
+
+
+@pytest.mark.parametrize(
+    "model, checkpoint, resume_interrupted",
+    [
+        ("dinov2/vitb14-reg4-2dinit", None, False),
+        ("dinov2/_vittest14", Path("/tmp/some.ckpt"), False),
+        ("dinov2/_vittest14", None, True),
+    ],
+)
+def test_validate_tokenization_only_steps__ok(
+    model: str, checkpoint: Path | None, resume_interrupted: bool
+) -> None:
+    # Must not raise: either the model is a -2dinit model, or the run continues one
+    # of our own via checkpoint= or resume_interrupted=.
+    train_helpers.validate_tokenization_only_steps(
+        method_args=DINOv2Args(n_tokenization_only_steps=10),
+        model=model,
+        checkpoint=checkpoint,
+        resume_interrupted=resume_interrupted,
+    )
+
+
+def test_validate_tokenization_only_steps__raises_without_pretrained_source() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"n_tokenization_only_steps=10 but model='dinov2/_vittest14' is not a "
+        r"'\*-2dinit' model",
+    ):
+        train_helpers.validate_tokenization_only_steps(
+            method_args=DINOv2Args(n_tokenization_only_steps=10),
+            model="dinov2/_vittest14",
+            checkpoint=None,
+            resume_interrupted=False,
+        )
+
+
+def test_validate_tokenization_only_steps__default_zero_is_always_ok() -> None:
+    # n_tokenization_only_steps=0 is the default and must never raise, regardless of
+    # model/checkpoint/resume_interrupted.
+    train_helpers.validate_tokenization_only_steps(
+        method_args=DINOv2Args(),
+        model="dinov2/_vittest14",
+        checkpoint=None,
+        resume_interrupted=False,
+    )
+
+
+def test_validate_tokenization_only_steps__non_module_object_is_not_2dinit() -> None:
+    # A Module instance (rather than a "*-2dinit" string) never satisfies the
+    # -2dinit branch, so one of the other two escape hatches is required.
+    with pytest.raises(ValueError, match=r"n_tokenization_only_steps=10"):
+        train_helpers.validate_tokenization_only_steps(
+            method_args=DINOv2Args(n_tokenization_only_steps=10),
+            model=helpers.dummy_dinov2_vit_model(),
+            checkpoint=None,
+            resume_interrupted=False,
+        )
+
+
+def test_validate_tokenization_only_steps__ignored_for_methods_without_the_field() -> (
+    None
+):
+    # SimCLRArgs has no n_tokenization_only_steps field; getattr's default keeps this
+    # a no-op for every non-DINOv2 method.
+    train_helpers.validate_tokenization_only_steps(
+        method_args=SimCLRArgs(),
+        model="dinov2/_vittest14",
+        checkpoint=None,
+        resume_interrupted=False,
+    )
 
 
 def test_load_state_dict(tmp_path: Path) -> None:

@@ -1,0 +1,12 @@
+# Same as vits14.yaml, but with the FFN of the public 2D DINOv2
+# ViT-S/14 checkpoint, so that its transformer blocks can be loaded into this 3D
+# model (see MODELS["vits14-2dinit"]).
+student:
+  arch: vit_small
+  patch_size:
+    - 14
+    - 14
+    - 4
+  drop_path_rate: 0.1
+  ffn_layer: mlp
+  block_chunks: 0

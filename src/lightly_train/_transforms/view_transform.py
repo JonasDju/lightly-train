@@ -8,28 +8,21 @@
 from __future__ import annotations
 
 import math
-from typing import Any, cast
-
-import cv2
 import numpy as np
 import torch
 from albumentations import (
     BasicTransform,
     ColorJitter,
     GaussianBlur,
-    HorizontalFlip,
-    Rotate,
     Solarize,
     ToGray,
-    VerticalFlip,
 )
-from albumentations.pytorch.transforms import ToTensorV2
 from lightning_utilities.core.imports import RequirementCache
 from monai.data import MetaTensor
 from monai.transforms import (
     Transform,
     RandRotate, NormalizeIntensity, Compose, ToNumpy,
-    RandAdjustContrast, RandGaussianNoise, RandHistogramShift, RandGibbsNoise,
+    RandAdjustContrast, RandGaussianNoise, RandGibbsNoise, OneOf,
 )
 
 from lightly_train._configs.config import PydanticConfig
@@ -37,8 +30,8 @@ from lightly_train._transforms.monai_wrappers import (
     AnisotropyAwareRandGaussianSharpen,
     AnisotropyAwareRandGaussianSmooth,
     AnisotropyTrackingRandomResizedCrop3D,
+    AlphaRandHistogramShift
 )
-from lightly_train._transforms.normalize import NormalizeDtypeAware as Normalize
 from lightly_train._transforms.transform import (
     ColorJitterArgs,
     GaussianBlurArgs,
@@ -75,28 +68,15 @@ class ToTensor(Transform):
 
 class ViewTransformArgs(PydanticConfig):
     random_resized_crop: RandomResizedCropArgs  # only its .scale attribute can be None
-    random_flip: RandomFlipArgs | None
     random_rotation: RandomRotationArgs | None
     gaussian_blur: GaussianBlurArgs | None
     normalize: NormalizeArgs
+    random_flip: RandomFlipArgs | None = None
     gaussian_sharpen: RandGaussianSharpenArgs | None = None
     gibbs_noise: RandGibbsNoiseArgs | None = None
     histogram_shift: RandHistogramShiftArgs | None = None
     adjust_contrast: RandAdjustContrastArgs | None = None
     gaussian_noise: RandGaussianNoiseArgs | None = None
-
-
-def _get_RandomResizedCrop(args: RandomResizedCropArgs) -> Transform:
-    # A lot of though went into the choice of interpolation method here.
-    # See details in https://github.com/lightly-ai/lightly-train-old/pull/284
-    assert args.scale is not None
-    return AnisotropyTrackingRandomResizedCrop3D(
-        size=(args.size[0], args.size[1], args.size[2]),
-        scale=args.scale.as_tuple(),
-        interpolation="area",
-        upscale_interpolation="linear",     # Deviates from CV2 INTER_AREA slightly, but looks better in my opinion.
-                                            # Select None for the closest 3D approximation of CV2s' INTER_AREA
-    )
 
 
 def _get_Solarize(args: SolarizeArgs) -> Solarize:
@@ -191,75 +171,38 @@ class ViewTransform:
             args.random_resized_crop.scale = RandomResizeArgs(
                 min_scale=1.0, max_scale=1.0
             )
-        transform += [_get_RandomResizedCrop(args.random_resized_crop)]
-
-        # Disable flipping for now, as the MRI volumes should always have the same orientation
-        # if args.random_flip:
-        #     transform += [
-        #         HorizontalFlip(p=args.random_flip.horizontal_prob),
-        #         VerticalFlip(p=args.random_flip.vertical_prob),
-        #     ]
+        transform += [
+            AnisotropyTrackingRandomResizedCrop3D(
+                size=args.random_resized_crop.size,
+                scale=args.scale.as_tuple(),
+                interpolation="area",
+                upscale_interpolation="linear",
+                # Deviates from CV2 INTER_AREA slightly, but looks better in my opinion.
+                # Select None for the closest 3D approximation of CV2s' INTER_AREA
+            )
+        ]
 
         if args.random_rotation:
             # MONAI expects the rotation ranges in radians, in-plane rotation only
             transform += [
                 RandRotate(
-                    range_x=tuple(
+                    prob=args.random_rotation.prob,
+                    range_z=tuple(
                         math.radians(deg)
                         for deg in args.random_rotation.degrees_tuple()
                     ),
-                    prob=args.random_rotation.prob,
-                    mode="bilinear",
+                    mode=args.random_rotation.interpolation,
                     padding_mode="border"
                 )
             ]
 
-
-        # Gaussian blur
-        if args.gaussian_blur:
-            transform += [
-                AnisotropyAwareRandGaussianSmooth(
-                    sigma_x=args.gaussian_blur.sigmas,
-                    sigma_y=args.gaussian_blur.sigmas,
-                    sigma_z=args.gaussian_blur.sigmas,
-                    prob=args.gaussian_blur.prob
-                )
-            ]
-
-        # The remaining MONAI intensity/artifact augmentations, all opt-in (None by
-        # default). Order matters: spatial filters first (sharpen, alongside the
-        # blur above), then the k-space acquisition artifact (Gibbs), then intensity
-        # remapping (histogram shift, contrast), then additive noise last so nothing
-        # downstream smooths it away. All of these run after NormalizeIntensity
-        # (moved to the front above), so their intensity-scale parameters are
-        # interpreted directly in the network's own input distribution.
-        if args.gaussian_sharpen:
-            transform += [
-                AnisotropyAwareRandGaussianSharpen(
-                    sigma1_x=args.gaussian_sharpen.sigma1,
-                    sigma1_y=args.gaussian_sharpen.sigma1,
-                    sigma1_z=args.gaussian_sharpen.sigma1,
-                    sigma2_x=args.gaussian_sharpen.sigma2,
-                    sigma2_y=args.gaussian_sharpen.sigma2,
-                    sigma2_z=args.gaussian_sharpen.sigma2,
-                    alpha=args.gaussian_sharpen.alpha,
-                    prob=args.gaussian_sharpen.prob,
-                )
-            ]
-
-        if args.gibbs_noise:
-            transform += [
-                RandGibbsNoise(
-                    prob=args.gibbs_noise.prob,
-                    alpha=args.gibbs_noise.alpha,
-                )
-            ]
-
+        # Intensity augmentations to replace the photometric ops
         if args.histogram_shift:
             transform += [
-                RandHistogramShift(
-                    num_control_points=args.histogram_shift.num_control_points,
+                AlphaRandHistogramShift(
+                    alpha=args.histogram_shift.alpha,
                     prob=args.histogram_shift.prob,
+                    num_control_points=args.histogram_shift.num_control_points,
                 )
             ]
 
@@ -268,6 +211,52 @@ class ViewTransform:
                 RandAdjustContrast(
                     prob=args.adjust_contrast.prob,
                     gamma=args.adjust_contrast.gamma,
+                )
+            ]
+
+
+        # If both blur and sharpen is enabled, select one of them. If only one of them is
+        # enabled, only add this one
+        if (args.gaussian_blur and args.gaussian_blur.prob > 0
+                and args.gaussian_sharpen and args.gaussian_sharpen.prob > 0):
+            transform += [
+                OneOf([
+                    AnisotropyAwareRandGaussianSmooth(
+                        prob=args.gaussian_blur.prob,
+                        sigma_range=args.gaussian_blur.sigma_range,
+                    ),
+                    AnisotropyAwareRandGaussianSharpen(
+                        prob=args.gaussian_sharpen.prob,
+                        sigma1=args.gaussian_sharpen.sigma1,
+                        sigma2=args.gaussian_sharpen.sigma2,
+                        alpha=args.gaussian_sharpen.alpha,
+                    )
+                ])
+            ]
+        elif args.gaussian_blur and args.gaussian_blur.prob > 0:
+            transform += [
+                AnisotropyAwareRandGaussianSmooth(
+                    prob=args.gaussian_blur.prob,
+                    sigma_range=args.gaussian_blur.sigma_range,
+                )
+            ]
+        elif args.gaussian_sharpen and args.gaussian_sharpen.prob > 0:
+            transform += [
+                AnisotropyAwareRandGaussianSharpen(
+                    prob=args.gaussian_sharpen.prob,
+                    sigma1=args.gaussian_sharpen.sigma1,
+                    sigma2=args.gaussian_sharpen.sigma2,
+                    alpha=args.gaussian_sharpen.alpha,
+                )
+            ]
+
+
+        # Noise
+        if args.gibbs_noise:
+            transform += [
+                RandGibbsNoise(
+                    prob=args.gibbs_noise.prob,
+                    alpha=args.gibbs_noise.alpha,
                 )
             ]
 
@@ -280,8 +269,8 @@ class ViewTransform:
                 )
             ]
 
-        transform += [ToTensor()]
 
+        transform += [ToTensor()]
         self.transform = Compose(transform)
 
     def __call__(self, input: TransformInput) -> TransformOutputSingleView:

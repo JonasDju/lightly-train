@@ -126,7 +126,7 @@ class RandomRotate90Args(PydanticConfig):
 class RandomRotationArgs(PydanticConfig):
     prob: float = Field(ge=0.0, le=1.0)
     degrees: float | tuple[float, float]
-    interpolation: int = cv2.INTER_AREA
+    interpolation: str = "bilinear"
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
     @field_validator("degrees", mode="before")
@@ -139,6 +139,7 @@ class RandomRotationArgs(PydanticConfig):
     def degrees_tuple(self) -> tuple[float, float]:
         if isinstance(self.degrees, (int, float)):
             return float(-self.degrees), float(self.degrees)
+        assert len(self.degrees) == 2
         return tuple(float(d) for d in self.degrees)  # type: ignore[return-value]
 
 
@@ -159,25 +160,7 @@ class ColorJitterArgs(PydanticConfig):
 
 class GaussianBlurArgs(PydanticConfig):
     prob: float = Field(ge=0.0, le=1.0)
-    sigmas: tuple[float, float]
-    blur_limit: int | tuple[int, int]
-
-    # Using strict=False does not work here, because we have a Union type.
-    @pydantic.field_validator("blur_limit", mode="before")
-    def cast_list_to_tuple(cls, value: int | Sequence[int]) -> int | tuple[int, int]:
-        if isinstance(value, int):
-            return value
-        elif (
-            isinstance(value, Sequence)
-            and (len(value) == 2)
-            and all(isinstance(v, int) for v in value)
-        ):
-            value = tuple(value)
-            assert len(value) == 2
-            assert all(isinstance(v, int) for v in value)
-            return value
-        else:
-            raise ValueError("blur_limit must be an int or a tuple of ints")
+    sigma_range: tuple[float, float]
 
 
 class SolarizeArgs(PydanticConfig):
@@ -195,18 +178,19 @@ class SolarizeArgs(PydanticConfig):
 
 
 class RandAdjustContrastArgs(PydanticConfig):
-    prob: float = Field(default=0.1, ge=0.0, le=1.0)
-    gamma: tuple[float, float] = Field(default=(0.5, 4.5), strict=False)
+    prob: float = Field(default=0.8, ge=0.0, le=1.0)
+    gamma: tuple[float, float] = Field(default=(0.8, 1.2), strict=False)
 
 
 class RandGaussianNoiseArgs(PydanticConfig):
     prob: float = Field(default=0.1, ge=0.0, le=1.0)
     mean: float = 0.0
-    std: float = 0.1
+    std: float = 0.075
 
 
 class RandHistogramShiftArgs(PydanticConfig):
-    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    alpha: float = Field(default=0.25, ge=0.0, le=1.0)
+    prob: float = Field(default=0.8, ge=0.0, le=1.0)
     num_control_points: int | tuple[int, int] = 10
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
@@ -226,14 +210,10 @@ class RandHistogramShiftArgs(PydanticConfig):
 
 
 class RandGaussianSharpenArgs(PydanticConfig):
-    # One isotropic sigma range per stage; view_transform.py fans each out to
-    # sigma{1,2}_{x,y,z}, the same way GaussianBlurArgs.sigmas feeds
-    # sigma_x/sigma_y/sigma_z, and anisotropy-scales the z component (see
-    # AnisotropyAwareRandGaussianSharpen in monai_wrappers.py).
     prob: float = Field(default=0.1, ge=0.0, le=1.0)
     sigma1: tuple[float, float] = Field(default=(0.5, 1.0), strict=False)
     sigma2: float | tuple[float, float] = 0.5
-    alpha: tuple[float, float] = Field(default=(10.0, 30.0), strict=False)
+    alpha: tuple[float, float] = Field(default=(5.0, 10.0), strict=False)
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
     @pydantic.field_validator("sigma2", mode="before")
@@ -259,8 +239,8 @@ class RandGibbsNoiseArgs(PydanticConfig):
     # physically expected Gibbs artifact for 2D multi-slice MRI acquisitions (ringing
     # from in-plane readout/phase-encode truncation, not across slices), so no
     # rescaling is applied here.
-    prob: float = Field(default=0.1, ge=0.0, le=1.0)
-    alpha: float | tuple[float, float] = (0.0, 1.0)
+    prob: float = Field(default=0.2, ge=0.0, le=1.0)
+    alpha: float | tuple[float, float] = (0.5, 0.75)
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
     @pydantic.field_validator("alpha", mode="before")
@@ -405,7 +385,7 @@ class MethodTransformArgs(PydanticConfig):
     channel_drop: ChannelDropArgs | None = None
     num_channels: int | Literal["auto"]
     random_resize: RandomResizeArgs | None
-    random_flip: RandomFlipArgs | None
+    random_flip: RandomFlipArgs | None = None
     random_rotation: RandomRotationArgs | None
     color_jitter: ColorJitterArgs | None = None
     random_gray_scale: float | None = None

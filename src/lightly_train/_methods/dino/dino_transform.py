@@ -49,8 +49,7 @@ class DINOLocalViewRandomResizeArgs(RandomResizeArgs):
 
 class DINOGaussianBlurArgs(GaussianBlurArgs):
     prob: float = 1.0
-    sigmas: tuple[float, float] = Field(default=(0.1, 2), strict=False)
-    blur_limit: int | tuple[int, int] = 0
+    sigma_range: tuple[float, float] = Field(default=(0.1, 2), strict=False)
 
 
 class DINOGlobalView1GaussianBlurArgs(DINOGaussianBlurArgs):
@@ -64,6 +63,10 @@ class DINOLocalViewGaussianBlurArgs(DINOGaussianBlurArgs):
 class DINOGlobalView1TransformArgs(PydanticConfig):
     gaussian_blur: DINOGlobalView1GaussianBlurArgs | None = Field(
         default_factory=DINOGlobalView1GaussianBlurArgs
+    )
+    gaussian_sharpen: RandGaussianSharpenArgs | None = None
+    gibbs_noise: RandGibbsNoiseArgs | None = Field(
+        default_factory=RandGibbsNoiseArgs
     )
 
 
@@ -79,34 +82,43 @@ class DINOLocalViewTransformArgs(PydanticConfig):
 
 
 class DINOTransformArgs(MethodTransformArgs):
-    # TODO: Authors recommend to use different scales for convnets than
-    # transformers. We should add a check for the model type and use the appropriate
-    # scales accordingly.
-    # https://github.com/facebookresearch/dino#resnet-50-and-other-convnets-trainings
     image_size: ImageSizeTuple = (224, 224, 16)
     num_channels: int | Literal["auto"] = "auto"
-    random_resize: DINORandomResizeArgs | None = Field(
+    normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
+
+    # Resizing & rotation
+    random_resize: DINORandomResizeArgs | None = Field(         # overwritten by DINOv2ViTTransformArgs
         default_factory=DINORandomResizeArgs
     )
-    random_flip: RandomFlipArgs | None = Field(default_factory=RandomFlipArgs)
     random_rotation: RandomRotationArgs | None = None
-    normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
+
+    # Replacement for photometric ops
+    histogram_shift: RandHistogramShiftArgs | None = Field(
+        default_factory=RandHistogramShiftArgs
+    )
+    adjust_contrast: RandAdjustContrastArgs | None = Field(
+        default_factory=RandAdjustContrastArgs
+    )
+
+    # Smoothing / Sharpening
     gaussian_blur: DINOGaussianBlurArgs | None = Field(
         default_factory=DINOGaussianBlurArgs
     )
     gaussian_sharpen: RandGaussianSharpenArgs | None = None
+
+    # Noise
     gibbs_noise: RandGibbsNoiseArgs | None = None
-    histogram_shift: RandHistogramShiftArgs | None = None
-    adjust_contrast: RandAdjustContrastArgs | None = None
     gaussian_noise: RandGaussianNoiseArgs | None = None
+
+    # Special settings for the second global view and the local views
     global_view_1: DINOGlobalView1TransformArgs = Field(
         default_factory=DINOGlobalView1TransformArgs
     )
-    local_view: DINOLocalViewTransformArgs | None = Field(
+    local_view: DINOLocalViewTransformArgs | None = Field(      # overwritten by DINOv2ViTTransformArgs
         default_factory=DINOLocalViewTransformArgs
     )
-    # Record per-view crop/flip geometry for dense-relational losses that need
-    # crop boxes (e.g. the dinov31 PaKA cross-view loss).
+
+    # Ignore: Only relevant for DINOv3
     record_geometry: bool = False
 
 
@@ -126,7 +138,6 @@ class DINOTransform(MethodTransform):
                     size=transform_args.image_size,
                     scale=transform_args.random_resize,
                 ),
-                random_flip=transform_args.random_flip,
                 random_rotation=transform_args.random_rotation,
                 gaussian_blur=transform_args.gaussian_blur,
                 normalize=transform_args.normalize,
@@ -145,12 +156,11 @@ class DINOTransform(MethodTransform):
                     size=transform_args.image_size,
                     scale=transform_args.random_resize,
                 ),
-                random_flip=transform_args.random_flip,
                 random_rotation=transform_args.random_rotation,
                 gaussian_blur=transform_args.global_view_1.gaussian_blur,
                 normalize=transform_args.normalize,
-                gaussian_sharpen=transform_args.gaussian_sharpen,
-                gibbs_noise=transform_args.gibbs_noise,
+                gaussian_sharpen=transform_args.global_view_1.gaussian_sharpen,
+                gibbs_noise=transform_args.global_view_1.gibbs_noise,
                 histogram_shift=transform_args.histogram_shift,
                 adjust_contrast=transform_args.adjust_contrast,
                 gaussian_noise=transform_args.gaussian_noise,
@@ -168,7 +178,6 @@ class DINOTransform(MethodTransform):
                         size=transform_args.local_view.view_size,
                         scale=transform_args.local_view.random_resize,
                     ),
-                    random_flip=transform_args.random_flip,
                     random_rotation=transform_args.random_rotation,
                     gaussian_blur=transform_args.local_view.gaussian_blur,
                     normalize=transform_args.normalize,

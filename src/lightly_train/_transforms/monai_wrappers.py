@@ -59,7 +59,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from monai.data import MetaTensor
-from monai.transforms import RandGaussianSharpen, RandGaussianSmooth
+from monai.transforms import RandGaussianSharpen, RandGaussianSmooth, RandHistogramShift
 from numpy.typing import NDArray
 
 from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
@@ -69,6 +69,7 @@ __all__ = [
     "AnisotropyTrackingRandomResizedCrop3D",
     "AnisotropyAwareRandGaussianSmooth",
     "AnisotropyAwareRandGaussianSharpen",
+    "AlphaRandHistogramShift"
 ]
 
 # (H, W, D) of the volume before RandomResizedCrop3D's crop+resize.
@@ -91,6 +92,20 @@ def _get_anisotropy_shape(img: Any) -> tuple[int, int, int]:
     return int(h), int(w), int(d)
 
 
+class AlphaRandHistogramShift(RandHistogramShift):
+    """ The default RandHistogramShift but with an alpha value to control its strength
+
+    The default augmentation is way too strong.
+    """
+
+    def __init__(self, alpha: float, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.alpha = alpha
+
+    def __call__(self, img, randomize: bool = True):
+        transformed = super().__call__(img, randomize=randomize)
+        return self.alpha * transformed + (1 - self.alpha) * img
+
 class AnisotropyTrackingRandomResizedCrop3D(RandomResizedCrop3D):
     """``RandomResizedCrop3D`` that tags its output with the pre-crop shape.
 
@@ -111,8 +126,8 @@ class AnisotropyAwareRandGaussianSmooth(RandGaussianSmooth):
     depth axis roughly matches the in-plane blur extent.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, sigma_range: tuple[float, float], *args: Any, **kwargs: Any) -> None:
+        super().__init__(sigma_x=sigma_range, sigma_y=sigma_range, sigma_z=sigma_range, *args, **kwargs)
         # The configured (isotropic) bounds, kept around so each call rescales
         # from the original value rather than compounding on the previous call's
         # already-scaled sigma_z.
@@ -132,8 +147,20 @@ class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
     ``D / sqrt(H * W)`` ratio as ``AnisotropyAwareRandGaussianSmooth``.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self,
+                 sigma_1: tuple[float, float],
+                 sigma_2: float | tuple[float, float],
+                 *args: Any,
+                 **kwargs: Any) -> None:
+        super().__init__(
+            sigma1_x=sigma_1,
+            sigma1_y=sigma_1,
+            sigma1_z=sigma_1,
+            sigma2_x=sigma_2,
+            sigma2_y=sigma_2,
+            sigma2_z=sigma_2,
+            *args, **kwargs
+        )
         # The configured (isotropic) bounds, kept around so each call rescales
         # from the original value rather than compounding on the previous call's
         # already-scaled sigma.

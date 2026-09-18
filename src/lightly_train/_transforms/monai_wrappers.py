@@ -22,14 +22,20 @@ Scaling a rotation range down by the voxel-count ratio still leaves a
 resampling that is, in physical (mm) space, a combination of rotation, shear,
 and stretching along any axis pair with unequal spacing -- not the rotation
 it's meant to be. ``view_transform.py`` instead uses a plain MONAI ``RandRotate``
-restricted to the H-W in-plane rotation only (``range_y``/``range_z`` left at
-their default 0, since H and W are the two comparable-resolution axes).
+restricted to the H-W in-plane rotation only, via ``range_z`` (``range_x``/
+``range_y`` left at their default 0). Verified empirically, not just assumed
+from the axis names: for a ``(C, H, W, D)`` volume, rotating with ``range_z``
+alone leaves every voxel's value constant along the ``D`` axis (a true in-plane
+H-W rotation), while ``range_x``/``range_y`` both mix ``D`` into the rotation.
 
 ``RandGaussianSharpen`` is made anisotropy-aware the same way as
 ``RandGaussianSmooth`` (``AnisotropyAwareRandGaussianSharpen`` below), since it too
 takes a per-axis sigma (in fact two: a pre-blur ``sigma1`` and a post-blur
-``sigma2``). The other new MONAI intensity/artifact augmentations in this
-pipeline (``RandAdjustContrast``, ``RandGaussianNoise``, ``RandHistogramShift``,
+``sigma2``). ``RandHistogramShift`` is wrapped too, but not for anisotropy --
+``AlphaRandHistogramShift`` below blends its output with the original image by a
+fixed ``alpha`` because the unwrapped default is too strong (an intensity-strength
+knob, unrelated to axis anisotropy). The other new MONAI intensity/artifact
+augmentations in this pipeline (``RandAdjustContrast``, ``RandGaussianNoise``,
 ``RandGibbsNoise``) are voxelwise or already shape-relative and are used
 unwrapped -- see the "no anisotropy wrapper" note on ``RandGibbsNoiseArgs`` in
 ``transform.py`` for the one case (Gibbs ringing) where this was a deliberate
@@ -106,6 +112,7 @@ class AlphaRandHistogramShift(RandHistogramShift):
         transformed = super().__call__(img, randomize=randomize)
         return self.alpha * transformed + (1 - self.alpha) * img
 
+
 class AnisotropyTrackingRandomResizedCrop3D(RandomResizedCrop3D):
     """``RandomResizedCrop3D`` that tags its output with the pre-crop shape.
 
@@ -148,17 +155,17 @@ class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
     """
 
     def __init__(self,
-                 sigma_1: tuple[float, float],
-                 sigma_2: float | tuple[float, float],
+                 sigma1: tuple[float, float],
+                 sigma2: float | tuple[float, float],
                  *args: Any,
                  **kwargs: Any) -> None:
         super().__init__(
-            sigma1_x=sigma_1,
-            sigma1_y=sigma_1,
-            sigma1_z=sigma_1,
-            sigma2_x=sigma_2,
-            sigma2_y=sigma_2,
-            sigma2_z=sigma_2,
+            sigma1_x=sigma1,
+            sigma1_y=sigma1,
+            sigma1_z=sigma1,
+            sigma2_x=sigma2,
+            sigma2_y=sigma2,
+            sigma2_z=sigma2,
             *args, **kwargs
         )
         # The configured (isotropic) bounds, kept around so each call rescales

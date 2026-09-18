@@ -34,14 +34,14 @@ def _crop(size: tuple[int, int, int] = (16, 16, 16)) -> AnisotropyTrackingRandom
 
 
 def _rotate(degrees: float = 10.0, prob: float = 1.0) -> RandRotate:
-    # In-plane only, matching view_transform.py: range_y/range_z left at 0.
-    return RandRotate(range_x=math.radians(degrees), prob=prob)
+    # In-plane only, matching view_transform.py: range_x/range_y left at 0.
+    # range_z is the one that carries the actual in-plane (H-W) rotation for a
+    # (C, H, W, D) volume -- see the module docstring in monai_wrappers.py.
+    return RandRotate(range_z=math.radians(degrees), prob=prob)
 
 
 def _blur(sigma: tuple[float, float] = (1.0, 1.0), prob: float = 1.0) -> AnisotropyAwareRandGaussianSmooth:
-    return AnisotropyAwareRandGaussianSmooth(
-        sigma_x=sigma, sigma_y=sigma, sigma_z=sigma, prob=prob
-    )
+    return AnisotropyAwareRandGaussianSmooth(sigma_range=sigma, prob=prob)
 
 
 def _sharpen(
@@ -50,12 +50,8 @@ def _sharpen(
     prob: float = 1.0,
 ) -> AnisotropyAwareRandGaussianSharpen:
     return AnisotropyAwareRandGaussianSharpen(
-        sigma1_x=sigma1,
-        sigma1_y=sigma1,
-        sigma1_z=sigma1,
-        sigma2_x=sigma2,
-        sigma2_y=sigma2,
-        sigma2_z=sigma2,
+        sigma1=sigma1,
+        sigma2=sigma2,
         prob=prob,
     )
 

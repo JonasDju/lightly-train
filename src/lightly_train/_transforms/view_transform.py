@@ -174,7 +174,7 @@ class ViewTransform:
         transform += [
             AnisotropyTrackingRandomResizedCrop3D(
                 size=args.random_resized_crop.size,
-                scale=args.scale.as_tuple(),
+                scale=args.random_resized_crop.scale.as_tuple(),
                 interpolation="area",
                 upscale_interpolation="linear",
                 # Deviates from CV2 INTER_AREA slightly, but looks better in my opinion.
@@ -214,9 +214,8 @@ class ViewTransform:
                 )
             ]
 
-
-        # If both blur and sharpen is enabled, select one of them. If only one of them is
-        # enabled, only add this one
+        # Blur and sharpen are mutually exclusive per sample
+        # If only one is enabled, only that one is added.
         if (args.gaussian_blur and args.gaussian_blur.prob > 0
                 and args.gaussian_sharpen and args.gaussian_sharpen.prob > 0):
             transform += [
@@ -250,7 +249,6 @@ class ViewTransform:
                 )
             ]
 
-
         # Noise
         if args.gibbs_noise:
             transform += [
@@ -268,7 +266,6 @@ class ViewTransform:
                     std=args.gaussian_noise.std,
                 )
             ]
-
 
         transform += [ToTensor()]
         self.transform = Compose(transform)

@@ -16,6 +16,7 @@ import pytest
 import torch
 from monai.transforms import (
     NormalizeIntensity,
+    OneOf,
     RandAdjustContrast,
     RandGaussianNoise,
     RandGibbsNoise,
@@ -24,7 +25,13 @@ from monai.transforms import (
     ToNumpy,
 )
 
-from lightly_train._transforms.monai_wrappers import AnisotropyAwareRandGaussianSharpen
+from lightly_train._methods.dino.dino_transform import DINOGaussianBlurArgs
+from lightly_train._transforms.monai_wrappers import (
+    AlphaRandHistogramShift,
+    AnisotropyAwareRandGaussianSharpen,
+    AnisotropyAwareRandGaussianSmooth,
+    AnisotropyTrackingRandomResizedCrop3D,
+)
 from lightly_train._transforms.transform import (
     GaussianBlurArgs,
     NormalizeArgs,
@@ -58,7 +65,10 @@ def _get_random_rotation_args() -> RandomRotationArgs:
 
 
 def _get_gaussian_blur_args() -> GaussianBlurArgs:
-    return GaussianBlurArgs(prob=1.0, sigmas=(0.1, 2), blur_limit=0)
+    # GaussianBlurArgs itself no longer carries sigma_range (that field lives on
+    # DINOGaussianBlurArgs, dino_transform.py) -- ViewTransformArgs.gaussian_blur
+    # only ever receives a concrete DINO*GaussianBlurArgs instance in practice.
+    return DINOGaussianBlurArgs(prob=1.0, sigma_range=(0.1, 2))
 
 
 def _get_gaussian_sharpen_args() -> RandGaussianSharpenArgs:
@@ -180,20 +190,43 @@ class TestViewTransform:
             t for t in view_transform.transform.transforms if isinstance(t, RandRotate)
         ]
         assert len(rotations) == 1
-        assert max(rotations[0].range_x) == pytest.approx(math.radians(10))
+        assert max(rotations[0].range_z) == pytest.approx(math.radians(10))
 
     def test_view_transform__rotation_is_in_plane_only(self) -> None:
-        # range_y/range_z (the H-D/W-D planes) must stay at 0: rotating a plane
+        # range_x/range_y (the H-D/W-D planes) must stay at 0: rotating a plane
         # that mixes the depth axis with an in-plane axis is not a true physical
         # rotation on anisotropic volumes (it becomes shear + stretch in mm
-        # space unless voxels are cubic).
+        # space unless voxels are cubic). range_z is the one that carries the
+        # actual in-plane (H-W) rotation for a (C, H, W, D) volume -- see below
+        # for a direct empirical check of that axis mapping, not just the args.
         view_transform = _view_transform(random_rotation=_get_random_rotation_args())
         rotations = [
             t for t in view_transform.transform.transforms if isinstance(t, RandRotate)
         ]
         assert len(rotations) == 1
+        assert max(rotations[0].range_x) == 0.0
         assert max(rotations[0].range_y) == 0.0
-        assert max(rotations[0].range_z) == 0.0
+
+    def test_view_transform__rotation_does_not_mix_in_depth_axis(self) -> None:
+        # Direct empirical check (not just which RandRotate kwarg is used): a
+        # volume whose value depends only on H must, after a large in-plane
+        # rotation, still be constant along D. If range_z were ever swapped back
+        # for range_x/range_y (as it incorrectly was before), this would fail.
+        view_transform = _view_transform(
+            random_rotation=RandomRotationArgs(prob=1.0, degrees=90),
+            random_resized_crop=RandomResizedCropArgs(
+                size=(16, 16, 8),
+                scale=RandomResizeArgs(min_scale=1.0, max_scale=1.0),
+            ),
+        )
+        h_only = np.zeros((1, 16, 16, 8), dtype=np.float32)
+        for h in range(16):
+            h_only[0, h, :, :] = h
+        view_transform.transform.set_random_state(seed=0)
+        out = view_transform({"image": h_only})["image"]
+        # (C, D, H, W) after ToTensor's permute; std along the D axis (dim 1) must
+        # be ~0 for a pure H-W rotation.
+        assert out.std(dim=1).mean().item() == pytest.approx(0.0, abs=1e-4)
 
     def test_view_transform__reproducible_with_random_state(self) -> None:
         view_transform = _view_transform(
@@ -296,9 +329,12 @@ class TestViewTransform:
         assert noises[0].std == pytest.approx(0.2)
 
     def test_view_transform__monai_ops_order(self) -> None:
+        # Only gaussian_sharpen (not gaussian_blur) is enabled here so the pipeline
+        # is a plain deterministic list -- see
+        # test_view_transform__blur_and_sharpen_both_enabled_uses_oneof below for
+        # what happens when both are enabled.
         view_transform = _view_transform(
             random_rotation=_get_random_rotation_args(),
-            gaussian_blur=_get_gaussian_blur_args(),
             gaussian_sharpen=_get_gaussian_sharpen_args(),
             gibbs_noise=_get_gibbs_noise_args(),
             histogram_shift=_get_histogram_shift_args(),
@@ -306,34 +342,69 @@ class TestViewTransform:
             gaussian_noise=_get_gaussian_noise_args(),
         )
         op_types = [type(t) for t in view_transform.transform.transforms]
-        # NormalizeIntensity + ToNumpy come first (before the crop, to avoid
-        # quantizing raw uint8 volumes to the crop's input dtype -- see the comment
-        # in ViewTransform.__init__). Then: crop -> rotate -> spatial filters (blur,
-        # sharpen) -> k-space artifact (Gibbs) -> intensity remap (histogram shift,
-        # contrast) -> additive noise last -> tensor.
-        assert op_types[0] is NormalizeIntensity
-        assert op_types[1] is ToNumpy
-        expected_order = [
+        # NormalizeIntensity + ToNumpy first (before the crop, to avoid quantizing
+        # raw uint8 volumes to the crop's input dtype -- see the comment in
+        # ViewTransform.__init__), then: crop -> rotate -> intensity remap
+        # (histogram shift, contrast) -> spatial filter (sharpen) -> k-space
+        # artifact (Gibbs) -> additive noise last -> tensor.
+        assert op_types == [
+            NormalizeIntensity,
+            ToNumpy,
+            AnisotropyTrackingRandomResizedCrop3D,
             RandRotate,
-            AnisotropyAwareRandGaussianSharpen,  # gaussian_blur precedes it below
-            RandGibbsNoise,
-            RandHistogramShift,
+            AlphaRandHistogramShift,
             RandAdjustContrast,
+            AnisotropyAwareRandGaussianSharpen,
+            RandGibbsNoise,
             RandGaussianNoise,
             ToTensor,
         ]
-        # gaussian_blur (AnisotropyAwareRandGaussianSmooth) sits right before sharpen;
-        # check its position explicitly, then check the remaining relative order.
-        from lightly_train._transforms.monai_wrappers import (
+
+    def test_view_transform__blur_and_sharpen_both_enabled_uses_oneof(self) -> None:
+        # When both are enabled (with a nonzero prob each), ViewTransform picks one
+        # of them per sample via MONAI's OneOf instead of applying both.
+        view_transform = _view_transform(
+            gaussian_blur=_get_gaussian_blur_args(),
+            gaussian_sharpen=_get_gaussian_sharpen_args(),
+        )
+        ones_of = [
+            t for t in view_transform.transform.transforms if isinstance(t, OneOf)
+        ]
+        assert len(ones_of) == 1
+        inner_types = {type(t) for t in ones_of[0].transforms}
+        assert inner_types == {
             AnisotropyAwareRandGaussianSmooth,
+            AnisotropyAwareRandGaussianSharpen,
+        }
+        # Neither blur nor sharpen appears as its own top-level op alongside OneOf.
+        op_types = [type(t) for t in view_transform.transform.transforms]
+        assert AnisotropyAwareRandGaussianSmooth not in op_types
+        assert AnisotropyAwareRandGaussianSharpen not in op_types
+
+    def test_view_transform__blur_or_sharpen_alone_skips_oneof(self) -> None:
+        blur_only = _view_transform(gaussian_blur=_get_gaussian_blur_args())
+        op_types = [type(t) for t in blur_only.transform.transforms]
+        assert AnisotropyAwareRandGaussianSmooth in op_types
+        assert not any(isinstance(t, OneOf) for t in blur_only.transform.transforms)
+
+        sharpen_only = _view_transform(gaussian_sharpen=_get_gaussian_sharpen_args())
+        op_types = [type(t) for t in sharpen_only.transform.transforms]
+        assert AnisotropyAwareRandGaussianSharpen in op_types
+        assert not any(
+            isinstance(t, OneOf) for t in sharpen_only.transform.transforms
         )
 
-        blur_idx = op_types.index(AnisotropyAwareRandGaussianSmooth)
-        sharpen_idx = op_types.index(AnisotropyAwareRandGaussianSharpen)
-        assert blur_idx < sharpen_idx
-        # Remaining ops appear, in order, after sharpen.
-        remaining = [t for t in op_types if t in expected_order[2:]]
-        assert remaining == expected_order[2:]
+    def test_view_transform__blur_with_zero_prob_is_skipped(self) -> None:
+        # args.gaussian_blur.prob > 0 is checked in addition to truthiness: a
+        # present-but-zero-prob GaussianBlurArgs is treated the same as None.
+        view_transform = _view_transform(
+            gaussian_blur=DINOGaussianBlurArgs(prob=0.0, sigma_range=(0.1, 2.0)),
+            gaussian_sharpen=_get_gaussian_sharpen_args(),
+        )
+        op_types = [type(t) for t in view_transform.transform.transforms]
+        assert AnisotropyAwareRandGaussianSmooth not in op_types
+        assert not any(isinstance(t, OneOf) for t in view_transform.transform.transforms)
+        assert AnisotropyAwareRandGaussianSharpen in op_types
 
     def test_view_transform__enabling_all_new_ops_changes_output(self) -> None:
         volume = _volume(np.float32)
@@ -393,10 +464,12 @@ class TestViewTransform:
 
 
 class TestRandAdjustContrastArgs:
-    def test_defaults_match_monai(self) -> None:
+    def test_defaults(self) -> None:
+        # This project's own tuned defaults, not MONAI's (prob=0.1, gamma=(0.5,4.5))
+        # -- found too aggressive for knee-MRI SSL pretraining.
         args = RandAdjustContrastArgs()
-        assert args.prob == 0.1
-        assert args.gamma == (0.5, 4.5)
+        assert args.prob == 0.8
+        assert args.gamma == (0.8, 1.2)
 
     def test_accepts_cli_shaped_list(self) -> None:
         args = RandAdjustContrastArgs(gamma=[0.2, 0.3])  # type: ignore[arg-type]
@@ -404,17 +477,22 @@ class TestRandAdjustContrastArgs:
 
 
 class TestRandGaussianNoiseArgs:
-    def test_defaults_match_monai(self) -> None:
+    def test_defaults(self) -> None:
+        # This project's own tuned default (std=0.075, not MONAI's 0.1).
         args = RandGaussianNoiseArgs()
         assert args.prob == 0.1
         assert args.mean == 0.0
-        assert args.std == 0.1
+        assert args.std == 0.075
 
 
 class TestRandHistogramShiftArgs:
-    def test_defaults_match_monai(self) -> None:
+    def test_defaults(self) -> None:
+        # alpha has no MONAI equivalent (blend strength knob, see
+        # AlphaRandHistogramShift in monai_wrappers.py); prob=0.8 is this
+        # project's own tuning, not MONAI's default of 0.1.
         args = RandHistogramShiftArgs()
-        assert args.prob == 0.1
+        assert args.alpha == 0.25
+        assert args.prob == 0.8
         assert args.num_control_points == 10
 
     def test_accepts_cli_shaped_list(self) -> None:
@@ -423,12 +501,13 @@ class TestRandHistogramShiftArgs:
 
 
 class TestRandGaussianSharpenArgs:
-    def test_defaults_match_monai(self) -> None:
+    def test_defaults(self) -> None:
+        # This project's own tuned default (alpha=(5.0,10.0), not MONAI's (10.0,30.0)).
         args = RandGaussianSharpenArgs()
         assert args.prob == 0.1
         assert args.sigma1 == (0.5, 1.0)
         assert args.sigma2 == 0.5
-        assert args.alpha == (10.0, 30.0)
+        assert args.alpha == (5.0, 10.0)
 
     def test_accepts_cli_shaped_list_for_scalar_sigma2(self) -> None:
         args = RandGaussianSharpenArgs(sigma2=[0.3, 0.9])  # type: ignore[arg-type]
@@ -440,10 +519,12 @@ class TestRandGaussianSharpenArgs:
 
 
 class TestRandGibbsNoiseArgs:
-    def test_defaults_match_monai(self) -> None:
+    def test_defaults(self) -> None:
+        # This project's own tuned defaults (prob=0.2, alpha=(0.5,0.75)), not
+        # MONAI's (prob=0.1, alpha=(0.0,1.0)).
         args = RandGibbsNoiseArgs()
-        assert args.prob == 0.1
-        assert args.alpha == (0.0, 1.0)
+        assert args.prob == 0.2
+        assert args.alpha == (0.5, 0.75)
 
     def test_accepts_cli_shaped_list(self) -> None:
         args = RandGibbsNoiseArgs(alpha=[0.2, 0.8])  # type: ignore[arg-type]

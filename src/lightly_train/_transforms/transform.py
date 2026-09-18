@@ -16,7 +16,6 @@ from typing import (
     TypeVar,
 )
 
-import cv2
 import pydantic
 from lightly.transforms.utils import IMAGENET_NORMALIZE
 from pydantic import Field, field_validator, model_validator
@@ -160,7 +159,31 @@ class ColorJitterArgs(PydanticConfig):
 
 class GaussianBlurArgs(PydanticConfig):
     prob: float = Field(ge=0.0, le=1.0)
-    sigma_range: tuple[float, float]
+    # Defaulted to None (unlike the 2D-photometric-ops methods that redeclare these
+    # with real defaults: simclr/detcon/densecl/distillation{,v2,v3}) so that
+    # DINOGaussianBlurArgs (dino_transform.py), which uses a single MONAI
+    # `sigma_range` instead, doesn't need to redeclare them.
+    sigmas: tuple[float, float] | None = None
+    blur_limit: int | tuple[int, int] | None = None
+
+    # Using strict=False does not work here, because we have a Union type.
+    @pydantic.field_validator("blur_limit", mode="before")
+    def cast_list_to_tuple(
+        cls, value: int | Sequence[int] | None
+    ) -> int | tuple[int, int] | None:
+        if value is None or isinstance(value, int):
+            return value
+        elif (
+            isinstance(value, Sequence)
+            and (len(value) == 2)
+            and all(isinstance(v, int) for v in value)
+        ):
+            value = tuple(value)
+            assert len(value) == 2
+            assert all(isinstance(v, int) for v in value)
+            return value
+        else:
+            raise ValueError("blur_limit must be an int or a tuple of ints")
 
 
 class SolarizeArgs(PydanticConfig):
@@ -169,12 +192,6 @@ class SolarizeArgs(PydanticConfig):
 
 
 # --- MONAI intensity/artifact augmentation args (3D volume pipeline) ---
-#
-# These mirror MONAI's own `Rand*` transform defaults (see each transform's docstring
-# in `monai.transforms`) so that enabling an augmentation without specifying every
-# parameter still reproduces MONAI's recommended behavior. Unlike the 2D
-# albumentations-based args above, none of these are enabled by default anywhere
-# (every `MethodTransformArgs`/`ViewTransformArgs` field for them defaults to `None`).
 
 
 class RandAdjustContrastArgs(PydanticConfig):
@@ -189,6 +206,8 @@ class RandGaussianNoiseArgs(PydanticConfig):
 
 
 class RandHistogramShiftArgs(PydanticConfig):
+    # alpha blends AlphaRandHistogramShift's (monai_wrappers.py) output with the
+    # original image (0 = no-op, 1 = MONAI's unblended RandHistogramShift)
     alpha: float = Field(default=0.25, ge=0.0, le=1.0)
     prob: float = Field(default=0.8, ge=0.0, le=1.0)
     num_control_points: int | tuple[int, int] = 10
@@ -210,6 +229,9 @@ class RandHistogramShiftArgs(PydanticConfig):
 
 
 class RandGaussianSharpenArgs(PydanticConfig):
+    # One isotropic sigma per stage (pre-blur sigma1, post-blur sigma2)
+    # AnisotropyAwareRandGaussianSharpen (monai_wrappers.py) fans each out to
+    # sigma{1,2}_{x,y,z} and anisotropy-scales the z component
     prob: float = Field(default=0.1, ge=0.0, le=1.0)
     sigma1: tuple[float, float] = Field(default=(0.5, 1.0), strict=False)
     sigma2: float | tuple[float, float] = 0.5

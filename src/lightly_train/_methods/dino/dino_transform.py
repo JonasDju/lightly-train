@@ -22,7 +22,6 @@ from lightly_train._transforms.transform import (
     RandGaussianSharpenArgs,
     RandGibbsNoiseArgs,
     RandHistogramShiftArgs,
-    RandomFlipArgs,
     RandomResizeArgs,
     RandomResizedCropArgs,
     RandomRotationArgs,
@@ -65,6 +64,7 @@ class DINOGlobalView1TransformArgs(PydanticConfig):
         default_factory=DINOGlobalView1GaussianBlurArgs
     )
     gaussian_sharpen: RandGaussianSharpenArgs | None = None
+    # Enabled by default here (unlike the top-level gibbs_noise)
     gibbs_noise: RandGibbsNoiseArgs | None = Field(
         default_factory=RandGibbsNoiseArgs
     )
@@ -92,7 +92,7 @@ class DINOTransformArgs(MethodTransformArgs):
     )
     random_rotation: RandomRotationArgs | None = None
 
-    # Replacement for photometric ops
+    # Replacement for photometric ops (color_jitter/random_gray_scale/solarize)
     histogram_shift: RandHistogramShiftArgs | None = Field(
         default_factory=RandHistogramShiftArgs
     )

@@ -269,6 +269,13 @@ class DINOv2(Method):
         )
         self.koleo_loss = KoLeoLoss()
 
+        # Tracks whether the tokenization-only phase is currently active, so
+        # on_before_optimizer_step can detect the exact step it ends and log it once.
+        # Set for real in on_train_start, which knows the (possibly resumed)
+        # self.trainer.global_step; this default only matters before that runs (e.g.
+        # in unit tests that call on_before_optimizer_step directly).
+        self._tokenization_only_active = False
+
     def training_step_impl(self, batch: Batch, batch_idx: int) -> TrainingStepResult:
         # Teacher temperature scheduling
         teacher_temp = linear_warmup_schedule(
@@ -621,6 +628,18 @@ class DINOv2(Method):
             end_value=self.method_args.weight_decay_end,
         )
 
+        # Optionally train only the tokenization, freezing the transformer blocks and
+        # the final norm. Derived from global_step on every call rather than applied
+        # once, so it is automatically correct when resuming at any step and needs no
+        # matching "unfreeze" step. Log the one call where this flips from True to
+        # False, i.e. the step the blocks actually unfreeze.
+        tokenization_only_active = (
+            self.trainer.global_step < self.method_args.n_tokenization_only_steps
+        )
+        if self._tokenization_only_active and not tokenization_only_active:
+            self._log_tokenization_only_unfrozen()
+        self._tokenization_only_active = tokenization_only_active
+
         updates = []
         for group in optimizer.param_groups:
             update = {}
@@ -649,11 +668,9 @@ class DINOv2(Method):
                 update["lr"] = 0.0
 
             # Optionally train only the tokenization, freezing the transformer blocks
-            # and the final norm. Derived from global_step on every call rather than
-            # applied once, so it is automatically correct when resuming at any step
-            # and needs no matching "unfreeze" step.
+            # and the final norm.
             if (
-                self.trainer.global_step < self.method_args.n_tokenization_only_steps
+                tokenization_only_active
                 and "head" not in group["name"]
                 and not is_tokenization_param(group["name"])
             ):
@@ -712,7 +729,48 @@ class DINOv2(Method):
             f"batch size {self.global_batch_size}."
         )
 
+    @rank_zero_only  # type: ignore[misc]
+    def _log_tokenization_only_status(self) -> None:
+        n_tokenization_only_steps = self.method_args.n_tokenization_only_steps
+        global_step = self.trainer.global_step
+        if self._tokenization_only_active:
+            remaining_steps = n_tokenization_only_steps - global_step
+            logger.info(
+                "Training only the tokenization (patch_embed, pos_embed, cls_token, "
+                "mask_token, register_tokens) and the projection heads. The "
+                "transformer blocks and final norm are frozen for "
+                f"{remaining_steps} more step(s), until step "
+                f"{n_tokenization_only_steps} (currently at step {global_step})."
+            )
+        else:
+            logger.info(
+                "Training all layers, including the transformer blocks and final "
+                "norm (n_tokenization_only_steps="
+                f"{n_tokenization_only_steps}, currently at step {global_step})."
+            )
+
+    @rank_zero_only  # type: ignore[misc]
+    def _log_tokenization_only_unfrozen(self) -> None:
+        logger.info(
+            "Unfreezing the transformer blocks and final norm at step "
+            f"{self.trainer.global_step} (n_tokenization_only_steps="
+            f"{self.method_args.n_tokenization_only_steps}). Now training all "
+            "layers."
+        )
+
     def on_fit_start(self) -> None:
         # Warn if total steps < 125k.
         if self.trainer.estimated_stepping_batches < self.RECOMMENDED_MIN_STEPS:
             self.warn_if_steps_too_low()
+
+    def on_train_start(self) -> None:
+        # Log whether the tokenization-only phase is active. Compared against the
+        # current global_step rather than 0, so this is accurate after a resumed run
+        # (resume_interrupted=True) as well as a fresh one. Note that the
+        # checkpoint=<path> loading path (as opposed to resume_interrupted=True) does
+        # not restore global_step, it always restarts at step 0, same as the
+        # pre-existing student_freeze_backbone_steps/student_freeze_last_layer_steps.
+        self._tokenization_only_active = (
+            self.trainer.global_step < self.method_args.n_tokenization_only_steps
+        )
+        self._log_tokenization_only_status()

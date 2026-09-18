@@ -7,6 +7,7 @@
 #
 from __future__ import annotations
 
+import logging
 import math
 from typing import Literal
 
@@ -322,6 +323,104 @@ class TestDINOv2:
 
         for group in optim.param_groups:
             assert group["lr"] > 0.0, f"Expected '{group['name']}' to be unfrozen"
+
+    def test_on_train_start__logs_tokenization_only_active(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The status log at training start must compare against the current
+        (possibly resumed) global_step, not against 0. This has to be on_train_start,
+        not on_fit_start: Lightning restores the fit_loop's global_step/current_epoch
+        (restore_training_state) only after on_fit_start but before on_train_start --
+        see the comment on DINOv2.on_train_start."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=10)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 3  # e.g. a resumed run
+        dinov2.trainer = trainer_mock
+
+        with caplog.at_level(logging.INFO):
+            dinov2.on_train_start()
+
+        assert dinov2._tokenization_only_active is True
+        assert "Training only the tokenization" in caplog.text
+        assert "7 more step(s)" in caplog.text
+        assert "currently at step 3" in caplog.text
+
+    @pytest.mark.parametrize(
+        "n_tokenization_only_steps, global_step",
+        [
+            (0, 0),  # disabled entirely
+            (10, 10),  # resumed exactly at the boundary
+            (10, 15),  # resumed past the boundary
+        ],
+    )
+    def test_on_train_start__logs_all_layers(
+        self,
+        mocker: MockerFixture,
+        caplog: pytest.LogCaptureFixture,
+        n_tokenization_only_steps: int,
+        global_step: int,
+    ) -> None:
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=n_tokenization_only_steps)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = global_step
+        dinov2.trainer = trainer_mock
+
+        with caplog.at_level(logging.INFO):
+            dinov2.on_train_start()
+
+        assert dinov2._tokenization_only_active is False
+        assert "Training all layers" in caplog.text
+        assert "Training only the tokenization" not in caplog.text
+
+    def test_on_before_optimizer_step__logs_unfreeze_once(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The "unfreezing" message must fire exactly once, at the step the freeze
+        actually ends, not on every subsequent step."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=10)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+        dinov2.on_train_start()  # starts active, as in a fresh run
+
+        optim_mock = mocker.Mock(param_groups=[])
+        with caplog.at_level(logging.INFO):
+            for step in (0, 5, 9, 10, 11):
+                trainer_mock.global_step = step
+                caplog.clear()
+                dinov2.on_before_optimizer_step(optim_mock)
+                if step == 10:
+                    assert "Unfreezing the transformer blocks" in caplog.text
+                else:
+                    assert "Unfreezing the transformer blocks" not in caplog.text
+
+    def test_on_before_optimizer_step__no_unfreeze_log_if_already_unfrozen(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A run that starts already past the tokenization-only phase (e.g. resumed
+        past it) must not log an "unfreezing" event -- nothing happened during this
+        run to report."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(n_tokenization_only_steps=10)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 15
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+        dinov2.on_train_start()  # starts already unfrozen
+
+        optim_mock = mocker.Mock(param_groups=[])
+        with caplog.at_level(logging.INFO):
+            dinov2.on_before_optimizer_step(optim_mock)
+
+        assert "Unfreezing the transformer blocks" not in caplog.text
 
 
 class TestDINOv2Args:

@@ -27,6 +27,7 @@ from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods import method_helpers
 from lightly_train._methods.dino.dino_transform import DINOGaussianBlurArgs
+from lightly_train._methods.dinov2.dinov2 import DINOv2Args
 from lightly_train._methods.dinov2.dinov2_transform import (
     DINOv2ViTTransform,
     DINOv2ViTTransformArgs,
@@ -751,6 +752,77 @@ def test_load_checkpoint__checkpoint_and_resume(
             embedding_model=mocker.MagicMock(),
             method=mocker.MagicMock(),
         )
+
+
+@pytest.mark.parametrize(
+    "model, checkpoint, resume_interrupted",
+    [
+        ("dinov2/vitb14-reg4-2dinit", None, False),
+        ("dinov2/_vittest14", Path("/tmp/some.ckpt"), False),
+        ("dinov2/_vittest14", None, True),
+    ],
+)
+def test_validate_tokenization_only_steps__ok(
+    model: str, checkpoint: Path | None, resume_interrupted: bool
+) -> None:
+    # Must not raise: either the model is a -2dinit model, or the run continues one
+    # of our own via checkpoint= or resume_interrupted=.
+    train_helpers.validate_tokenization_only_steps(
+        method_args=DINOv2Args(n_tokenization_only_steps=10),
+        model=model,
+        checkpoint=checkpoint,
+        resume_interrupted=resume_interrupted,
+    )
+
+
+def test_validate_tokenization_only_steps__raises_without_pretrained_source() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"n_tokenization_only_steps=10 but model='dinov2/_vittest14' is not a "
+        r"'\*-2dinit' model",
+    ):
+        train_helpers.validate_tokenization_only_steps(
+            method_args=DINOv2Args(n_tokenization_only_steps=10),
+            model="dinov2/_vittest14",
+            checkpoint=None,
+            resume_interrupted=False,
+        )
+
+
+def test_validate_tokenization_only_steps__default_zero_is_always_ok() -> None:
+    # n_tokenization_only_steps=0 is the default and must never raise, regardless of
+    # model/checkpoint/resume_interrupted.
+    train_helpers.validate_tokenization_only_steps(
+        method_args=DINOv2Args(),
+        model="dinov2/_vittest14",
+        checkpoint=None,
+        resume_interrupted=False,
+    )
+
+
+def test_validate_tokenization_only_steps__non_module_object_is_not_2dinit() -> None:
+    # A Module instance (rather than a "*-2dinit" string) never satisfies the
+    # -2dinit branch, so one of the other two escape hatches is required.
+    with pytest.raises(ValueError, match=r"n_tokenization_only_steps=10"):
+        train_helpers.validate_tokenization_only_steps(
+            method_args=DINOv2Args(n_tokenization_only_steps=10),
+            model=helpers.dummy_dinov2_vit_model(),
+            checkpoint=None,
+            resume_interrupted=False,
+        )
+
+
+def test_validate_tokenization_only_steps__ignored_for_methods_without_the_field() -> (
+    None
+):
+    # SimCLRArgs has no n_tokenization_only_steps field; getattr's default keeps this
+    # a no-op for every non-DINOv2 method.
+    train_helpers.validate_tokenization_only_steps(
+        method_args=SimCLRArgs(),
+        model="dinov2/_vittest14",
+        checkpoint=None,
+        resume_interrupted=False,
+    )
 
 
 def test_load_state_dict(tmp_path: Path) -> None:

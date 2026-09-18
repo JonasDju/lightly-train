@@ -170,6 +170,23 @@ def create_collated_masks(
     }
 
 
+def is_tokenization_param(name: str) -> bool:
+    """Whether a backbone parameter turns a volume into tokens.
+
+    Exactly the set that ``_model_helpers.interpolate_pos_embed_hook`` leaves randomly
+    initialized when loading a 2D checkpoint into the 3D model (see
+    ``_model_helpers._TOKENIZATION_KEYS``, plus ``patch_embed`` itself), which is what
+    ``DINOv2Args.n_tokenization_only_steps`` exists to train.
+    """
+    return (
+        "pos_embed" in name
+        or "patch_embed" in name
+        or "mask_token" in name
+        or "cls_token" in name
+        or "register_tokens" in name
+    )
+
+
 def get_vit_lr_decay_rate(
     name: str,
     lr_decay_rate: float,
@@ -188,13 +205,7 @@ def get_vit_lr_decay_rate(
     """
 
     layer_id = num_layers + 1
-    if (
-        "pos_embed" in name
-        or "patch_embed" in name
-        or "mask_token" in name
-        or "cls_token" in name
-        or "register_tokens" in name
-    ):
+    if is_tokenization_param(name):
         layer_id = 0
     elif ".blocks." in name and ".residual." not in name:
         layer_id = int(name[name.find(".blocks.") :].split(".")[2]) + 1
@@ -279,10 +290,16 @@ def get_fused_param_groups(param_groups: list[dict[str, Any]]) -> list[dict[str,
     fused = {}
     for group in param_groups:
         ids = {k: v for k, v in group.items() if k not in ["params", "name"]}
-        # Add head and last_layer because they are treated differently in
-        # DINOv2.on_before_optimizer_step
+        # Add head, last_layer and tokenization because they are treated differently
+        # in DINOv2.on_before_optimizer_step. Without the "tokenization" key, a group
+        # of tokenization parameters (pos_embed, cls_token, ...) can fuse with block
+        # weight groups that happen to share the same lr/weight_decay (e.g. whenever
+        # layerwise_decay == 1.0, since every layer then gets the same lr) and the
+        # tokenization-only freeze in on_before_optimizer_step would then either
+        # freeze the tokenization too, or fail to freeze the blocks it was fused with.
         ids["head"] = "head" in group["name"]
         ids["last_layer"] = "last_layer" in group["name"]
+        ids["tokenization"] = is_tokenization_param(group["name"])
         group_id = "_".join(f"{k}={v}" for k, v in ids.items())
         if group_id not in fused:
             fused[group_id] = group

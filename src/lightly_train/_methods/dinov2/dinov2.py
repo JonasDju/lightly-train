@@ -43,6 +43,7 @@ from lightly_train._methods.dinov2.utils import (
     MaskingGenerator,
     create_collated_masks,
     get_optimizer_with_decay,
+    is_tokenization_param,
 )
 from lightly_train._methods.method import Method, TrainingStepResult
 from lightly_train._methods.method_args import MethodArgs
@@ -91,6 +92,18 @@ class DINOv2Args(MethodArgs):
     # head to be trained while the backbone is frozen. This is important because the
     # DINOv2 pretrained weights do not include the projection head.
     student_freeze_backbone_steps: int = 0
+
+    # train only the tokenization
+    # Useful when starting from 2D DINOv2 pretrained weights (a `*-2dinit` model),
+    # where the transformer blocks are pretrained but the whole tokenization
+    # (patch_embed, pos_embed, cls_token, mask_token, register_tokens) is randomly
+    # initialized. Holds the blocks and the final norm fixed for the first N steps so
+    # the tokenization -- and the projection heads, which are random too -- can catch
+    # up before they start dragging the pretrained blocks around. Also useful for
+    # the high-res adaptation phase to keep the blocks frozen why the interpolated
+    # pos-embeds settle. 0 (the default) disables this and trains everything from
+    # the start, same as before this option existed.
+    n_tokenization_only_steps: int = 0
 
     # loss
     dino_loss_weight: float = 1.0
@@ -632,6 +645,17 @@ class DINOv2(Method):
                 self.trainer.global_step
                 < self.method_args.student_freeze_last_layer_steps
                 and "last_layer" in group["name"]
+            ):
+                update["lr"] = 0.0
+
+            # Optionally train only the tokenization, freezing the transformer blocks
+            # and the final norm. Derived from global_step on every call rather than
+            # applied once, so it is automatically correct when resuming at any step
+            # and needs no matching "unfreeze" step.
+            if (
+                self.trainer.global_step < self.method_args.n_tokenization_only_steps
+                and "head" not in group["name"]
+                and not is_tokenization_param(group["name"])
             ):
                 update["lr"] = 0.0
 

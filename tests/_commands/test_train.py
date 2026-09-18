@@ -29,6 +29,7 @@ from lightly_train._commands.train import (
 )
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs, DINOv2Args
+from lightly_train._methods.dinov2.utils import is_tokenization_param
 from lightly_train._scaling import ScalingInfo
 
 from .. import helpers
@@ -427,3 +428,47 @@ def test_pretrain__checkpoint(mocker: MockerFixture, tmp_path: Path) -> None:
         assert torch.equal(second_state_dict[key], exported_state_dict[key]), (
             f"Parameter {key} differs between checkpoint and exported model: {second_state_dict[key]} vs. {exported_state_dict[key]}"
         )
+
+
+def test_pretrain__checkpoint_n_tokenization_only_steps(tmp_path: Path) -> None:
+    """End-to-end: with n_tokenization_only_steps covering every step of the second
+    run, the transformer blocks and final norm must not move at all, while at least
+    one tokenization parameter does."""
+    out = tmp_path / "out"
+
+    # Part 1: generate a checkpoint.
+    train.pretrain(**_pretrain_kwargs(tmp_path, epochs=0))
+    last_ckpt_path = out / "checkpoints" / "last.ckpt"
+    first_ckpt = Checkpoint.from_path(checkpoint=last_ckpt_path)
+    first_state_dict = first_ckpt.lightly_train.models.model.state_dict()
+
+    # 2 steps per epoch (see _pretrain_kwargs docstring); 100 safely covers all of
+    # them for this 1-epoch run, whatever the exact step count.
+    method_args = {**FAST_UPDATE_METHOD_ARGS, "n_tokenization_only_steps": 100}
+    train.pretrain(
+        **_pretrain_kwargs(
+            tmp_path,
+            epochs=1,
+            overwrite=True,
+            checkpoint=last_ckpt_path,
+            method_args=method_args,
+            optim_args={"lr": 1.0},  # Make sure that parameters change meaningfully.
+        )
+    )
+    second_ckpt = Checkpoint.from_path(checkpoint=last_ckpt_path)
+    second_state_dict = second_ckpt.lightly_train.models.model.state_dict()
+    assert first_state_dict.keys() == second_state_dict.keys()
+
+    frozen_keys = [k for k in first_state_dict if not is_tokenization_param(k)]
+    tokenization_keys = [k for k in first_state_dict if is_tokenization_param(k)]
+    assert frozen_keys, "Expected at least one block/norm parameter"
+    assert tokenization_keys, "Expected at least one tokenization parameter"
+
+    for key in frozen_keys:
+        assert torch.equal(first_state_dict[key], second_state_dict[key]), (
+            f"Expected frozen parameter '{key}' to be unchanged"
+        )
+    assert any(
+        not torch.equal(first_state_dict[key], second_state_dict[key])
+        for key in tokenization_keys
+    ), "Expected at least one tokenization parameter to have changed"

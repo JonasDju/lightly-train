@@ -420,6 +420,36 @@ def get_method_args(
     return args
 
 
+def validate_tokenization_only_steps(
+    method_args: MethodArgs,
+    model: Any,
+    checkpoint: PathLike | None,
+    resume_interrupted: bool,
+) -> None:
+    """Reject a tokenization-only warmup phase with nothing pretrained to warm up to.
+
+    ``DINOv2Args.n_tokenization_only_steps`` only makes sense when the transformer
+    blocks it holds fixed already contain useful weights: either they were just
+    loaded from a ``*-2dinit`` model (a public 2D DINOv2 checkpoint), or this run
+    continues one of our own (``checkpoint=`` or ``resume_interrupted``). Silently
+    ignored for methods other than DINOv2/DINOv3.1, whose args have no such field.
+    """
+    n_tokenization_only_steps = getattr(method_args, "n_tokenization_only_steps", 0)
+    if n_tokenization_only_steps <= 0:
+        return
+    model_is_2dinit = isinstance(model, str) and model.endswith("-2dinit")
+    if model_is_2dinit or checkpoint is not None or resume_interrupted:
+        return
+    raise ValueError(
+        f"method_args.n_tokenization_only_steps={n_tokenization_only_steps} but "
+        f"model='{model}' is not a '*-2dinit' model and neither checkpoint= nor "
+        "resume_interrupted=True is set. Freezing the transformer blocks only makes "
+        "sense when they already hold pretrained weights: use a '*-2dinit' model "
+        "name, or set checkpoint=<path> / resume_interrupted=True to continue a run "
+        "of your own."
+    )
+
+
 def get_method(
     method_cls: type[Method],
     method_args: MethodArgs,

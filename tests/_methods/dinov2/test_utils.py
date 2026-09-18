@@ -17,9 +17,15 @@ import torch
 
 from lightly_train._methods.dinov2 import utils
 from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs
-from lightly_train._methods.dinov2.utils import MaskingGenerator, create_collated_masks
+from lightly_train._methods.dinov2.utils import (
+    MaskingGenerator,
+    create_collated_masks,
+    is_tokenization_param,
+)
+from lightly_train._optim.trainable_modules import TrainableModules
 
 from ... import helpers
+from ...helpers import dummy_dinov2_vit_model
 
 
 @pytest.fixture(autouse=True)
@@ -368,3 +374,53 @@ def test_get_optimizer_with_decay() -> None:
         },
     ]
     assert groups == expected_groups
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("pos_embed", True),
+        ("pos_embed_grid", True),
+        ("cls_token", True),
+        ("mask_token", True),
+        ("register_tokens", True),
+        ("patch_embed.proj.weight", True),
+        ("patch_embed.proj.bias", True),
+        ("blocks.0.2.attn.qkv.weight", False),
+        ("blocks.5.mlp.fc1.weight", False),
+        ("norm.weight", False),
+        ("dino_head.mlp.0.weight", False),
+    ],
+)
+def test_is_tokenization_param(name: str, expected: bool) -> None:
+    assert is_tokenization_param(name) is expected
+
+
+@pytest.mark.parametrize("layerwise_decay", [0.9, 1.0])
+def test_get_fused_param_groups__never_mixes_tokenization(
+    layerwise_decay: float,
+) -> None:
+    """Regression test: with layerwise_decay=1.0 every layer gets the same lr, so
+    without the "tokenization" fusion key, pos_embed/cls_token/mask_token fuse into
+    the same group as decayed block weights (verified: 4 groups instead of 10, with
+    12 block weight tensors sharing a group with the tokenization). A name-based
+    tokenization-only freeze in DINOv2.on_before_optimizer_step is only correct if no
+    fused group mixes tokenization and non-tokenization parameters."""
+    vit_wrapper = dummy_dinov2_vit_model()
+    vit = vit_wrapper.get_model()
+    id_to_name = {id(p): n for n, p in vit.named_parameters()}
+
+    optim = utils.get_optimizer_with_decay(
+        optim_args=DINOv2AdamWViTArgs(),
+        trainable_modules=TrainableModules(modules=[vit]),
+        layerwise_decay=layerwise_decay,
+        patch_embed_lr_multiplier=0.2,
+    )
+
+    for group in optim.param_groups:
+        names = [id_to_name[id(p)] for p in group["params"]]
+        kinds = {is_tokenization_param(n) for n in names}
+        assert len(kinds) == 1, (
+            f"Group '{group['name']}' mixes tokenization and non-tokenization "
+            f"params: {names}"
+        )

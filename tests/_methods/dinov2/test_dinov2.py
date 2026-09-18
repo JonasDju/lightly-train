@@ -21,6 +21,7 @@ from lightly_train._methods.dinov2.dinov2 import (
     DINOv2AdamWViTArgs,
     DINOv2Args,
 )
+from lightly_train._methods.dinov2.utils import is_tokenization_param
 from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._optim.optimizer_args import OptimizerArgs
 from lightly_train._optim.optimizer_type import OptimizerType
@@ -247,6 +248,80 @@ class TestDINOv2:
         # Last Batch
         target_lr = dinov2_args.min_lr
         check_param_groups()
+
+    @pytest.mark.parametrize("layerwise_decay", [0.9, 1.0])
+    def test_on_before_optimizer_step__tokenization_only(
+        self, mocker: MockerFixture, layerwise_decay: float
+    ) -> None:
+        """While global_step < n_tokenization_only_steps, only the tokenization and
+        the projection heads train; the transformer blocks and the final norm are
+        held at lr=0."""
+        # student_freeze_last_layer_steps defaults to 1250 and would independently
+        # freeze the last_layer group at these global_steps; disable it so this test
+        # isolates the n_tokenization_only_steps rule.
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(
+            n_tokenization_only_steps=10,
+            layerwise_decay=layerwise_decay,
+            student_freeze_last_layer_steps=0,
+        )
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+
+        optim = dinov2.configure_optimizers()[0][0]  # type: ignore[index, literal-required]
+        dinov2.on_before_optimizer_step(optim)
+
+        for group in optim.param_groups:
+            name = group["name"]
+            if "head" not in name and not is_tokenization_param(name):
+                assert group["lr"] == 0.0, f"Expected '{name}' to be frozen"
+            else:
+                assert group["lr"] > 0.0, f"Expected '{name}' to keep training"
+
+    def test_on_before_optimizer_step__tokenization_only_ends(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Once global_step reaches n_tokenization_only_steps, every group trains
+        again -- the freeze is derived from global_step, not a one-way transition
+        that would need an explicit "unfreeze"."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(
+            n_tokenization_only_steps=10, student_freeze_last_layer_steps=0
+        )
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 10
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+
+        optim = dinov2.configure_optimizers()[0][0]  # type: ignore[index, literal-required]
+        dinov2.on_before_optimizer_step(optim)
+
+        for group in optim.param_groups:
+            assert group["lr"] > 0.0, f"Expected '{group['name']}' to be unfrozen"
+
+    def test_on_before_optimizer_step__tokenization_only_default_off(
+        self, mocker: MockerFixture
+    ) -> None:
+        """n_tokenization_only_steps=0 (the default) must leave training exactly as
+        it was before this option existed: nothing is frozen by this rule."""
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        dinov2_args = DINOv2Args(student_freeze_last_layer_steps=0)
+        assert dinov2_args.n_tokenization_only_steps == 0
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+
+        optim = dinov2.configure_optimizers()[0][0]  # type: ignore[index, literal-required]
+        dinov2.on_before_optimizer_step(optim)
+
+        for group in optim.param_groups:
+            assert group["lr"] > 0.0, f"Expected '{group['name']}' to be unfrozen"
 
 
 class TestDINOv2Args:

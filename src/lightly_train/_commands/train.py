@@ -505,6 +505,12 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             method_args=config.method_args,
             normalize_args=transform_instance.transform_args.normalize,
         )
+        train_helpers.validate_tokenization_only_steps(
+            method_args=config.method_args,
+            model=config.model,
+            checkpoint=config.checkpoint,
+            resume_interrupted=config.resume_interrupted,
+        )
         method_instance = train_helpers.get_method(
             method_cls=method_cls,
             method_args=config.method_args,

@@ -17,8 +17,17 @@ from omegaconf import DictConfig, OmegaConf
 
 import lightly_train
 from lightly_train import _logging
-from lightly_train._commands import embed, export, extract_video_frames, train
+from lightly_train._commands import (
+    embed,
+    eval_classification,
+    export,
+    extract_video_frames,
+    train,
+)
 from lightly_train._commands.embed import CLIEmbedConfig
+from lightly_train._commands.eval_classification import (
+    CLIEvalClassificationConfig,
+)
 from lightly_train._commands.export import CLIExportConfig
 from lightly_train._commands.extract_video_frames import CLIExtractVideoFramesConfig
 from lightly_train._commands.train import CLITrainConfig
@@ -28,7 +37,14 @@ from lightly_train.errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["train", "export", "embed", "extract_video_frames", "cli"]
+__all__ = [
+    "train",
+    "export",
+    "embed",
+    "eval_classification",
+    "extract_video_frames",
+    "cli",
+]
 
 _HELP_COMMANDS = {"help", "--help", "-h"}
 _HELP_MSG = """
@@ -36,6 +52,7 @@ _HELP_MSG = """
         lightly-train pretrain              Pretrain model with self-supervised learning or distill from a teacher model.
         lightly-train export                Export model from checkpoint.
         lightly-train embed                 Embed images using a trained model.
+        lightly-train eval_classification   Evaluate a pretrained model with KneeNo classification tasks.
         lightly-train list_models           List supported models for training.
         lightly-train list_methods          List supported methods for training.
         lightly-train extract_video_frames  Extract frames from videos using ffmpeg.
@@ -366,6 +383,59 @@ _EMBED_HELP_MSG = f"""
         format=csv image_size="[448, 672]"
 """
 
+_eval_classification_cfg = CLIEvalClassificationConfig(out="", checkpoint="")
+_EVAL_CLASSIFICATION_HELP_MSG = f"""
+    Evaluate a pretrained model with KneeNo's frozen-encoder classification tasks.
+
+    Runs k-NN, linear, linear-pool and attentive-pool multi-label classification against
+    a labeled knee-MRI dataset, with the encoder frozen and the heads trained from
+    scratch. Unlike the evaluation that runs during pretraining, this logs the whole head
+    fine-tuning curve.
+
+    Usage:
+        lightly-train eval_classification [options]
+
+    Options:
+        out (str, required):
+            Path to a JSON file where the final metrics will be written.
+        checkpoint (str, required):
+            Path to the LightlyTrain checkpoint to evaluate. If training was run with
+            `out="out/my_experiment"`, the last checkpoint is at
+            `out/my_experiment/checkpoints/last.ckpt`.
+        eval_config (str):
+            Path to a KneeNo `eval:` YAML config. Defaults to the config shipped at
+            `lightly_train/_configs/kneeno_eval.yaml`.
+        image_size ([int, int, int]):
+            Global crop size (H, W, D) the model was pretrained with. The checkpoint does
+            not record it, so pass it if the pretraining run overrode
+            `transform_args.image_size`. Default: the DINOv2 default.
+        encoder (str):
+            Which encoder to evaluate: 'target' (the EMA teacher, which is what the
+            checkpoint stores) or 'online' (the student). Default: the config's
+            `eval.encoder`.
+        tasks ([str]):
+            Subset of ['knn', 'linear', 'linear_pool', 'attentive_pool'].
+            Default: all four.
+        accelerator (str):
+            Hardware accelerator. Can be one of ['cpu', 'gpu', 'tpu', 'ipu', 'hpu',
+            'mps', 'auto']. Default: {_eval_classification_cfg.accelerator}
+        overwrite (bool):
+            Overwrite the output file if it already exists.
+            Default: {_eval_classification_cfg.overwrite}
+
+    Optional arguments:
+        -v, --verbose  Run the command in verbose mode for detailed output.
+
+    Examples:
+    # Evaluate the last checkpoint of a pretraining run
+    lightly-train eval_classification out=eval.json \\
+        checkpoint=out/my_experiment/checkpoints/last.ckpt
+
+    # Evaluate the online (student) encoder on only the k-NN task
+    lightly-train eval_classification out=eval.json \\
+        checkpoint=out/my_experiment/checkpoints/last.ckpt encoder=online tasks=[knn]
+"""
+
 _extract_cfg = CLIExtractVideoFramesConfig(data="", out="")
 _EXTRACT_VIDEO_FRAMES_HELP_MSG = f"""
     Extract frames from videos using ffmpeg.
@@ -447,6 +517,9 @@ def cli(config: DictConfig) -> None:
     elif command == "embed":
         command_fn = embed.embed_from_dictconfig
         help_msg = _EMBED_HELP_MSG
+    elif command == "eval_classification":
+        command_fn = eval_classification.eval_classification_from_dictconfig
+        help_msg = _EVAL_CLASSIFICATION_HELP_MSG
     elif command == "extract_video_frames":
         command_fn = extract_video_frames.extract_video_frames_from_dictconfig
         help_msg = _EXTRACT_VIDEO_FRAMES_HELP_MSG

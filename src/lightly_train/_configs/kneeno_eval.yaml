@@ -1,0 +1,56 @@
+# KneeNo classification evaluation, run on the frozen encoder every eval.freq.<task>
+# epochs -- see KneeNo/kneeno/evaluation/config.py for every key and its default.
+#
+# Mirrors vjepa2/configs/train_2_1/vitb16/pretrain-MI-256px-16f.yaml's "eval:" block so
+# the two pretraining runs are scored identically. Two deliberate differences:
+#   * "linear" is ENABLED here. V-JEPA 2.1 has no cls token, so vjepa2 must disable it;
+#     DINOv2 does have one (DINOv2Adapter.has_cls_token = True), so both "linear" and
+#     "linear_pool" are available.
+#   * logging.tensorboard_dir is null. KneeNo's own SummaryWriter is switched off and the
+#     metrics dict returned by evaluate() is re-logged through lightly-train's loggers
+#     instead (see _callbacks/kneeno_eval.py), so eval scalars land in the same
+#     TensorBoard/JSONL run as the training curves.
+eval:
+  seed: 239
+  encoder: target  # target (EMA teacher) | online (student)
+  split:
+    test_fraction: 0.2
+  data:
+    # TODO: point at the real labeled classification dataset once it exists
+    # (see KneeNo/kneeno/evaluation/dataset.py -- LabeledKneeMRIDataset is a
+    # temporary stub until then).
+    data_root: /dev/shm/kneeno_data
+    label_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/labels.json
+    series_depth: 0  # match the pretraining series_depth -- no resampling distribution shift
+    resample_mode: nearest
+    num_workers: 8
+  logging:
+    tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
+    tag_prefix: eval
+  freq:
+    knn: 1
+    linear: 5
+    linear_pool: 5
+    attentive_pool: 5
+  knn:
+    k: [5, 20]
+    metric: cosine
+    temperature: 0.07
+    pooling: avg
+    batch_size: 128
+  linear:
+    epochs: 20
+    batch_size: 128
+    lr: 0.001
+  linear_pool:
+    pooling: avg
+    epochs: 20
+    batch_size: 128
+    lr: 0.001
+  attentive_pool:
+    depth: 1
+    num_heads: 12
+    epochs: 20
+    batch_size: 64
+    lr: 0.0005
+    warmup_epochs: 5

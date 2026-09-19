@@ -31,6 +31,8 @@ from lightly_train._configs.config import PydanticConfig
         (["pretrain", "help"], _cli._PRETRAIN_HELP_MSG),
         (["export"], _cli._EXPORT_HELP_MSG),
         (["export", "help"], _cli._EXPORT_HELP_MSG),
+        (["eval_classification"], _cli._EVAL_CLASSIFICATION_HELP_MSG),
+        (["eval_classification", "help"], _cli._EVAL_CLASSIFICATION_HELP_MSG),
     ],
 )
 def test_cli__help(command: list[str], msg: str, caplog: LogCaptureFixture) -> None:
@@ -56,6 +58,16 @@ def test_cli__export(mocker: MockerFixture) -> None:
     _cli.cli(config=config)
     mock_export_from_dictconfig.assert_called_once()
     mock_export_from_dictconfig.assert_called_once_with(config)
+
+
+def test_cli__eval_classification(mocker: MockerFixture) -> None:
+    config = OmegaConf.from_cli(["eval_classification", "out=metrics.json"])
+    mock_eval_from_dictconfig = mocker.patch.object(
+        _cli.eval_classification, "eval_classification_from_dictconfig"
+    )
+    _cli.cli(config=config)
+    mock_eval_from_dictconfig.assert_called_once()
+    mock_eval_from_dictconfig.assert_called_once_with(config)
 
 
 def test_cli__embed(mocker: MockerFixture) -> None:

@@ -187,6 +187,7 @@ warn_unused_ignores = false
 module = [
     "albumentations.*",
     "fsspec.*",
+    "kneeno.*",
     "lightly.*",
     "matplotlib.*",
     "lightning_fabric.*",

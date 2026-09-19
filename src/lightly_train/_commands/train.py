@@ -431,6 +431,7 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             normalize_args=transform_instance.transform_args.normalize,
             loggers=logger_instances,
             license_info=LICENSE_INFO,
+            image_size=transform_instance.transform_args.image_size,
         )
         config.accelerator = common_helpers.get_accelerator(
             accelerator=config.accelerator

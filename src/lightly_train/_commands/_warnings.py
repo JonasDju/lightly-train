@@ -81,6 +81,13 @@ def filter_embed_warnings() -> None:
     )
 
 
+def filter_eval_classification_warnings() -> None:
+    filter_warnings()
+    warnings.filterwarnings(
+        "ignore", message="Consider setting `persistent_workers=True`"
+    )
+
+
 def filter_export_warnings() -> None:
     warnings.filterwarnings(
         "ignore",

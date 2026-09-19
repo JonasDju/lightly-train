@@ -11,6 +11,7 @@ from pydantic import Field
 
 from lightly_train._callbacks.checkpoint import ModelCheckpointArgs
 from lightly_train._callbacks.export import ModelExportArgs
+from lightly_train._callbacks.kneeno_eval import KneeNoEvalArgs
 from lightly_train._configs.config import PydanticConfig
 
 
@@ -38,3 +39,4 @@ class CallbackArgs(PydanticConfig):
     model_checkpoint: ModelCheckpointArgs | None = Field(
         default_factory=ModelCheckpointArgs
     )
+    kneeno_eval: KneeNoEvalArgs | None = Field(default_factory=KneeNoEvalArgs)

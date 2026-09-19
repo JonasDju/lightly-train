@@ -73,8 +73,9 @@ def test_get_callbacks__default(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 5
+    assert len(callbacks) == 6
     early_stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     assert early_stopping.monitor == "train_loss"
@@ -99,8 +100,9 @@ def test_get_callbacks__mlflow(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=loggers,
         license_info="",
+        image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 6
+    assert len(callbacks) == 7
     early_stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     assert early_stopping.monitor == "train_loss"
@@ -124,8 +126,9 @@ def test_get_callbacks__enable_devicestatsmonitor(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 6
+    assert len(callbacks) == 7
     assert any(isinstance(c, DeviceStatsMonitor) for c in callbacks)
 
 
@@ -144,8 +147,9 @@ def test_get_callbacks__disable(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 3
+    assert len(callbacks) == 4
     assert any(isinstance(c, ModelCheckpoint) for c in callbacks)
     assert not any(isinstance(c, MLFlowLogging) for c in callbacks)
 
@@ -164,6 +168,7 @@ def test_get_callbacks__user_config(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        image_size=(224, 224, 16),
     )
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     assert str(model_checkpoint.dirpath) == str(tmp_path / "checkpoints")

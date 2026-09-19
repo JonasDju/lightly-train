@@ -36,6 +36,7 @@ from lightly_train._commands.benchmark_types import (
 )
 from lightly_train._commands.common_helpers import ModelFormat, ModelPart
 from lightly_train._commands.embed import embed
+from lightly_train._commands.eval_classification import eval_classification
 from lightly_train._commands.export import export
 from lightly_train._commands.export_task import export_onnx
 from lightly_train._commands.predict_task import predict_semantic_segmentation
@@ -63,6 +64,7 @@ __all__ = [
     "BenchmarkStatistics",
     "DescriptiveStatistics",
     "embed",
+    "eval_classification",
     "EmbeddingFormat",
     "export_onnx",
     "export",

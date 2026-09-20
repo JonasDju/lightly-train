@@ -1,7 +1,7 @@
 # KneeNo classification evaluation, run on the frozen encoder every eval.freq.<task>
 # epochs -- see KneeNo/kneeno/evaluation/config.py for every key and its default.
 #
-# Mirrors vjepa2/configs/train_2_1/vitb16/pretrain-MI-256px-16f.yaml's "eval:" block so
+# Mirrors vjepa2/configs/train_2_1/vitb16/pretrain-MI-256px-24f.yaml's "eval:" block so
 # the two pretraining runs are scored identically. Two deliberate differences:
 #   * "linear" is ENABLED here. V-JEPA 2.1 has no cls token, so vjepa2 must disable it;
 #     DINOv2 does have one (DINOv2Adapter.has_cls_token = True), so both "linear" and

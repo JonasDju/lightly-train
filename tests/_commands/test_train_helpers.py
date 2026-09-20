@@ -140,7 +140,6 @@ def test_get_dataloader(
         dataset=dataset,
         batch_size=batch_size,
         num_workers=0,
-        series_depth=8,
         loader_args=loader_args,
     )
     assert dataloader.worker_init_fn is mi_dataset.worker_init_fn
@@ -181,7 +180,6 @@ def test_get_dataloader__mi_dataset_series_depth_not_positive(
         dataset=dataset,
         batch_size=4,
         num_workers=0,
-        series_depth=series_depth,
         loader_args=None,
     )
     batch = next(iter(dataloader))

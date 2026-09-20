@@ -17,7 +17,7 @@ eval:
     test_fraction: 0.2
   data:
     data_root: $TMP/kneeno_data/labeled
-    label_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/labels.json
+    label_meta: /hpcwork/p0021834/workspace_roman/jonas/koeln_4s_histnorm_labels/combined.json
     series_depth: 24  # match the pretraining series_depth -- no resampling distribution shift
     resample_mode: nearest
     num_workers: 16

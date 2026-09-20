@@ -182,7 +182,6 @@ class TestWorkerSeeding:
             dataset=dataset,
             batch_size=1,
             num_workers=2,
-            series_depth=8,
             loader_args={"shuffle": False},
         )
         assert dataloader.worker_init_fn is mi_dataset.worker_init_fn

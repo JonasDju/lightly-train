@@ -156,7 +156,6 @@ def test_pretrain__batch_sizes_for_gradient_accumulation(
     )
 
     assert get_dataloader_spy.call_args.kwargs["batch_size"] == per_device_batch_size
-    assert get_dataloader_spy.call_args.kwargs["series_depth"] == 8
     assert (
         get_method_spy.call_args.kwargs["global_batch_size"]
         == effective_global_batch_size

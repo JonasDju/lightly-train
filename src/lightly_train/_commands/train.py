@@ -483,7 +483,6 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             dataset=dataset,
             batch_size=per_device_batch_size,
             num_workers=config.num_workers,
-            series_depth=config.series_depth,
             loader_args=config.loader_args,
         )
         method_cls = method_helpers.get_method_cls(method=config.method)

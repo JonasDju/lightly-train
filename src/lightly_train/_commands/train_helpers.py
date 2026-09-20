@@ -163,7 +163,6 @@ def get_dataloader(
     dataset: Dataset[DatasetItem],
     batch_size: int,
     num_workers: int,
-    series_depth: int,
     loader_args: dict[str, Any] | None,
 ) -> DataLoader[DatasetItem]:
     """Creates a dataloader for the given dataset.

@@ -136,7 +136,7 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     finally:
         # No-op unless the config sets logging.tensorboard_dir, but flushing a writer
         # that does exist matters if the process exits right after.
-        evaluator.tb.close()
+        evaluator.cleanup()
 
     logger.info(f"Final metrics: {metrics}")
     out_path.parent.mkdir(parents=True, exist_ok=True)

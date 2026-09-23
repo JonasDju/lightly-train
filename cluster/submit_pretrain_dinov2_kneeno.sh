@@ -18,16 +18,14 @@
 
 set -euo pipefail
 
-# --- Locations (override by exporting before sbatch, e.g. `LABELED_TAR=... sbatch ...`) --------------------
+# --- Locations (override by exporting before sbatch, e.g. `OUT_DIR=... sbatch ...`) --------------------
 # SLURM runs a copy of this script, so the repo cannot be located via $0.
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 KNEENO_DIR="${KNEENO_DIR:-$REPO_DIR/../KneeNo}"
 OUT_DIR="${OUT_DIR:-/hpcwork/va105917/lightly/vitb14.24f}"
 MODEL="${MODEL:-dinov2/vitb14}"
-LABELED_TAR="${LABELED_TAR:-/hpcwork/p0021834/workspace_roman/jonas/koeln_4s_histnorm.tar}"
 
-# Fail here rather than after the first epoch: a missing labeled tar only disables eval with a warning.
-[[ -f "$LABELED_TAR" ]] || { echo "Labeled tar not found: $LABELED_TAR (set LABELED_TAR)" >&2; exit 1; }
+# Fail here rather than after the first epoch
 [[ -f "$KNEENO_DIR/data/prepare_data.py" ]] || { echo "KneeNo not found at $KNEENO_DIR (set KNEENO_DIR)" >&2; exit 1; }
 
 # Fail here rather than deep inside Lightning: one task per GPU is what DDP needs.
@@ -42,7 +40,6 @@ PYTHON="$REPO_DIR/.venv/bin/python"
 
 # --- Data -> node-local scratch ($TMP/kneeno_data/{unlabeled,labeled}); skipped if already populated -------
 srun --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --unlabeled-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
-                                                                      --labeled-tar "$LABELED_TAR" \
                                                                       --pool-size 16
 
 # --- Training ---------------------------------------------------------------------------------------------

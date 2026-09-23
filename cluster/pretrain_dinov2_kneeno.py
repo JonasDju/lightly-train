@@ -64,7 +64,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--data-meta",
-        default="/hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata.json",
+        default="/hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_unlabeled.json",
         help="metadata.json of the unlabeled dataset",
     )
     parser.add_argument("--model", default="dinov2/vitb14", help="any 3D dinov2/<name>, e.g. dinov2/vits14")

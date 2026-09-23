@@ -156,3 +156,11 @@ class KneeNoEval(Callback):
             on_epoch=True,
             sync_dist=False,
         )
+
+    def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        # Flushes and closes KneeNo's own TensorBoard writer (a no-op with the shipped
+        # config, which disables it). The evaluator is built lazily, so there may be
+        # nothing to close: no task was ever due, or evaluation disabled itself.
+        # Purely local, no collectives, so it is safe on every rank.
+        if self._evaluator is not None:
+            self._evaluator.cleanup()

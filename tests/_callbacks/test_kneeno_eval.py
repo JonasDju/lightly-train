@@ -29,7 +29,7 @@ IMAGE_SIZE = (16, 8, 4)  # (H, W, D), non-cubic to catch an axis-order swap.
 
 
 class _FakeLabeledDataset(torch.utils.data.Dataset[tuple[torch.Tensor, torch.Tensor]]):
-    """Stands in for LabeledKneeMRIDataset, which needs a dataset on the cluster."""
+    """Stands in for LabeledInternalKneeMRIDataset, which needs a dataset on the cluster."""
 
     num_classes = 4
 
@@ -102,7 +102,7 @@ def _fake_module(mocker: MockerFixture) -> Any:
 def _install_dataset(callback: KneeNoEval, mocker: MockerFixture) -> None:
     """Inject a synthetic labeled dataset instead of the cluster one."""
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledKneeMRIDataset",
+        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
         return_value=_FakeLabeledDataset(),
     )
 
@@ -121,7 +121,7 @@ def test_default_config_exists_and_disables_kneeno_tensorboard() -> None:
     config = yaml.safe_load(DEFAULT_EVAL_CONFIG_PATH.read_text())["eval"]
     assert config["logging"]["tensorboard_dir"] is None
     # DINOv2 has a cls token, so unlike vjepa2 the linear task stays enabled.
-    assert config["freq"]["linear"] == 5
+    assert config["freq"]["linear"] == 1
 
 
 def test_on_train_epoch_end__logs_metrics(
@@ -166,7 +166,7 @@ def test_on_train_epoch_end__disables_itself_when_dataset_is_missing(
     """Evaluation is on by default, so a run without the labeled dataset must not die."""
     callback = _callback(tmp_path)
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledKneeMRIDataset",
+        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
         side_effect=FileNotFoundError("no labels here"),
     )
     module = _fake_module(mocker)
@@ -181,6 +181,71 @@ def test_on_train_epoch_end__disables_itself_when_dataset_is_missing(
     callback.on_train_epoch_end(_fake_trainer(mocker, epoch=1), module)
     assert "Disabling KneeNo evaluation" not in caplog.text
     module.log_dict.assert_not_called()
+
+
+def test_on_train_end__cleans_up_the_evaluator(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    callback = _callback(tmp_path)
+    _install_dataset(callback, mocker)
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
+    assert callback._evaluator is not None
+    cleanup = mocker.spy(callback._evaluator, "cleanup")
+
+    callback.on_train_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
+
+    cleanup.assert_called_once_with()
+
+
+def test_on_train_end__flushes_kneeno_tensorboard_writer(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """With KneeNo's own writer switched on, everything logged is on disk after training."""
+    from tensorboard.backend.event_processing.event_accumulator import (
+        EventAccumulator,
+    )
+
+    tb_dir = tmp_path / "tb"
+    callback = _callback(tmp_path, logging={"tensorboard_dir": str(tb_dir)})
+    _install_dataset(callback, mocker)
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
+
+    callback.on_train_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
+
+    events = EventAccumulator(str(tb_dir))
+    events.Reload()
+    assert any(tag.startswith("eval/knn/") for tag in events.Tags()["scalars"])
+
+
+def test_on_train_end__without_evaluator_is_a_noop(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """No task was ever due: training ends without building (and loading) the evaluator."""
+    callback = _callback(tmp_path)
+    build = mocker.patch(
+        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset"
+    )
+
+    callback.on_train_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
+
+    build.assert_not_called()
+    assert callback._evaluator is None
+
+
+def test_on_train_end__after_evaluation_disabled_itself(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    callback = _callback(tmp_path)
+    mocker.patch(
+        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
+        side_effect=FileNotFoundError("no labels here"),
+    )
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
+    assert callback._disabled
+
+    callback.on_train_end(
+        _fake_trainer(mocker, epoch=0), _fake_module(mocker)
+    )  # must not raise
 
 
 @pytest.mark.parametrize("encoder", ["target", "online"])

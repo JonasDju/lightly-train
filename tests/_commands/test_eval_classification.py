@@ -36,7 +36,7 @@ IMAGE_SIZE = (16, 8, 4)  # (H, W, D), non-cubic to catch an axis-order swap.
 
 
 class _FakeLabeledDataset(torch.utils.data.Dataset[tuple[torch.Tensor, torch.Tensor]]):
-    """Stands in for LabeledKneeMRIDataset, which needs a dataset on the cluster."""
+    """Stands in for LabeledInternalKneeMRIDataset, which needs a dataset on the cluster."""
 
     num_classes = 4
 
@@ -102,7 +102,7 @@ def eval_config_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def fake_dataset(mocker: MockerFixture) -> None:
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledKneeMRIDataset",
+        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
         return_value=_FakeLabeledDataset(),
     )
 

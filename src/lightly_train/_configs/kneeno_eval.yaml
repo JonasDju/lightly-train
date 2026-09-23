@@ -13,22 +13,29 @@
 eval:
   seed: 239
   encoder: target  # target (EMA teacher) | online (student)
+  amp_dtype: bfloat16  # frozen-encoder forward under autocast (CUDA only); null -> float32. Heads still train in float32.
+  cache_features: true  # linear / linear_pool train on embeddings extracted once per evaluation instead of
+                        # re-encoding every head epoch; k-NN always uses the shared pass. attentive_pool never caches.
   split:
     test_fraction: 0.2
   data:
-    data_root: $TMP/kneeno_data/labeled
-    label_meta: /hpcwork/p0021834/workspace_roman/jonas/koeln_4s_histnorm_labels/combined.json
+    data_root: $TMP/kneeno_data/unlabeled
+    label_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_labeled.json
     series_depth: 24  # match the pretraining series_depth -- no resampling distribution shift
     resample_mode: nearest
     num_workers: 16
+    subset: 12000  # seeded subsample of the labeled series: float in (0, 1] = fraction, int > 1 = count, 1.0 = all
+    multiprocessing_context: fork  # eval DataLoader worker start method; null -> inherit. Workers must never touch CUDA
+    persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
+    per_label_dir: /hpcwork/va105917/lightly/vitb14.24f/eval_per_sample
     tag_prefix: eval
   freq:
     knn: 1
-    linear: 5
-    linear_pool: 5
-    attentive_pool: 5
+    linear: 1
+    linear_pool: 1
+    attentive_pool: 10
   knn:
     k: [5, 20]
     metric: cosine

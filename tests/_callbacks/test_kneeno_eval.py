@@ -28,10 +28,14 @@ from .. import helpers
 IMAGE_SIZE = (16, 8, 4)  # (H, W, D), non-cubic to catch an axis-order swap.
 
 
-class _FakeLabeledDataset(torch.utils.data.Dataset[tuple[torch.Tensor, torch.Tensor]]):
+class _FakeLabeledDataset(
+    torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor]]
+):
     """Stands in for LabeledInternalKneeMRIDataset, which needs a dataset on the cluster."""
 
     num_classes = 4
+    # One item is an exam: one volume per sequence, in this order.
+    sequences = ("sag", "st1", "cor", "tra")
 
     def __init__(self, n: int = 16) -> None:
         self.n = n
@@ -39,18 +43,21 @@ class _FakeLabeledDataset(torch.utils.data.Dataset[tuple[torch.Tensor, torch.Ten
     def __len__(self) -> int:
         return self.n
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         gen = torch.Generator().manual_seed(index)
         # Mixed native depths: DINOv2Adapter resizes depth, so they batch without resampling.
-        volume = torch.randint(
-            0,
-            256,
-            (1, 5 + (index % 3), 20, 11),
-            generator=gen,
-            dtype=torch.uint8,
+        volumes = tuple(
+            torch.randint(
+                0,
+                256,
+                (1, 5 + ((index + s) % 3), 20, 11),
+                generator=gen,
+                dtype=torch.uint8,
+            )
+            for s in range(len(self.sequences))
         )
         label = (torch.rand(self.num_classes, generator=gen) > 0.5).float()
-        return volume, label
+        return volumes, label
 
 
 def _write_config(tmp_path: Path, **overrides: Any) -> Path:

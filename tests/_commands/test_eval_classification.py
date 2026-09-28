@@ -43,15 +43,13 @@ class _FakeLabeledDataset(torch.utils.data.Dataset[tuple[torch.Tensor, torch.Ten
     def __len__(self) -> int:
         return 12
 
-    def effective_depth(self, index: int) -> int:
-        return 5 + (index % 3)
-
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         gen = torch.Generator().manual_seed(index)
+        # Mixed native depths: DINOv2Adapter resizes depth, so they batch without resampling.
         volume = torch.randint(
             0,
             256,
-            (1, self.effective_depth(index), 20, 11),
+            (1, 5 + (index % 3), 20, 11),
             generator=gen,
             dtype=torch.uint8,
         )

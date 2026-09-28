@@ -181,9 +181,8 @@ def get_dataloader(
     logger.debug(f"Using batch size per device {batch_size}.")
     timeout = Env.LIGHTLY_TRAIN_DATALOADER_TIMEOUT_SEC.value if num_workers > 0 else 0
 
-    # No DepthBucketSampler is needed here even for series_depth <= 0 (native
-    # per-series depth): RandomResizedCrop3D always resizes its crop to a fixed
-    # output size
+    # Plain collation works even for series_depth <= 0 (native per-series depth):
+    # RandomResizedCrop3D always resizes its crop to a fixed output size.
 
     dataloader_kwargs: dict[str, Any] = dict(
         dataset=dataset,

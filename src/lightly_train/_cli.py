@@ -95,7 +95,8 @@ _PRETRAIN_HELP_MSG = f"""
         data_meta (str, required):
             Path to the KneeNo metadata JSON file.
         series_depth (int, required):
-            Resample every series to this many slices. Must be > 0.
+            Resample every series to this many slices. <= 0 keeps each series' native
+            depth (the random resized crop brings every view to a fixed size anyway).
         resample_mode (str, required):
             How to resample along depth: 'nearest' or 'interpolate'.
         model (str, required):

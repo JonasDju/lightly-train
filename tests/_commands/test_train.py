@@ -230,8 +230,8 @@ def test_pretrain__series_depth_not_positive(tmp_path: Path, series_depth: int) 
     """series_depth<=0 means native per-series depth (kneeno treats every
     non-positive value the same as 0). The synthetic dataset has series of two
     different depths (6 and 9); RandomResizedCrop3D always resizes its crop to a
-    fixed output size, so default collation across them works without a
-    depth-bucket sampler."""
+    fixed output size, so default collation across them works without batching
+    by depth."""
     out = tmp_path / "out"
     train.pretrain(**_pretrain_kwargs(tmp_path, series_depth=series_depth))
     assert (out / "checkpoints" / "last.ckpt").exists()

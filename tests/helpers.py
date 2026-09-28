@@ -1145,10 +1145,7 @@ def create_mi_dataset(
             for i in range(depth):
                 slice_np = rng.integers(0, 256, size=(height, width), dtype=np.uint8)
                 Image.fromarray(slice_np).save(series_dir / f"{i:03d}.jpeg")
-            metadata[case_id][series_name] = {
-                "n_images": depth,
-                "resolution": [height, width],
-            }
+            metadata[case_id][series_name] = {"dimensions": [height, width, depth]}
     data_meta = root / "meta.json"
     data_meta.write_text(json.dumps(metadata))
     return data_root, data_meta

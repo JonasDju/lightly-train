@@ -156,7 +156,7 @@ def test_get_dataloader(
 def test_get_dataloader__mi_dataset_series_depth_not_positive(
     tmp_path: Path, series_depth: int
 ) -> None:
-    """series_depth<=0 (native per-series depth) needs no depth-bucket sampler:
+    """series_depth<=0 (native per-series depth) needs no batching by depth:
     RandomResizedCrop3D always resizes its crop to a fixed output size, so every
     MIDataset item has the same view shapes regardless of the input volume's
     native depth, and default collation works even across series of different
@@ -174,7 +174,7 @@ def test_get_dataloader__mi_dataset_series_depth_not_positive(
         transform=transform,
         series_depth=series_depth,
     )
-    assert {dataset._core.effective_depth(i) for i in range(len(dataset))} == {6, 9}
+    assert {dataset._core[i].shape[1] for i in range(len(dataset))} == {6, 9}
 
     dataloader = train_helpers.get_dataloader(
         dataset=dataset,

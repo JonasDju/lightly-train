@@ -1,3 +1,6 @@
+# lightly-train only reads student.* and crops.global_crops_size from this file (DINOv2ViTPackage.get_model).
+# Everything else here is ignored: set it via method_args, optim_args, transform_args, ... instead.
+
 # Same as vitg14_reg4.yaml, but with the block_chunks forced to 0.
 # The public ViT-G checkpoint uses block_chunks = 0.
 # block_chunks > 0 would make the checkpoint unloadable

@@ -1,3 +1,5 @@
+# lightly-train only reads student.* and crops.global_crops_size from this file (DINOv2ViTPackage.get_model).
+# Everything else here is ignored: set it via method_args, optim_args, transform_args, ... instead.
 student:
   arch: vit_giant2
   patch_size: 14

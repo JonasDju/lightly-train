@@ -21,13 +21,23 @@ Multi-GPU / multi-node: nothing to configure here. Devices, ranks and world size
 
 from __future__ import annotations
 
-import argparse
 import os
-from datetime import timedelta
-from pathlib import Path
 
-import lightly_train
-from pytorch_lightning.strategies import DDPStrategy
+# Must be set before numpy is imported (OpenBLAS reads it once, at load time), hence above the other imports.
+# numpy's bundled OpenBLAS otherwise starts one thread per core in every DataLoader worker -- torch only limits
+# its own threads there -- and RandomResizedCrop3D's np.tensordot runs on it: 31 workers x 32 threads on a
+# 32-core job slowed each sample ~15x, so no batch ever arrived within the DataLoader timeout. BLAS is only a
+# small share of the per-sample work, so throughput comes from the workers, not from threads inside one.
+# Workers inherit the environment, under fork and spawn alike.
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+import argparse  # noqa: E402
+from datetime import timedelta  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from pytorch_lightning.strategies import DDPStrategy  # noqa: E402
+
+import lightly_train  # noqa: E402
 
 # The eval config's eval.data.series_depth/resample_mode is 24/nearest -- keep pretraining identical, so the
 # encoder sees the same depth distribution during evaluation as it was trained on.

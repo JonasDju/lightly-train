@@ -14,7 +14,6 @@ The lightly-train counterpart of vjepa2's in-training hook in
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from kneeno.evaluation import ClassificationEvaluator, load_eval_config, tasks_due
@@ -28,13 +27,12 @@ from lightly_train.types import ImageSizeTuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EVAL_CONFIG_PATH = (
-    Path(__file__).parent.parent / "_configs" / "kneeno_eval.yaml"
-)
-
 
 class KneeNoEvalArgs(PydanticConfig):
-    config_path: str | None = None  # None -> _configs/kneeno_eval.yaml
+    # The ``eval:`` block of the run config, deep-merged over KneeNo's
+    # DEFAULT_EVAL_CONFIG. There is no shipped default: the callback is off unless a
+    # config is passed.
+    config: dict[str, Any]
 
 
 class KneeNoEval(Callback):
@@ -45,8 +43,9 @@ class KneeNoEval(Callback):
     directly comparable.
 
     Metrics are logged through ``pl_module.log_dict``, which reaches every configured
-    lightly-train logger (TensorBoard, JSONL, W&B, MLflow). The shipped config therefore
-    sets ``logging.tensorboard_dir: null``, disabling KneeNo's own ``SummaryWriter``.
+    lightly-train logger (TensorBoard, JSONL, W&B, MLflow). The cluster run config
+    (``cluster/configs/``) therefore sets ``logging.tensorboard_dir: null``, disabling
+    KneeNo's own ``SummaryWriter``.
     """
 
     def __init__(
@@ -54,15 +53,12 @@ class KneeNoEval(Callback):
         wrapped_model: ModelWrapper,
         image_size: ImageSizeTuple,
         normalize_args: NormalizeArgs,
-        config_path: str | None = None,
+        config: dict[str, Any],
     ) -> None:
         self._wrapped_model = wrapped_model
         self._image_size = image_size
         self._normalize_args = normalize_args
-        self._config_path = (
-            Path(config_path) if config_path is not None else DEFAULT_EVAL_CONFIG_PATH
-        )
-        self._config = load_eval_config(self._config_path)
+        self._config = load_eval_config(config)
         self._evaluator: ClassificationEvaluator | None = None
         # Set once the evaluator has failed to build, so we warn once and stay quiet.
         self._disabled = False
@@ -100,9 +96,9 @@ class KneeNoEval(Callback):
             logger.warning(
                 f"Disabling KneeNo evaluation for this run: could not load the labeled "
                 f"dataset from eval.data ('{self._config['data']['data_root']}', "
-                f"'{self._config['data']['label_meta']}'): {ex}. Point "
-                f"callbacks.kneeno_eval.config_path at a config with valid paths, or "
-                f"pass callbacks.kneeno_eval=null to silence this."
+                f"'{self._config['data']['label_meta']}'): {ex}. Fix eval.data in the "
+                f"run config (callbacks.kneeno_eval.config), or drop the eval block "
+                f"to silence this."
             )
         return self._evaluator
 

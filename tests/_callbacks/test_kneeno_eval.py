@@ -12,15 +12,12 @@ from typing import Any
 
 import pytest
 import torch
-import yaml
+from pydantic import ValidationError
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
 
-from lightly_train._callbacks.kneeno_eval import (
-    DEFAULT_EVAL_CONFIG_PATH,
-    KneeNoEval,
-    KneeNoEvalArgs,
-)
+from lightly_train._callbacks.callback_args import CallbackArgs
+from lightly_train._callbacks.kneeno_eval import KneeNoEval, KneeNoEvalArgs
 from lightly_train._transforms.transform import NormalizeArgs
 
 from .. import helpers
@@ -60,7 +57,7 @@ class _FakeLabeledDataset(
         return volumes, label
 
 
-def _write_config(tmp_path: Path, **overrides: Any) -> Path:
+def _config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
         "data": {"num_workers": 0},
         "knn": {"batch_size": 4},
@@ -75,18 +72,16 @@ def _write_config(tmp_path: Path, **overrides: Any) -> Path:
         },
     }
     config.update(overrides)
-    path = tmp_path / "eval.yaml"
-    path.write_text(yaml.safe_dump({"eval": config}))
-    return path
+    return config
 
 
-def _callback(tmp_path: Path, **overrides: Any) -> KneeNoEval:
+def _callback(**overrides: Any) -> KneeNoEval:
     wrapper = helpers.dummy_dinov2_vit_model(patch_size=(2, 2, 2), img_size=IMAGE_SIZE)
     return KneeNoEval(
         wrapped_model=wrapper,
         image_size=IMAGE_SIZE,
         normalize_args=NormalizeArgs(),
-        config_path=str(_write_config(tmp_path, **overrides)),
+        config=_config(**overrides),
     )
 
 
@@ -112,27 +107,25 @@ def _install_dataset(callback: KneeNoEval, mocker: MockerFixture) -> None:
     )
 
 
-def test_kneeno_eval_args__defaults() -> None:
-    assert KneeNoEvalArgs().config_path is None
+def test_callback_args__kneeno_eval_off_by_default() -> None:
+    # There is no default eval config: without one, nothing is evaluated.
+    assert CallbackArgs().kneeno_eval is None
 
 
-def test_default_config_exists_and_disables_kneeno_tensorboard() -> None:
-    """The shipped config must switch off KneeNo's own writer.
-
-    Metrics are re-logged through lightly-train's loggers instead, so a second
-    SummaryWriter on the same run would double-write.
-    """
-    assert DEFAULT_EVAL_CONFIG_PATH.is_file()
-    config = yaml.safe_load(DEFAULT_EVAL_CONFIG_PATH.read_text())["eval"]
-    assert config["logging"]["tensorboard_dir"] is None
-    # DINOv2 has a cls token, so unlike vjepa2 the linear task stays enabled.
-    assert config["freq"]["linear"] == 1
+def test_kneeno_eval_args__config_required() -> None:
+    with pytest.raises(ValidationError):
+        KneeNoEvalArgs()  # type: ignore[call-arg]
 
 
-def test_on_train_epoch_end__logs_metrics(
-    tmp_path: Path, mocker: MockerFixture
-) -> None:
-    callback = _callback(tmp_path)
+def test_kneeno_eval__config_merged_over_kneeno_defaults() -> None:
+    callback = _callback(knn={"k": [3]})
+    assert callback._config["knn"]["k"] == [3]
+    # Keys the passed config leaves out come from KneeNo's DEFAULT_EVAL_CONFIG.
+    assert "metric" in callback._config["knn"]
+
+
+def test_on_train_epoch_end__logs_metrics(mocker: MockerFixture) -> None:
+    callback = _callback()
     _install_dataset(callback, mocker)
     module = _fake_module(mocker)
 
@@ -147,11 +140,8 @@ def test_on_train_epoch_end__logs_metrics(
     assert module.log_dict.call_args.kwargs["sync_dist"] is False
 
 
-def test_on_train_epoch_end__skips_when_no_task_is_due(
-    tmp_path: Path, mocker: MockerFixture
-) -> None:
+def test_on_train_epoch_end__skips_when_no_task_is_due(mocker: MockerFixture) -> None:
     callback = _callback(
-        tmp_path,
         freq={"knn": 3, "linear": None, "linear_pool": None, "attentive_pool": None},
     )
     _install_dataset(callback, mocker)
@@ -166,10 +156,10 @@ def test_on_train_epoch_end__skips_when_no_task_is_due(
 
 
 def test_on_train_epoch_end__disables_itself_when_dataset_is_missing(
-    tmp_path: Path, mocker: MockerFixture, caplog: LogCaptureFixture
+    mocker: MockerFixture, caplog: LogCaptureFixture
 ) -> None:
     """Evaluation is on by default, so a run without the labeled dataset must not die."""
-    callback = _callback(tmp_path)
+    callback = _callback()
     mocker.patch(
         "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
         side_effect=FileNotFoundError("no labels here"),
@@ -188,10 +178,8 @@ def test_on_train_epoch_end__disables_itself_when_dataset_is_missing(
     module.log_dict.assert_not_called()
 
 
-def test_on_train_end__cleans_up_the_evaluator(
-    tmp_path: Path, mocker: MockerFixture
-) -> None:
-    callback = _callback(tmp_path)
+def test_on_train_end__cleans_up_the_evaluator(mocker: MockerFixture) -> None:
+    callback = _callback()
     _install_dataset(callback, mocker)
     callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
     assert callback._evaluator is not None
@@ -211,7 +199,7 @@ def test_on_train_end__flushes_kneeno_tensorboard_writer(
     )
 
     tb_dir = tmp_path / "tb"
-    callback = _callback(tmp_path, logging={"tensorboard_dir": str(tb_dir)})
+    callback = _callback(logging={"tensorboard_dir": str(tb_dir)})
     _install_dataset(callback, mocker)
     callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
 
@@ -222,11 +210,9 @@ def test_on_train_end__flushes_kneeno_tensorboard_writer(
     assert any(tag.startswith("eval/knn/") for tag in events.Tags()["scalars"])
 
 
-def test_on_train_end__without_evaluator_is_a_noop(
-    tmp_path: Path, mocker: MockerFixture
-) -> None:
+def test_on_train_end__without_evaluator_is_a_noop(mocker: MockerFixture) -> None:
     """No task was ever due: training ends without building (and loading) the evaluator."""
-    callback = _callback(tmp_path)
+    callback = _callback()
     build = mocker.patch(
         "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset"
     )
@@ -237,10 +223,8 @@ def test_on_train_end__without_evaluator_is_a_noop(
     assert callback._evaluator is None
 
 
-def test_on_train_end__after_evaluation_disabled_itself(
-    tmp_path: Path, mocker: MockerFixture
-) -> None:
-    callback = _callback(tmp_path)
+def test_on_train_end__after_evaluation_disabled_itself(mocker: MockerFixture) -> None:
+    callback = _callback()
     mocker.patch(
         "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
         side_effect=FileNotFoundError("no labels here"),
@@ -254,8 +238,8 @@ def test_on_train_end__after_evaluation_disabled_itself(
 
 
 @pytest.mark.parametrize("encoder", ["target", "online"])
-def test_resolve_encoder(tmp_path: Path, mocker: MockerFixture, encoder: str) -> None:
-    callback = _callback(tmp_path, encoder=encoder)
+def test_resolve_encoder(mocker: MockerFixture, encoder: str) -> None:
+    callback = _callback(encoder=encoder)
     module = _fake_module(mocker)
     student_wrapper = helpers.dummy_dinov2_vit_model(
         patch_size=(2, 2, 2), img_size=IMAGE_SIZE
@@ -271,9 +255,9 @@ def test_resolve_encoder(tmp_path: Path, mocker: MockerFixture, encoder: str) ->
 
 
 def test_resolve_encoder__online_falls_back_without_student(
-    tmp_path: Path, mocker: MockerFixture, caplog: LogCaptureFixture
+    mocker: MockerFixture, caplog: LogCaptureFixture
 ) -> None:
-    callback = _callback(tmp_path, encoder="online")
+    callback = _callback(encoder="online")
     module = mocker.MagicMock(spec=["device"])
     module.device = torch.device("cpu")
 

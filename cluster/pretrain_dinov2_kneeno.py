@@ -1,22 +1,36 @@
 """3D DINOv2 pretraining on the unlabeled KneeNo volumes, with in-training classification eval.
 
-Default settings throughout: only the data locations and the model name are set here, everything else
-(method args, transforms, optimizer, epochs, batch size, ...) is what ``lightly_train.pretrain`` picks for
-``method="dinov2"``. The KneeNo classification evaluation (k-NN, linear, linear-pool, attentive-pool on the
-labeled dataset) is a default-on callback and reads ``src/lightly_train/_configs/kneeno_eval.yaml``; its
-``$TMP/kneeno_data/labeled`` data must exist by the time the first eval epoch ends
+Everything about the experiment comes from a run config (``--config``), like vjepa2's ``configs/``: a YAML with
+
+    model:      -> lightly_train.pretrain(model=...), e.g. dinov2/vitb14 (any 3D dinov2/<name>)
+    data:       -> lightly_train.pretrain(out=, data_root=, data_meta=, series_depth=, resample_mode=)
+    method:     -> lightly_train.pretrain(method_args=...)      (DINOv2Args)
+    transform:  -> lightly_train.pretrain(transform_args=...)   (DINOv2ViTTransformArgs)
+    eval:       -> the KneeNo eval callback's config            (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
+
+``model`` and ``data`` (with all five keys) are required. A missing ``method``/``transform`` block, or a
+missing key within one, falls back to lightly-train's default; a missing ``eval`` block means no evaluation at
+all. Environment variables (``$VAR``, ``${VAR}``, leading ``~``) are expanded in every string value with
+KneeNo's ``expand_env_vars`` (loading and validation: ``run_config.load_run_config``).
+``cluster/configs/pretrain-MI-vitb14-24f.yaml`` lists every default explicitly.
+lightly-train copies the file into ``data.out`` as ``params-pretrain.yaml`` (``params-pretrain-1.yaml``, ...
+on each resume), so that copy is the complete record of the run's settings. The only command-line option
+besides ``--config`` is the multi-GPU process-group timeout, which does not affect training. Everything else
+(optimizer, epochs, batch size, ...) is ``lightly_train.pretrain``'s default for ``method="dinov2"``.
+
+The eval block's ``$TMP/kneeno_data/labeled`` data must exist by the time the first eval epoch ends
 (``submit_pretrain_dinov2_kneeno.sh`` extracts it). If it cannot be loaded the callback only logs a warning
 and disables itself, so check the log for "Disabling KneeNo evaluation".
 
 Submit through ``submit_pretrain_dinov2_kneeno.sh``; that also prepares the node-local data first. Run by hand:
 
-    .venv/bin/python cluster/pretrain_dinov2_kneeno.py --out /hpcwork/va105917/lightly/dinov2_vitb14
+    .venv/bin/python cluster/pretrain_dinov2_kneeno.py --config cluster/configs/pretrain-MI-vitb14-24f.yaml
 
-Rerunning with the same ``--out`` resumes from ``<out>/checkpoints/last.ckpt`` if one exists.
+Rerunning with the same ``data.out`` resumes from ``<out>/checkpoints/last.ckpt`` if one exists.
 
 Multi-GPU / multi-node: nothing to configure here. Devices, ranks and world size come from the SLURM job
 (``--ntasks-per-node`` = GPUs per node, launched with ``srun``), and ``num_nodes`` is read from
-``SLURM_NNODES``. ``--batch-size`` is left at lightly-train's default, which is the *global* batch size.
+``SLURM_NNODES``. The batch size is left at lightly-train's default, which is the *global* batch size.
 """
 
 from __future__ import annotations
@@ -37,12 +51,10 @@ from pathlib import Path  # noqa: E402
 
 from pytorch_lightning.strategies import DDPStrategy  # noqa: E402
 
-import lightly_train  # noqa: E402
+# cluster/run_config.py: running this script puts its folder first on sys.path.
+from run_config import load_run_config  # noqa: E402
 
-# The eval config's eval.data.series_depth/resample_mode is 24/nearest -- keep pretraining identical, so the
-# encoder sees the same depth distribution during evaluation as it was trained on.
-SERIES_DEPTH = 24
-RESAMPLE_MODE = "nearest"
+import lightly_train  # noqa: E402
 
 
 def num_ranks() -> int:
@@ -66,18 +78,7 @@ def build_strategy(n_ranks: int, timeout_minutes: int) -> str | DDPStrategy:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out", required=True, help="output directory (logs, checkpoints, exported model)")
-    parser.add_argument(
-        "--data-root",
-        default="$TMP/kneeno_data/unlabeled",
-        help="extracted unlabeled dataset (see KneeNo/data/prepare_data.py); env vars are expanded",
-    )
-    parser.add_argument(
-        "--data-meta",
-        default="/hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_unlabeled.json",
-        help="metadata.json of the unlabeled dataset",
-    )
-    parser.add_argument("--model", default="dinov2/vitb14", help="any 3D dinov2/<name>, e.g. dinov2/vits14")
+    parser.add_argument("--config", required=True, help="run config YAML (see above)")
     parser.add_argument(
         "--pg-timeout-minutes",
         type=int,
@@ -86,18 +87,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    out = Path(args.out)
+    config = load_run_config(Path(args.config))
     # A re-queued job must continue rather than fail on the existing out dir.
-    resume_interrupted = (out / "checkpoints" / "last.ckpt").is_file()
+    resume_interrupted = (Path(config["data"]["out"]) / "checkpoints" / "last.ckpt").is_file()
 
     lightly_train.pretrain(
-        out=out,
-        data_root=os.path.expandvars(args.data_root),
-        data_meta=args.data_meta,
-        series_depth=SERIES_DEPTH,
-        resample_mode=RESAMPLE_MODE,
-        model=args.model,
+        **config["data"],
+        model=config["model"],
         method="dinov2",
+        method_args=config.get("method"),
+        transform_args=config.get("transform"),
+        # No eval block -> no evaluation: the callback is off unless given a config.
+        callbacks={"kneeno_eval": {"config": config["eval"]}} if "eval" in config else None,
+        params_file=args.config,
         resume_interrupted=resume_interrupted,
         # devices stays "auto" (GPUs visible to each task); nodes must be passed, lightly-train does not
         # read them from SLURM and uses this value to split the global batch across all devices.

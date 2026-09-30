@@ -1,0 +1,62 @@
+"""Loading and validating a cluster run config (see ``pretrain_dinov2_kneeno.py``).
+
+Imported by the scripts as ``from run_config import ...``: running ``python cluster/<script>.py`` puts this folder
+first on ``sys.path``. Importing this module imports numpy (through ``kneeno``), so a script that has to set
+``OPENBLAS_NUM_THREADS`` must do so before importing it.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+from kneeno import expand_env_vars
+
+RUN_CONFIG_KEYS = ("model", "data", "method", "transform", "eval")
+BLOCKS = ("data", "method", "transform", "eval")  # the keys whose value is a mapping
+# Named exactly like lightly_train.pretrain's arguments, which they are passed to as-is.
+DATA_KEYS = ("out", "data_root", "data_meta", "series_depth", "resample_mode")
+
+
+def load_run_config(path: Path) -> dict[str, Any]:
+    """A run config with env vars expanded; missing or null optional blocks are left out.
+
+    Unknown top-level or ``data`` keys are an error, so a typo such as ``methods:`` cannot silently fall back to
+    the defaults. So is a missing ``model``, ``data`` block or ``data`` key, and an eval block whose
+    ``series_depth``/``resample_mode`` differs from pretraining's: the encoder should be evaluated on the same
+    depth distribution it was trained on.
+    """
+    with path.open() as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Run config '{path}' must be a mapping, got {type(raw).__name__}.")
+    unknown = set(raw) - set(RUN_CONFIG_KEYS)
+    if unknown:
+        raise ValueError(f"Run config '{path}' has unknown top-level keys {sorted(unknown)}; valid: {RUN_CONFIG_KEYS}.")
+    config = expand_env_vars({key: raw[key] for key in RUN_CONFIG_KEYS if raw.get(key) is not None})
+
+    if not isinstance(config.get("model"), str):
+        raise ValueError(f"Run config '{path}' needs 'model' as a string, e.g. 'model: dinov2/vitb14'.")
+    for name in BLOCKS:
+        if name in config and not isinstance(config[name], dict):
+            raise ValueError(f"'{name}' in run config '{path}' must be a mapping, got {type(config[name]).__name__}.")
+
+    data = config.get("data")
+    if data is None:
+        raise ValueError(f"Run config '{path}' has no 'data' block; it needs {DATA_KEYS}.")
+    unknown = set(data) - set(DATA_KEYS)
+    if unknown:
+        raise ValueError(f"'data' in run config '{path}' has unknown keys {sorted(unknown)}; valid: {DATA_KEYS}.")
+    missing = [key for key in DATA_KEYS if data.get(key) is None]
+    if missing:
+        raise ValueError(f"'data' in run config '{path}' is missing required keys {missing}.")
+
+    eval_data = config.get("eval", {}).get("data", {})
+    for key in ("series_depth", "resample_mode"):
+        if key in eval_data and eval_data[key] != data[key]:
+            raise ValueError(
+                f"eval.data.{key} is {eval_data[key]!r} in '{path}', but pretraining (data.{key}) uses "
+                f"{data[key]!r}; evaluate the way the encoder was trained."
+            )
+    return config

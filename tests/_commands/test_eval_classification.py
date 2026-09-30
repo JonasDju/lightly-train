@@ -160,6 +160,43 @@ def test_eval_classification__invalid_encoder(
         )
 
 
+def test_eval_classification__run_config(
+    tmp_path: Path, checkpoint_path: Path, eval_config_path: Path, fake_dataset: None
+) -> None:
+    """A pretraining run's params-pretrain.yaml: only its eval block is used."""
+    run_config = {
+        "method": {"center_method": "softmax"},
+        "transform": {"num_channels": 1},
+        **yaml.safe_load(eval_config_path.read_text()),
+    }
+    params_path = tmp_path / "params-pretrain.yaml"
+    params_path.write_text(yaml.safe_dump(run_config))
+    out_path = tmp_path / "metrics.json"
+    eval_classification.eval_classification(
+        out=out_path,
+        checkpoint=checkpoint_path,
+        eval_config=params_path,
+        image_size=IMAGE_SIZE,
+        tasks=["knn"],
+        accelerator="cpu",
+    )
+    assert json.loads(out_path.read_text())
+
+
+def test_eval_classification__no_eval_block(
+    tmp_path: Path, checkpoint_path: Path
+) -> None:
+    params_path = tmp_path / "params-pretrain.yaml"
+    params_path.write_text(yaml.safe_dump({"method": {"center_method": "softmax"}}))
+    with pytest.raises(ValueError, match="no top-level 'eval:' block"):
+        eval_classification.eval_classification(
+            out=tmp_path / "metrics.json",
+            checkpoint=checkpoint_path,
+            eval_config=params_path,
+            accelerator="cpu",
+        )
+
+
 def test_load_student_weights__changes_the_teacher_weights(
     checkpoint_path: Path,
 ) -> None:

@@ -85,6 +85,7 @@ def pretrain(
     trainer_args: dict[str, Any] | None = None,
     model_args: dict[str, Any] | None = None,
     activation_checkpoint_args: dict[str, Any] | None = None,
+    params_file: PathLike | None = None,
     resume: bool | None = None,  # Deprecated, use `resume_interrupted`` instead.
 ) -> None:
     """Pretrain a self-supervised model.
@@ -251,6 +252,10 @@ def pretrain(
             transformer blocks. Use ``{"enabled": True, "every_n_blocks": 2}``
             to checkpoint every other block. Only supported for ViT-based
             backbones (DINOv2, DINOv3, EdgeCrafter).
+        params_file:
+            Path to the config file this run was launched from. It is only recorded,
+            not read: a copy is written to ``out/params-pretrain.yaml`` (or
+            ``params-pretrain-1.yaml``, ``-2``, ... if that exists, e.g. on resume).
         resume:
             Deprecated. Use ``resume_interrupted`` instead.
     """
@@ -292,6 +297,7 @@ def train(
     trainer_args: dict[str, Any] | None = None,
     model_args: dict[str, Any] | None = None,
     activation_checkpoint_args: dict[str, Any] | None = None,
+    params_file: PathLike | None = None,
     resume: bool | None = None,  # Deprecated, use `resume_interrupted`` instead.
 ) -> None:
     """Deprecated. Use :func:`pretrain` instead."""
@@ -321,6 +327,8 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
     _logging.set_up_console_logging()
     _logging.set_up_file_logging(out_dir / "train.log")
     _logging.set_up_filters()
+    if config.params_file is not None:
+        common_helpers.copy_params_file(params_file=config.params_file, out_dir=out_dir)
 
     if called_via_train:
         warnings.warn(
@@ -603,6 +611,7 @@ class TrainConfig(PydanticConfig):
     activation_checkpoint_args: dict[str, Any] | ActivationCheckpointingArgs | None = (
         None
     )
+    params_file: PathLike | None = None
     resume: bool | None = None  # Deprecated, use `resume_interrupted` instead.
 
     # Allow arbitrary field types such as Module, Dataset, Accelerator, ...
@@ -629,6 +638,7 @@ class CLITrainConfig(FunctionTrainConfig):
     checkpoint: str | None = None
     accelerator: str = "auto"
     strategy: str = "auto"
+    params_file: str | None = None
 
     # CLI should not pass arbitrary types.
     model_config = ConfigDict(arbitrary_types_allowed=False)

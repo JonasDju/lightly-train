@@ -211,6 +211,34 @@ def test_get_out_dir__nonempty(
             )
 
 
+def test_copy_params_file(tmp_path: Path) -> None:
+    params = tmp_path / "run.yaml"
+    params.write_text("# kept verbatim\nmethod: {}\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    first = common_helpers.copy_params_file(params_file=params, out_dir=out_dir)
+    assert first == out_dir / "params-pretrain.yaml"
+    assert first.read_text() == params.read_text()
+
+    # A resumed run must not overwrite the earlier copy.
+    params.write_text("method: {changed: true}\n")
+    second = common_helpers.copy_params_file(params_file=params, out_dir=out_dir)
+    assert second == out_dir / "params-pretrain-1.yaml"
+    assert second.read_text() == params.read_text()
+    assert first.read_text() == "# kept verbatim\nmethod: {}\n"
+
+
+def test_copy_params_file__not_rank_zero(mocker: MockerFixture, tmp_path: Path) -> None:
+    mocker.patch.object(_distributed, "is_global_rank_zero", return_value=False)
+    params = tmp_path / "run.yaml"
+    params.write_text("method: {}\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    assert common_helpers.copy_params_file(params_file=params, out_dir=out_dir) is None
+    assert not any(out_dir.iterdir())
+
+
 def test_get_tmp_dir__default() -> None:
     # This is by default the same as the data cache directory.
     assert common_helpers.get_tmp_dir() == cache.get_data_cache_dir()

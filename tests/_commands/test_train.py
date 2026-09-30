@@ -202,6 +202,20 @@ def test_pretrain__resume_interrupted(
         assert torch.equal(second_state_dict[key], exported_state_dict[key])
 
 
+def test_pretrain__params_file(tmp_path: Path) -> None:
+    """The run config is copied into out; a resumed run adds a numbered copy."""
+    out = tmp_path / "out"
+    params = tmp_path / "run.yaml"
+    params.write_text("# run config\nmethod:\n  warmup_steps: 1\n")
+    kwargs = _pretrain_kwargs(tmp_path, params_file=params)
+
+    train.pretrain(**kwargs)
+    assert (out / "params-pretrain.yaml").read_text() == params.read_text()
+
+    train.pretrain(**{**kwargs, "epochs": 2, "resume_interrupted": True})
+    assert (out / "params-pretrain-1.yaml").read_text() == params.read_text()
+
+
 def test_pretrain__overwrite_true(tmp_path: Path) -> None:
     """Test that overwrite=True allows training with an existing output directory that
     contains files."""

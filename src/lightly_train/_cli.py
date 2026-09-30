@@ -247,6 +247,11 @@ _PRETRAIN_HELP_MSG = f"""
             Backbones with chunked blocks (DINOv2 ViT-L/14 and ViT-g/14) checkpoint
             whole chunks, so there `every_n_blocks` counts chunks instead of blocks.
             Default: null
+        params_file (str):
+            Path to the config file this run was launched from. It is only recorded,
+            not read: a copy is written to `out/params-pretrain.yaml` (or
+            `params-pretrain-1.yaml`, `-2`, ... if that exists, e.g. on resume).
+            Default: null
         resume (bool):
             Deprecated. Use `resume_interrupted` instead.
             Default: null
@@ -384,7 +389,9 @@ _EMBED_HELP_MSG = f"""
         format=csv image_size="[448, 672]"
 """
 
-_eval_classification_cfg = CLIEvalClassificationConfig(out="", checkpoint="")
+_eval_classification_cfg = CLIEvalClassificationConfig(
+    out="", checkpoint="", eval_config=""
+)
 _EVAL_CLASSIFICATION_HELP_MSG = f"""
     Evaluate a pretrained model with KneeNo's frozen-encoder classification tasks.
 
@@ -403,9 +410,10 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
             Path to the LightlyTrain checkpoint to evaluate. If training was run with
             `out="out/my_experiment"`, the last checkpoint is at
             `out/my_experiment/checkpoints/last.ckpt`.
-        eval_config (str):
-            Path to a KneeNo `eval:` YAML config. Defaults to the config shipped at
-            `lightly_train/_configs/kneeno_eval.yaml`.
+        eval_config (str, required):
+            Path to a YAML file with a top-level `eval:` block (KneeNo's evaluation
+            config), e.g. the `params-pretrain.yaml` a pretraining run wrote to its
+            output directory. Other top-level blocks are ignored.
         image_size ([int, int, int]):
             Global crop size (H, W, D) the model was pretrained with. The checkpoint does
             not record it, so pass it if the pretraining run overrode
@@ -430,11 +438,13 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
     Examples:
     # Evaluate the last checkpoint of a pretraining run
     lightly-train eval_classification out=eval.json \\
-        checkpoint=out/my_experiment/checkpoints/last.ckpt
+        checkpoint=out/my_experiment/checkpoints/last.ckpt \\
+        eval_config=out/my_experiment/params-pretrain.yaml
 
     # Evaluate the online (student) encoder on only the k-NN task
     lightly-train eval_classification out=eval.json \\
-        checkpoint=out/my_experiment/checkpoints/last.ckpt encoder=online tasks=[knn]
+        checkpoint=out/my_experiment/checkpoints/last.ckpt \\
+        eval_config=out/my_experiment/params-pretrain.yaml encoder=online tasks=[knn]
 """
 
 _extract_cfg = CLIExtractVideoFramesConfig(data="", out="")

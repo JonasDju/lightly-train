@@ -18,14 +18,16 @@
 
 set -euo pipefail
 
-# --- Locations (override by exporting before sbatch, e.g. `OUT_DIR=... sbatch ...`) --------------------
+# --- Locations (override by exporting before sbatch, e.g. `CONFIG=... sbatch ...`) ---------------------
+# Model, output directory and everything else about the run are in the run config.
 # SLURM runs a copy of this script, so the repo cannot be located via $0.
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 KNEENO_DIR="${KNEENO_DIR:-$REPO_DIR/../KneeNo}"
-OUT_DIR="${OUT_DIR:-/hpcwork/va105917/lightly/vitb14.24f}"
-MODEL="${MODEL:-dinov2/vitb14}"
+CONFIG="${CONFIG:-cluster/configs/pretrain-MI-vitb14-24f.yaml}"  # relative to REPO_DIR
 
 # Fail here rather than after the first epoch
+[[ "$CONFIG" == /* ]] || CONFIG="$REPO_DIR/$CONFIG"
+[[ -f "$CONFIG" ]] || { echo "Run config not found at $CONFIG (set CONFIG)" >&2; exit 1; }
 [[ -f "$KNEENO_DIR/data/prepare_data.py" ]] || { echo "KneeNo not found at $KNEENO_DIR (set KNEENO_DIR)" >&2; exit 1; }
 
 # Fail here rather than deep inside Lightning: one task per GPU is what DDP needs.
@@ -43,5 +45,4 @@ srun --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --unlabele
                                                                       --pool-size 16
 
 # --- Training ---------------------------------------------------------------------------------------------
-srun "$PYTHON" cluster/pretrain_dinov2_kneeno.py --out "$OUT_DIR" --model "$MODEL" \
-                                                --pg-timeout-minutes "$PG_TIMEOUT_MINUTES"
+srun "$PYTHON" cluster/pretrain_dinov2_kneeno.py --config "$CONFIG" --pg-timeout-minutes "$PG_TIMEOUT_MINUTES"

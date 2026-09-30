@@ -22,8 +22,10 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import torch
+import yaml
 from kneeno.evaluation import ClassificationEvaluator, load_eval_config
 from omegaconf import DictConfig
 from torch.nn import Module
@@ -47,7 +49,7 @@ def eval_classification(
     *,
     out: PathLike,
     checkpoint: PathLike,
-    eval_config: PathLike | None = None,
+    eval_config: PathLike,
     image_size: ImageSizeTuple | None = None,
     encoder: str | None = None,
     tasks: list[str] | None = None,
@@ -63,8 +65,9 @@ def eval_classification(
             Path to a LightlyTrain checkpoint, e.g.
             ``out/my_experiment/checkpoints/last.ckpt``.
         eval_config:
-            Path to a KneeNo ``eval:`` YAML config. Defaults to the one shipped at
-            ``lightly_train/_configs/kneeno_eval.yaml``.
+            Path to a YAML file with a top-level ``eval:`` block (KneeNo's evaluation
+            config), e.g. the ``params-pretrain.yaml`` a pretraining run wrote to its
+            output directory. Other top-level blocks are ignored.
         image_size:
             Global crop size ``(H, W, D)`` the model was pretrained with. Defaults to
             ``DINOv2ViTTransformArgs.image_size``. The checkpoint does not record it, so
@@ -94,9 +97,7 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     out_path = common_helpers.get_out_path(out=config.out, overwrite=config.overwrite)
     ckpt_path = common_helpers.get_checkpoint_path(checkpoint=config.checkpoint)
 
-    eval_cfg = load_eval_config(
-        None if config.eval_config is None else Path(config.eval_config)
-    )
+    eval_cfg = load_eval_config(_read_eval_block(Path(config.eval_config)))
     encoder_choice = config.encoder or eval_cfg.get("encoder", "target")
     if encoder_choice not in ("target", "online"):
         raise ValueError(
@@ -154,7 +155,7 @@ def eval_classification_from_dictconfig(config: DictConfig) -> None:
 class EvalClassificationConfig(PydanticConfig):
     out: PathLike
     checkpoint: PathLike
-    eval_config: PathLike | None = None
+    eval_config: PathLike
     image_size: ImageSizeTuple | None = None
     encoder: str | None = None
     tasks: list[str] | None = None
@@ -165,7 +166,23 @@ class EvalClassificationConfig(PydanticConfig):
 class CLIEvalClassificationConfig(EvalClassificationConfig):
     out: str
     checkpoint: str
-    eval_config: str | None = None
+    eval_config: str
+
+
+def _read_eval_block(path: Path) -> dict[str, Any]:
+    """The ``eval:`` block of a run config such as ``params-pretrain.yaml``.
+
+    There is no default evaluation config, so a file without one is an error rather
+    than silently evaluating with KneeNo's built-in defaults.
+    """
+    with path.open() as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("eval"), dict):
+        raise ValueError(
+            f"Eval config '{path}' has no top-level 'eval:' block. Pass a pretraining "
+            "run's params-pretrain.yaml or another file with an 'eval:' block."
+        )
+    return raw["eval"]
 
 
 def _get_device(accelerator: str) -> torch.device:

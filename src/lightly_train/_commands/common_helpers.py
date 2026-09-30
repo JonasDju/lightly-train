@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import warnings
@@ -137,6 +138,25 @@ def get_out_dir(out: PathLike, resume_interrupted: bool, overwrite: bool) -> Pat
             )
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def copy_params_file(params_file: PathLike, out_dir: Path) -> Path | None:
+    """Copy the run's config file to ``out_dir/params-pretrain.yaml`` on global rank zero.
+
+    An existing copy is never overwritten: a resumed run, whose config may have been
+    edited in between, writes ``params-pretrain-1.yaml``, ``-2``, ... instead (as
+    vjepa2's ``app/main.py`` does). Returns the destination, or None on other ranks.
+    """
+    if not distributed_helpers.is_global_rank_zero():
+        return None
+    dest = out_dir / "params-pretrain.yaml"
+    i = 0
+    while dest.exists():
+        i += 1
+        dest = out_dir / f"params-pretrain-{i}.yaml"
+    shutil.copyfile(params_file, dest)
+    logger.info(f"Copied '{params_file}' to '{dest}'.")
+    return dest
 
 
 def get_tmp_dir() -> Path:

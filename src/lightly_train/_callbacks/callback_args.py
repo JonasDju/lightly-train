@@ -39,4 +39,5 @@ class CallbackArgs(PydanticConfig):
     model_checkpoint: ModelCheckpointArgs | None = Field(
         default_factory=ModelCheckpointArgs
     )
-    kneeno_eval: KneeNoEvalArgs | None = Field(default_factory=KneeNoEvalArgs)
+    # Off unless an eval config is passed; there is no default one.
+    kneeno_eval: KneeNoEvalArgs | None = None

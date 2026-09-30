@@ -16,6 +16,7 @@ from pytorch_lightning.callbacks import DeviceStatsMonitor, EarlyStopping
 from lightly_train._callbacks import callback_helpers
 from lightly_train._callbacks.callback_args import CallbackArgs, DeviceStatsMonitorArgs
 from lightly_train._callbacks.checkpoint import ModelCheckpoint, ModelCheckpointArgs
+from lightly_train._callbacks.kneeno_eval import KneeNoEval
 from lightly_train._callbacks.mlflow_logging import MLFlowLogging
 from lightly_train._loggers.mlflow import MLFlowLogger
 from lightly_train._models.embedding_model import EmbeddingModel
@@ -75,7 +76,9 @@ def test_get_callbacks__default(tmp_path: Path) -> None:
         license_info="",
         image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 6
+    assert len(callbacks) == 5
+    # KneeNo evaluation is off unless an eval config is passed.
+    assert not any(isinstance(c, KneeNoEval) for c in callbacks)
     early_stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     assert early_stopping.monitor == "train_loss"
@@ -102,7 +105,7 @@ def test_get_callbacks__mlflow(tmp_path: Path) -> None:
         license_info="",
         image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 7
+    assert len(callbacks) == 6
     early_stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     assert early_stopping.monitor == "train_loss"
@@ -128,7 +131,7 @@ def test_get_callbacks__enable_devicestatsmonitor(tmp_path: Path) -> None:
         license_info="",
         image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 7
+    assert len(callbacks) == 6
     assert any(isinstance(c, DeviceStatsMonitor) for c in callbacks)
 
 
@@ -149,7 +152,7 @@ def test_get_callbacks__disable(tmp_path: Path) -> None:
         license_info="",
         image_size=(224, 224, 16),
     )
-    assert len(callbacks) == 4
+    assert len(callbacks) == 3
     assert any(isinstance(c, ModelCheckpoint) for c in callbacks)
     assert not any(isinstance(c, MLFlowLogging) for c in callbacks)
 

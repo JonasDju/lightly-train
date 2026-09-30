@@ -22,7 +22,6 @@ from monai.transforms import (
     RandGibbsNoise,
     RandHistogramShift,
     RandRotate,
-    ToNumpy,
 )
 
 from lightly_train._methods.dino.dino_transform import DINOGaussianBlurArgs
@@ -313,11 +312,10 @@ class TestViewTransform:
     def test_view_transform__gaussian_noise_mean_and_std_pass_through_unscaled(
         self,
     ) -> None:
-        # No * 255 scaling: RandGaussianNoise runs after NormalizeIntensity (which
-        # is now first in the pipeline), so its mean/std are interpreted directly in
-        # the already-normalized intensity distribution.
+        # RandGaussianNoise runs before NormalizeIntensity (which is last), so its
+        # mean/std are given directly in raw [0, 255] intensity units, unscaled.
         view_transform = _view_transform(
-            gaussian_noise=RandGaussianNoiseArgs(prob=1.0, mean=0.1, std=0.2)
+            gaussian_noise=RandGaussianNoiseArgs(prob=1.0, mean=2.0, std=5.0)
         )
         noises = [
             t
@@ -325,8 +323,8 @@ class TestViewTransform:
             if isinstance(t, RandGaussianNoise)
         ]
         assert len(noises) == 1
-        assert noises[0].mean == pytest.approx(0.1)
-        assert noises[0].std == pytest.approx(0.2)
+        assert noises[0].mean == pytest.approx(2.0)
+        assert noises[0].std == pytest.approx(5.0)
 
     def test_view_transform__monai_ops_order(self) -> None:
         # Only gaussian_sharpen (not gaussian_blur) is enabled here so the pipeline
@@ -342,14 +340,10 @@ class TestViewTransform:
             gaussian_noise=_get_gaussian_noise_args(),
         )
         op_types = [type(t) for t in view_transform.transform.transforms]
-        # NormalizeIntensity + ToNumpy first (before the crop, to avoid quantizing
-        # raw uint8 volumes to the crop's input dtype -- see the comment in
-        # ViewTransform.__init__), then: crop -> rotate -> intensity remap
-        # (histogram shift, contrast) -> spatial filter (sharpen) -> k-space
-        # artifact (Gibbs) -> additive noise last -> tensor.
+        # crop -> rotate -> intensity remap (histogram shift, contrast) -> spatial
+        # filter (sharpen) -> k-space artifact (Gibbs) -> additive noise -> normalize
+        # last, as upstream does -> tensor.
         assert op_types == [
-            NormalizeIntensity,
-            ToNumpy,
             AnisotropyTrackingRandomResizedCrop3D,
             RandRotate,
             AlphaRandHistogramShift,
@@ -357,6 +351,7 @@ class TestViewTransform:
             AnisotropyAwareRandGaussianSharpen,
             RandGibbsNoise,
             RandGaussianNoise,
+            NormalizeIntensity,
             ToTensor,
         ]
 
@@ -425,26 +420,22 @@ class TestViewTransform:
 
         assert not torch.allclose(out_disabled, out_enabled)
 
-    def test_view_transform__normalize_first_avoids_uint8_quantization(self) -> None:
-        # NormalizeIntensity (+ToNumpy bridge) must be the first two ops, ahead of
-        # the crop: RandomResizedCrop3D round-trips its output back to the input
-        # dtype, clipping/rounding to the integer range for integer inputs. If
-        # Normalize ran after the crop (as it used to), a uint8 volume -- what
-        # KneeNo returns under resample_mode="nearest" -- would be quantized to at
-        # most 256 distinct levels right at the first op.
+    def test_view_transform__uint8_input_is_not_quantized(self) -> None:
+        # RandomResizedCrop3D round-trips to the input dtype by default, rounding for
+        # integer inputs; with Normalize last, a uint8 volume -- what KneeNo returns
+        # under resample_mode="nearest" -- would then be quantized to at most 256
+        # levels right at the first op. The crop must emit float32 instead.
         view_transform = _view_transform(
             random_resized_crop=_get_random_resized_crop_args(
                 scale=RandomResizeArgs(min_scale=0.5, max_scale=1.0)
             )
         )
-        assert type(view_transform.transform.transforms[0]) is NormalizeIntensity
-        assert type(view_transform.transform.transforms[1]) is ToNumpy
+        crop = view_transform.transform.transforms[0]
+        assert type(crop) is AnisotropyTrackingRandomResizedCrop3D
+        assert crop.output_dtype == np.float32
 
         img = _volume(np.uint8)  # (1, 20, 24, 10) -> cropped/resized to (1, 16, 16, 6)
         out = view_transform({"image": img})["image"]
-        # A uint8 input surviving the old (Normalize-last) ordering would be bounded
-        # by 256 distinct levels at the crop step; with Normalize first the crop
-        # sees float input and preserves full interpolation precision.
         assert len(torch.unique(out)) > 500
 
     def test_view_transform__reproducible_with_random_state__new_ops(self) -> None:
@@ -464,51 +455,18 @@ class TestViewTransform:
 
 
 class TestRandAdjustContrastArgs:
-    def test_defaults(self) -> None:
-        # This project's own tuned defaults, not MONAI's (prob=0.1, gamma=(0.5,4.5))
-        # -- found too aggressive for knee-MRI SSL pretraining.
-        args = RandAdjustContrastArgs()
-        assert args.prob == 0.8
-        assert args.gamma == (0.8, 1.2)
-
     def test_accepts_cli_shaped_list(self) -> None:
         args = RandAdjustContrastArgs(gamma=[0.2, 0.3])  # type: ignore[arg-type]
         assert args.gamma == (0.2, 0.3)
 
 
-class TestRandGaussianNoiseArgs:
-    def test_defaults(self) -> None:
-        # This project's own tuned default (std=0.075, not MONAI's 0.1).
-        args = RandGaussianNoiseArgs()
-        assert args.prob == 0.1
-        assert args.mean == 0.0
-        assert args.std == 0.075
-
-
 class TestRandHistogramShiftArgs:
-    def test_defaults(self) -> None:
-        # alpha has no MONAI equivalent (blend strength knob, see
-        # AlphaRandHistogramShift in monai_wrappers.py); prob=0.8 is this
-        # project's own tuning, not MONAI's default of 0.1.
-        args = RandHistogramShiftArgs()
-        assert args.alpha == 0.25
-        assert args.prob == 0.8
-        assert args.num_control_points == 10
-
     def test_accepts_cli_shaped_list(self) -> None:
         args = RandHistogramShiftArgs(num_control_points=[5, 15])  # type: ignore[arg-type]
         assert args.num_control_points == (5, 15)
 
 
 class TestRandGaussianSharpenArgs:
-    def test_defaults(self) -> None:
-        # This project's own tuned default (alpha=(5.0,10.0), not MONAI's (10.0,30.0)).
-        args = RandGaussianSharpenArgs()
-        assert args.prob == 0.1
-        assert args.sigma1 == (0.5, 1.0)
-        assert args.sigma2 == 0.5
-        assert args.alpha == (5.0, 10.0)
-
     def test_accepts_cli_shaped_list_for_scalar_sigma2(self) -> None:
         args = RandGaussianSharpenArgs(sigma2=[0.3, 0.9])  # type: ignore[arg-type]
         assert args.sigma2 == (0.3, 0.9)
@@ -519,13 +477,6 @@ class TestRandGaussianSharpenArgs:
 
 
 class TestRandGibbsNoiseArgs:
-    def test_defaults(self) -> None:
-        # This project's own tuned defaults (prob=0.2, alpha=(0.5,0.75)), not
-        # MONAI's (prob=0.1, alpha=(0.0,1.0)).
-        args = RandGibbsNoiseArgs()
-        assert args.prob == 0.2
-        assert args.alpha == (0.5, 0.75)
-
     def test_accepts_cli_shaped_list(self) -> None:
         args = RandGibbsNoiseArgs(alpha=[0.2, 0.8])  # type: ignore[arg-type]
         assert args.alpha == (0.2, 0.8)

@@ -18,6 +18,7 @@ from monai.transforms import (
     Transform,
 )
 
+from lightly_train._methods.dino.dino_transform import DINOGaussianSharpenArgs
 from lightly_train._methods.dinov2.dinov2_transform import (
     DINOv2ViTTransform,
 )
@@ -28,7 +29,6 @@ from lightly_train._transforms.monai_wrappers import (
 from lightly_train._transforms.transform import (
     RandAdjustContrastArgs,
     RandGaussianNoiseArgs,
-    RandGaussianSharpenArgs,
     RandGibbsNoiseArgs,
     RandHistogramShiftArgs,
 )
@@ -143,30 +143,72 @@ def test_dinov2_transform__histogram_shift_and_contrast_and_noise_shared_across_
         assert view["image"].shape == (1, 8, 98, 98)
 
 
-def test_dinov2_transform__gaussian_sharpen_and_gibbs_noise_have_per_view_override() -> None:
-    # A top-level gaussian_sharpen/gibbs_noise setting reaches global view 0 and
-    # the local views, but NOT global view 1 -- it has its own
-    # DINOGlobalView1TransformArgs.gaussian_sharpen/.gibbs_noise override instead
-    # (default: gaussian_sharpen off, gibbs_noise on -- see dino_transform.py).
-    # gaussian_blur is also enabled by default; since it and gaussian_sharpen end
-    # up mutually exclusive per view (OneOf, see view_transform.py) rather than
-    # two separate ops, _contains() below looks inside OneOf too.
+def _find(ops: list[Transform], cls: type) -> Transform | None:
+    """The first `cls` among `ops`, including nested inside a OneOf."""
+    for op in ops:
+        candidates = op.transforms if isinstance(op, OneOf) else [op]
+        for t in candidates:
+            if isinstance(t, cls):
+                return t
+    return None
+
+
+def test_dinov2_transform__gaussian_sharpen_is_configured_per_view() -> None:
+    # Like gaussian_blur, gaussian_sharpen is set per view: the top-level setting only
+    # reaches global view 0; global view 1 and the local views read their own
+    # global_view_1/local_view overrides. Distinct probs show which setting each view
+    # actually got. The blur is on by default in every view, so the sharpen may sit
+    # inside a OneOf (see view_transform.py) -- _find looks there too.
     transform_args = DINOv2ViTTransform.transform_args_cls()(
-        gaussian_sharpen=RandGaussianSharpenArgs(prob=1.0),
-        gibbs_noise=RandGibbsNoiseArgs(prob=1.0),
+        gaussian_sharpen=DINOGaussianSharpenArgs(prob=0.9),
+        global_view_1={"gaussian_sharpen": {"prob": 0.3}},
+        local_view={"gaussian_sharpen": {"prob": 0.6}},
     )
     transform_args.resolve_auto()
     transform_args.resolve_incompatible()
     transform = DINOv2ViTTransform(transform_args)
 
-    global_0_ops = transform.transforms[0].transform.transforms
-    global_1_ops = transform.transforms[1].transform.transforms
-    local_ops = transform.transforms[2].transform.transforms
-    assert _contains(global_0_ops, AnisotropyAwareRandGaussianSharpen)
-    assert _contains(global_0_ops, RandGibbsNoise)
-    assert _contains(local_ops, AnisotropyAwareRandGaussianSharpen)
-    assert _contains(local_ops, RandGibbsNoise)
-    # global view 1 ignores the top-level gaussian_sharpen (its own default is off)
-    # but still has its own default-enabled gibbs_noise.
-    assert not _contains(global_1_ops, AnisotropyAwareRandGaussianSharpen)
-    assert _contains(global_1_ops, RandGibbsNoise)
+    probs = []
+    for view_transform in transform.transforms:
+        sharpen = _find(
+            view_transform.transform.transforms, AnisotropyAwareRandGaussianSharpen
+        )
+        assert sharpen is not None
+        probs.append(sharpen.prob)
+    assert probs == [0.9, 0.3] + [0.6] * 8
+
+
+def test_dinov2_transform__gaussian_sharpen_does_not_leak_into_other_views() -> None:
+    # Without per-view overrides, a top-level gaussian_sharpen stays in global view 0.
+    transform_args = DINOv2ViTTransform.transform_args_cls()(
+        gaussian_sharpen=DINOGaussianSharpenArgs(prob=1.0),
+    )
+    transform_args.resolve_auto()
+    transform_args.resolve_incompatible()
+    transform = DINOv2ViTTransform(transform_args)
+
+    ops = [vt.transform.transforms for vt in transform.transforms]
+    assert _contains(ops[0], AnisotropyAwareRandGaussianSharpen)
+    for view_ops in ops[1:]:
+        assert not _contains(view_ops, AnisotropyAwareRandGaussianSharpen)
+
+
+def test_dinov2_transform__gibbs_noise_has_global_view_1_override() -> None:
+    # A top-level gibbs_noise reaches global view 0 and the local views; global view 1
+    # has its own DINOGlobalView1TransformArgs.gibbs_noise instead (on by default).
+    transform_args = DINOv2ViTTransform.transform_args_cls()(
+        gibbs_noise=RandGibbsNoiseArgs(prob=0.9),
+    )
+    transform_args.resolve_auto()
+    transform_args.resolve_incompatible()
+    transform = DINOv2ViTTransform(transform_args)
+
+    probs = []
+    for view_transform in transform.transforms:
+        gibbs = _find(view_transform.transform.transforms, RandGibbsNoise)
+        assert gibbs is not None
+        probs.append(gibbs.prob)
+    assert probs[0] == 0.9
+    assert transform_args.global_view_1.gibbs_noise is not None
+    assert probs[1] == transform_args.global_view_1.gibbs_noise.prob != 0.9
+    assert probs[2:] == [0.9] * 8

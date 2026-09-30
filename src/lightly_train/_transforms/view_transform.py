@@ -21,7 +21,7 @@ from lightning_utilities.core.imports import RequirementCache
 from monai.data import MetaTensor
 from monai.transforms import (
     Transform,
-    RandRotate, NormalizeIntensity, Compose, ToNumpy,
+    RandRotate, NormalizeIntensity, Compose,
     RandAdjustContrast, RandGaussianNoise, RandGibbsNoise, OneOf,
 )
 
@@ -145,26 +145,6 @@ class ViewTransform:
             )
         transform: list[Transform] = []
 
-        # Normalize first, before any resampling. RandomResizedCrop3D (below) is a
-        # from-scratch NumPy transform that round-trips its output back to the input
-        # dtype, clipping/rounding to the integer range if the input is an integer
-        # type -- so if this ran last (as upstream lightly-train's 2D pipeline does),
-        # a `uint8` volume (what KneeNo returns under resample_mode="nearest") would
-        # get quantized to 256 discrete levels at the very first op, before rotate/
-        # blur/sharpen/etc. ever see it. NormalizeIntensity promotes to float32
-        # regardless of input dtype, so running it first means the crop always sees
-        # float input and never hits that integer round-trip. ToNumpy bridges
-        # NormalizeIntensity's MetaTensor output back to a plain ndarray, since
-        # RandomResizedCrop3D cannot consume a MetaTensor directly.
-        transform += [
-            NormalizeIntensity(
-                subtrahend=[m * 255 for m in args.normalize.mean],
-                divisor=[s * 255 for s in args.normalize.std],
-                channel_wise=True,
-            ),
-            ToNumpy(),
-        ]
-
         # .scale here corresponds to MethodTransformArgs.random_resize and may be None
         # .size here corresponds to MethodTransformArgs.image_size and may not be None
         if args.random_resized_crop.scale is None:
@@ -179,6 +159,10 @@ class ViewTransform:
                 upscale_interpolation="linear",
                 # Deviates from CV2 INTER_AREA slightly, but looks better in my opinion.
                 # Select None for the closest 3D approximation of CV2s' INTER_AREA
+                # float32 instead of the default round-trip to the input dtype: a uint8
+                # volume (what KneeNo returns under resample_mode="nearest") would
+                # otherwise be quantized back to 256 levels at the very first op.
+                output_dtype=np.float32,
             )
         ]
 
@@ -267,7 +251,18 @@ class ViewTransform:
                 )
             ]
 
-        transform += [ToTensor()]
+        # Normalize last, as upstream does, on the small view rather than once per view on
+        # the full volume. Every op above commutes with this affine map except MONAI's
+        # Gaussian blur/sharpen, which zero-pads: near the view border it pulls towards
+        # black (raw 0) here, towards mid-grey if it ran after normalizing.
+        transform += [
+            NormalizeIntensity(
+                subtrahend=[m * 255 for m in args.normalize.mean],
+                divisor=[s * 255 for s in args.normalize.std],
+                channel_wise=True,
+            ),
+            ToTensor(),
+        ]
         self.transform = Compose(transform)
 
     def __call__(self, input: TransformInput) -> TransformOutputSingleView:

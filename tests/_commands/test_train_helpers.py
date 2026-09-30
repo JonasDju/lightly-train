@@ -26,7 +26,10 @@ from lightly_train._data import mi_dataset
 from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods import method_helpers
-from lightly_train._methods.dino.dino_transform import DINOGaussianBlurArgs
+from lightly_train._methods.dino.dino_transform import (
+    DINOGaussianBlurArgs,
+    DINOGaussianSharpenArgs,
+)
 from lightly_train._methods.dinov2.dinov2 import DINOv2Args
 from lightly_train._methods.dinov2.dinov2_transform import (
     DINOv2ViTTransform,
@@ -47,7 +50,6 @@ from lightly_train._scaling import IMAGENET_SIZE, ScalingInfo
 from lightly_train._transforms.transform import (
     MethodTransformArgs,
     NormalizeArgs,
-    RandGaussianSharpenArgs,
     RandGibbsNoiseArgs,
     RandomRotationArgs,
 )
@@ -570,7 +572,7 @@ def test_get_epochs(
             DINOv2ViTTransformArgs(
                 num_channels=1,
                 gibbs_noise=RandGibbsNoiseArgs(prob=1.0, alpha=(0.2, 0.8)),
-                gaussian_sharpen=RandGaussianSharpenArgs(sigma1=(0.5, 1.5)),
+                gaussian_sharpen=DINOGaussianSharpenArgs(sigma1=(0.5, 1.5)),
             ),
         ),
     ],

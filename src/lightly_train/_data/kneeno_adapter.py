@@ -70,7 +70,7 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         )
         self.size = (depth, height, width)
         mean, std = normalize
-        # ViewTransform normalizes *first*, on the raw [0, 255] volume, hence the * 255.
+        # ViewTransform normalizes raw [0, 255] intensities, hence the * 255.
         self.mean = torch.tensor(mean, dtype=torch.float32).view(-1, 1, 1, 1) * 255.0
         self.std = torch.tensor(std, dtype=torch.float32).view(-1, 1, 1, 1) * 255.0
 

@@ -48,7 +48,7 @@ class DINOLocalViewRandomResizeArgs(RandomResizeArgs):
 
 class DINOGaussianBlurArgs(GaussianBlurArgs):
     prob: float = 1.0
-    sigma_range: tuple[float, float] = Field(default=(0.1, 2), strict=False)
+    sigma_range: tuple[float, float] = Field(default=(0.4, 0.6), strict=False)
 
 
 class DINOGlobalView1GaussianBlurArgs(DINOGaussianBlurArgs):
@@ -59,11 +59,21 @@ class DINOLocalViewGaussianBlurArgs(DINOGaussianBlurArgs):
     prob: float = 0.5
 
 
+class DINOGaussianSharpenArgs(RandGaussianSharpenArgs):
+    prob: float = 1.0
+
+
+class DINOGlobalView1GaussianSharpenArgs(DINOGaussianSharpenArgs):
+    prob: float = 0.1
+
+class DINOLocalViewGaussianSharpenArgs(DINOGaussianSharpenArgs):
+    prob: float = 0.5
+
 class DINOGlobalView1TransformArgs(PydanticConfig):
     gaussian_blur: DINOGlobalView1GaussianBlurArgs | None = Field(
         default_factory=DINOGlobalView1GaussianBlurArgs
     )
-    gaussian_sharpen: RandGaussianSharpenArgs | None = None
+    gaussian_sharpen: DINOGlobalView1GaussianSharpenArgs | None = None
     # Enabled by default here (unlike the top-level gibbs_noise)
     gibbs_noise: RandGibbsNoiseArgs | None = Field(
         default_factory=RandGibbsNoiseArgs
@@ -79,6 +89,7 @@ class DINOLocalViewTransformArgs(PydanticConfig):
     gaussian_blur: DINOLocalViewGaussianBlurArgs | None = Field(
         default_factory=DINOLocalViewGaussianBlurArgs
     )
+    gaussian_sharpen: DINOLocalViewGaussianSharpenArgs | None = None
 
 
 class DINOTransformArgs(MethodTransformArgs):
@@ -104,7 +115,7 @@ class DINOTransformArgs(MethodTransformArgs):
     gaussian_blur: DINOGaussianBlurArgs | None = Field(
         default_factory=DINOGaussianBlurArgs
     )
-    gaussian_sharpen: RandGaussianSharpenArgs | None = None
+    gaussian_sharpen: DINOGaussianSharpenArgs | None = None
 
     # Noise
     gibbs_noise: RandGibbsNoiseArgs | None = None
@@ -181,7 +192,7 @@ class DINOTransform(MethodTransform):
                     random_rotation=transform_args.random_rotation,
                     gaussian_blur=transform_args.local_view.gaussian_blur,
                     normalize=transform_args.normalize,
-                    gaussian_sharpen=transform_args.gaussian_sharpen,
+                    gaussian_sharpen=transform_args.local_view.gaussian_sharpen,
                     gibbs_noise=transform_args.gibbs_noise,
                     histogram_shift=transform_args.histogram_shift,
                     adjust_contrast=transform_args.adjust_contrast,

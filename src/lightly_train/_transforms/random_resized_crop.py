@@ -10,7 +10,7 @@ from typing import Literal, NamedTuple, Sequence
 
 import numpy as np
 from monai.transforms import Randomizable, Transform
-from numpy.typing import NDArray
+from numpy.typing import DTypeLike, NDArray
 
 __all__ = ["RandomResizedCrop3D", "CropParams3D"]
 
@@ -192,6 +192,11 @@ class RandomResizedCrop3D(Randomizable, Transform):
         seed: Optional seed or ``np.random.RandomState``. Randomness is drawn from
             MONAI's ``self.R`` so that ``set_random_state`` (e.g. called per
             DataLoader worker) reseeds this transform.
+        output_dtype: dtype of the output. ``None`` (the default) round-trips to the
+            input dtype, rounding and clipping to the integer range for integer
+            inputs -- what replaying a crop onto a label volume needs. Anything else
+            casts the resampled result directly, e.g. ``np.float32`` keeps the full
+            interpolation precision of a ``uint8`` input.
     """
 
     def __init__(
@@ -203,6 +208,7 @@ class RandomResizedCrop3D(Randomizable, Transform):
         upscale_interpolation: InterpolationMode | None = None,
         max_attempts: int = 10,
         seed: int | np.random.RandomState | None = None,
+        output_dtype: DTypeLike | None = None,
     ) -> None:
         if isinstance(size, int):
             size = (size, size, size)
@@ -228,6 +234,7 @@ class RandomResizedCrop3D(Randomizable, Transform):
         self.interpolation: InterpolationMode = interpolation
         self.upscale_interpolation: InterpolationMode | None = upscale_interpolation
         self.max_attempts = int(max_attempts)
+        self.output_dtype = None if output_dtype is None else np.dtype(output_dtype)
         if isinstance(seed, np.random.RandomState):
             self.set_random_state(state=seed)
         else:
@@ -302,12 +309,15 @@ class RandomResizedCrop3D(Randomizable, Transform):
             crop.astype(work_dtype, copy=False), self.size, self.interpolation, self.upscale_interpolation
         )
 
-        if np.issubdtype(in_dtype, np.integer):
-            info = np.iinfo(in_dtype)
-            out = np.clip(np.rint(out), info.min, info.max)
-        elif in_dtype == np.bool_:
-            out = out > 0.5
-        out = out.astype(in_dtype, copy=False)
+        if self.output_dtype is not None:
+            out = out.astype(self.output_dtype, copy=False)
+        else:
+            if np.issubdtype(in_dtype, np.integer):
+                info = np.iinfo(in_dtype)
+                out = np.clip(np.rint(out), info.min, info.max)
+            elif in_dtype == np.bool_:
+                out = out > 0.5
+            out = out.astype(in_dtype, copy=False)
         return out[0] if squeeze_channel else out
 
     def __call__(self, data: NDArray) -> NDArray:

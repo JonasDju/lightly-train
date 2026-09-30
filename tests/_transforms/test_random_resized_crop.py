@@ -54,6 +54,24 @@ class TestRandomResizedCrop3D:
         assert out.shape == (1, 8, 12, 16)
         assert out.dtype == dtype
 
+    @pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+    def test_call__output_dtype(self, dtype: type) -> None:
+        # No rounding back to the input dtype: a uint8 input gives exactly what the same
+        # values as float32 give.
+        volume = (
+            np.random.default_rng(0).uniform(0, 255, size=(1, 20, 24, 10)).astype(dtype)
+        )
+        transform = RandomResizedCrop3D(
+            size=(8, 12, 16), seed=0, output_dtype=np.float32
+        )
+        out = transform(volume)
+        assert out.dtype == np.float32
+        transform.set_random_state(seed=0)
+        expected = transform(volume.astype(np.float32))
+        np.testing.assert_array_equal(out, expected)
+        if dtype == np.uint8:
+            assert not np.array_equal(out, np.rint(out))
+
     def test_call__multi_channel(self) -> None:
         volume = np.random.rand(3, 20, 24, 10).astype(np.float32)
         out = RandomResizedCrop3D(size=(8, 8, 4), seed=0)(volume)

@@ -329,6 +329,9 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
     _logging.set_up_filters()
     if config.params_file is not None:
         common_helpers.copy_params_file(params_file=config.params_file, out_dir=out_dir)
+    common_helpers.write_model_config(
+        model=config.model, model_args=config.model_args, out_dir=out_dir
+    )
 
     if called_via_train:
         warnings.warn(

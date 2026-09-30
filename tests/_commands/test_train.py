@@ -30,6 +30,7 @@ from lightly_train._commands.train import (
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs, DINOv2Args
 from lightly_train._methods.dinov2.utils import is_tokenization_param
+from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from lightly_train._scaling import ScalingInfo
 
 from .. import helpers
@@ -116,6 +117,7 @@ def test_pretrain__cpu(tmp_path: Path) -> None:
         Path("exported_models"),
         Path("exported_models") / "exported_last.pt",
         Path("metrics.jsonl"),
+        Path("model-config.yaml"),
         Path("train.log"),
         # Tensorboard filename is not deterministic, so we need to find it.
         next(fp for fp in filepaths if fp.name.startswith("events.out.tfevents")),
@@ -214,6 +216,21 @@ def test_pretrain__params_file(tmp_path: Path) -> None:
 
     train.pretrain(**{**kwargs, "epochs": 2, "resume_interrupted": True})
     assert (out / "params-pretrain-1.yaml").read_text() == params.read_text()
+
+
+def test_pretrain__model_config(tmp_path: Path) -> None:
+    """The model's config is written once; a resumed run keeps the original."""
+    out = tmp_path / "out"
+    kwargs = _pretrain_kwargs(tmp_path)
+
+    train.pretrain(**kwargs)
+    model_config = out / "model-config.yaml"
+    config = OmegaConf.load(model_config)
+    assert config == DINOv2ViTPackage.get_model_config("_vittest14")
+
+    model_config.write_text("# written by the first run\n")
+    train.pretrain(**{**kwargs, "epochs": 2, "resume_interrupted": True})
+    assert model_config.read_text() == "# written by the first run\n"
 
 
 def test_pretrain__overwrite_true(tmp_path: Path) -> None:

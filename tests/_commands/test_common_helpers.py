@@ -17,6 +17,7 @@ from typing import Any, Literal
 import pytest
 import torch
 from albumentations.pytorch.transforms import ToTensorV2
+from omegaconf import OmegaConf
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
 from pytorch_lightning.accelerators.cpu import CPUAccelerator
@@ -27,6 +28,7 @@ from torchvision import models
 from lightly_train import _distributed
 from lightly_train._commands import common_helpers
 from lightly_train._data import cache
+from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from tests._commands.test_train_helpers import MockDataset
 
 
@@ -237,6 +239,62 @@ def test_copy_params_file__not_rank_zero(mocker: MockerFixture, tmp_path: Path) 
     out_dir.mkdir()
     assert common_helpers.copy_params_file(params_file=params, out_dir=out_dir) is None
     assert not any(out_dir.iterdir())
+
+
+def test_write_model_config(tmp_path: Path) -> None:
+    dest = common_helpers.write_model_config(
+        model="dinov2/_vittest14", model_args=None, out_dir=tmp_path
+    )
+    assert dest == tmp_path / "model-config.yaml"
+    text = dest.read_text()
+    assert text.startswith("# Config of model 'dinov2/_vittest14'")
+    assert OmegaConf.load(dest) == DINOv2ViTPackage.get_model_config("_vittest14")
+    assert "model_args" not in text
+
+
+def test_write_model_config__model_args(tmp_path: Path) -> None:
+    dest = common_helpers.write_model_config(
+        model="dinov2/_vittest14",
+        model_args={"drop_path_rate": 0.0},
+        out_dir=tmp_path,
+    )
+    assert dest is not None
+    assert OmegaConf.load(dest).model_args == {"drop_path_rate": 0.0}
+
+
+def test_write_model_config__keeps_existing(tmp_path: Path) -> None:
+    (tmp_path / "model-config.yaml").write_text("original\n")
+    assert (
+        common_helpers.write_model_config(
+            model="dinov2/_vittest14", model_args=None, out_dir=tmp_path
+        )
+        is None
+    )
+    assert (tmp_path / "model-config.yaml").read_text() == "original\n"
+
+
+@pytest.mark.parametrize("model", ["torchvision/resnet18", torch.nn.Linear(2, 2)])
+def test_write_model_config__not_a_dinov2_name(tmp_path: Path, model: Any) -> None:
+    assert (
+        common_helpers.write_model_config(
+            model=model, model_args=None, out_dir=tmp_path
+        )
+        is None
+    )
+    assert not any(tmp_path.iterdir())
+
+
+def test_write_model_config__not_rank_zero(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    mocker.patch.object(_distributed, "is_global_rank_zero", return_value=False)
+    assert (
+        common_helpers.write_model_config(
+            model="dinov2/_vittest14", model_args=None, out_dir=tmp_path
+        )
+        is None
+    )
+    assert not any(tmp_path.iterdir())
 
 
 def test_get_tmp_dir__default() -> None:

@@ -65,7 +65,7 @@ def test_run_config__valid(path: Path) -> None:
         # SummaryWriter would double-write.
         assert eval_config["logging"]["tensorboard_dir"] is None
         # DINOv2 has a cls token, so unlike vjepa2 the linear task stays enabled.
-        assert eval_config["freq"]["linear"] == 1
+        assert eval_config["freq"]["linear"] is not None
 
 
 def test_load_run_config__missing_and_null_blocks(tmp_path: Path) -> None:

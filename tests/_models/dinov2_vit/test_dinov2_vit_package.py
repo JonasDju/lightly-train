@@ -334,3 +334,12 @@ class TestDINOv2ViTPackage:
         # The log should show a format without the 'dinov2/' prefix
         assert "get_model('<vitXX>')" in log_output
         assert "get_model('dinov2/" not in log_output
+
+
+def test_get_model_config__only_what_builds_the_model() -> None:
+    config = DINOv2ViTPackage.get_model_config("vitb14")
+    assert set(config) == {"student", "crops"}
+    assert set(config.crops) == {"global_crops_size"}
+    # train/vitb14.yaml's own value, and one that only ssl_default_config.yaml sets.
+    assert config.student.arch == "vit_base"
+    assert config.student.layerscale == 1.0e-05

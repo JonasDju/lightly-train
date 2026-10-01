@@ -64,9 +64,14 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
-from monai.data import MetaTensor
+import numpy as np
+import torch
+from monai.data import MetaTensor, get_track_meta
+from monai.networks.layers import gaussian_1d
 from monai.transforms import RandGaussianSharpen, RandGaussianSmooth, RandHistogramShift
+from monai.utils import convert_to_dst_type, convert_to_tensor
 from numpy.typing import NDArray
+from scipy import ndimage
 
 from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 
@@ -112,6 +117,19 @@ class AlphaRandHistogramShift(RandHistogramShift):
         transformed = super().__call__(img, randomize=randomize)
         return self.alpha * transformed + (1 - self.alpha) * img
 
+    def interp(self, x, xp, fp):
+        """MONAI's piecewise-linear map, via ``np.interp`` for CPU float tensors.
+
+        The images arrive here as CPU torch tensors, which sends MONAI down its ``searchsorted`` path; for numpy
+        input it uses ``np.interp`` itself. Same function (linear between the control points,
+        clamped to the end values outside them).
+        """
+        if isinstance(x, torch.Tensor) and x.device.type == "cpu" and x.dtype in (torch.float32, torch.float64):
+            x_np = x.detach().numpy()
+            mapped = np.interp(x_np, xp.detach().cpu().numpy(), fp.detach().cpu().numpy())
+            return torch.from_numpy(mapped.astype(x_np.dtype, copy=False))
+        return super().interp(x, xp, fp)
+
 
 class AnisotropyTrackingRandomResizedCrop3D(RandomResizedCrop3D):
     """``RandomResizedCrop3D`` that tags its output with the pre-crop shape.
@@ -145,7 +163,37 @@ class AnisotropyAwareRandGaussianSmooth(RandGaussianSmooth):
             h, w, d = _get_anisotropy_shape(img)
             scale_z = d / math.sqrt(h * w)
             self.sigma_z = tuple(s * scale_z for s in self._base_sigma_z)
-        return super().__call__(img, randomize=randomize)
+        # RandGaussianSmooth.__call__, with GaussianSmooth's filtering done by _separable_gaussian: same random draws,
+        # same kernels, same result up to float rounding -- only faster (see there).
+        img = convert_to_tensor(img, track_meta=get_track_meta())
+        if randomize:
+            self.randomize()
+        if not self._do_transform:
+            return img
+        out = torch.from_numpy(_separable_gaussian(_float_volume(img), (self.x, self.y, self.z), approx=self.approx))
+        return convert_to_dst_type(out, dst=img, dtype=out.dtype)[0]
+
+
+def _float_volume(img: Any) -> NDArray[np.float32]:
+    """A CPU image as the float32 numpy array MONAI's Gaussian transforms filter (they convert to torch.float)."""
+    return convert_to_tensor(img, track_meta=False).to(torch.float).numpy()
+
+
+def _separable_gaussian(volume: NDArray[np.float32], sigmas: Iterable[float], approx: str) -> NDArray[np.float32]:
+    """MONAI's ``GaussianFilter`` on a ``(C, *spatial)`` float32 volume, filtered with ``scipy.ndimage.correlate1d``.
+
+    Same kernels (``monai.networks.layers.convutils.gaussian_1d``, truncated at 4 sigma, like ``GaussianFilter``),
+    same zero padding and same skipping of unity kernels as MONAI's ``separable_filtering``; only the 1D passes run
+    in scipy instead of a single-channel ``torch.conv3d``, which is slow on the CPU. Backs both
+    ``AnisotropyAwareRandGaussianSmooth`` and ``AnisotropyAwareRandGaussianSharpen``.
+    """
+    out = volume
+    for axis, sigma in enumerate(sigmas, start=1):
+        kernel = gaussian_1d(torch.as_tensor(sigma, dtype=torch.float), truncated=4.0, approx=approx).numpy()
+        if kernel.size == 1 and kernel[0] == 1:
+            continue
+        out = ndimage.correlate1d(out, kernel, axis=axis, mode="constant", cval=0.0, output=np.float32)
+    return np.ascontiguousarray(out)
 
 
 class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
@@ -186,4 +234,17 @@ class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
                 self.sigma2_z = tuple(s * scale_z for s in self._base_sigma2_z)
             else:
                 self.sigma2_z = self._base_sigma2_z * scale_z
-        return super().__call__(img, randomize=randomize)
+        # RandGaussianSharpen.__call__, with GaussianSharpen's two filters done by _separable_gaussian: same random
+        # draws, same kernels, same result up to float rounding -- only faster.
+        img = convert_to_tensor(img, track_meta=get_track_meta())
+        if randomize:
+            self.randomize()
+        if not self._do_transform:
+            return img
+        if self.x2 is None or self.y2 is None or self.z2 is None or self.a is None:
+            raise RuntimeError("please call the `randomize()` function first.")
+        blurred = _separable_gaussian(_float_volume(img), (self.x1, self.y1, self.z1), approx=self.approx)
+        filter_blurred = _separable_gaussian(blurred, (self.x2, self.y2, self.z2), approx=self.approx)
+        # float32 throughout, like GaussianSharpen's torch expression (which also rounds alpha to float32).
+        out = torch.from_numpy(blurred + np.float32(self.a) * (blurred - filter_blurred))
+        return convert_to_dst_type(out, dst=img, dtype=out.dtype)[0]

@@ -20,15 +20,17 @@
 #       as in this codebase only one version is supported also check if model is
 #       DinoVisionTransformer to validate it is the "backbone"
 # - get_fused_param_groups: Adapted from original code to work with our group structure.
+# - collate: moved the mask indices/weights into mask_indices_and_weights, added ibotpp_loss_mask (iBOT++)
 
 from __future__ import annotations
 
 import math
 import random
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 import numpy as np
 import torch
+from torch import Tensor
 from torch.optim.optimizer import Optimizer
 
 from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
@@ -156,18 +158,41 @@ def create_collated_masks(
     random.shuffle(masks_list)
 
     collated_masks = torch.stack(masks_list).flatten(1)  # [G*B, patD*patH*patW]
-    mask_indices_list = collated_masks.flatten().nonzero().flatten()  # [M,]
-    masks_weight = (
-        (1 / collated_masks.sum(-1).clamp(min=1.0))
-        .unsqueeze(-1)
-        .expand_as(collated_masks)[collated_masks]
-    )  # [M,]
+    mask_indices_list, masks_weight = mask_indices_and_weights(collated_masks)  # [M,], [M,]
 
     return {
         "collated_masks": collated_masks,
         "mask_indices_list": mask_indices_list,
         "masks_weight": masks_weight,
     }
+
+
+def mask_indices_and_weights(mask: Tensor) -> tuple[Tensor, Tensor]:
+    """Flat indices and per-token loss weights of the True entries of a [n_crops, N] mask.
+
+    The weight of a token is 1 / (number of True entries in its crop), so summing the
+    weighted per-token losses gives each crop's mean over its selected tokens.
+    """
+    indices = mask.flatten().nonzero().flatten()  # [M,]
+    weights = (
+        (1 / mask.sum(-1).clamp(min=1.0)).unsqueeze(-1).expand_as(mask)[mask]
+    )  # [M,]
+    return indices, weights
+
+
+def ibotpp_loss_mask(collated_masks: Tensor, mode: Literal["all", "masked"]) -> Tensor:
+    """The [n_crops, N] mask of the patch tokens the iBOT++ loss is computed on.
+
+    iBOT++ (TIPSv2, https://arxiv.org/abs/2604.12012) drops iBOT's mask indicator, so
+    visible tokens are supervised too. "all" selects every token of every crop.
+    "masked" selects every token of the crops with at least one masked token, so crops
+    the student saw unmasked contribute nothing, as in iBOT.
+    """
+    if mode == "all":
+        return torch.ones_like(collated_masks, dtype=torch.bool)
+    if mode == "masked":
+        return collated_masks.any(dim=-1, keepdim=True).expand_as(collated_masks)
+    raise ValueError(f"Unknown iBOT++ mode: {mode!r}. Expected 'all' or 'masked'.")
 
 
 def is_tokenization_param(name: str) -> bool:

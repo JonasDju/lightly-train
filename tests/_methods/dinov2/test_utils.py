@@ -20,7 +20,9 @@ from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs
 from lightly_train._methods.dinov2.utils import (
     MaskingGenerator,
     create_collated_masks,
+    ibotpp_loss_mask,
     is_tokenization_param,
+    mask_indices_and_weights,
 )
 from lightly_train._optim.trainable_modules import TrainableModules
 
@@ -271,6 +273,68 @@ class TestCreateCollatedMasks:
         collated_masks = masks["collated_masks"]
         for mask in collated_masks:
             assert not mask.any()
+
+
+def test_mask_indices_and_weights__matches_create_collated_masks() -> None:
+    masks = create_collated_masks(
+        mask_ratio_min=0.1,
+        mask_ratio_max=0.5,
+        n_masked_crops=3,
+        n_crops=6,
+        mask_generator=MaskingGenerator(input_size=(2, 4, 8), max_num_patches=32),
+    )
+    indices, weights = mask_indices_and_weights(masks["collated_masks"])
+    assert torch.equal(indices, masks["mask_indices_list"])
+    assert torch.equal(weights, masks["masks_weight"])
+
+
+def test_mask_indices_and_weights() -> None:
+    mask = torch.tensor(
+        [
+            [True, False, True, False],
+            [False, False, False, False],
+            [False, True, True, True],
+        ]
+    )
+    indices, weights = mask_indices_and_weights(mask)
+    assert indices.tolist() == [0, 2, 9, 10, 11]
+    assert torch.allclose(weights, torch.tensor([1 / 2, 1 / 2, 1 / 3, 1 / 3, 1 / 3]))
+
+
+# Crop 1 is unmasked.
+_COLLATED_MASKS = torch.tensor(
+    [
+        [True, False, False, False, True, False],
+        [False, False, False, False, False, False],
+        [False, False, True, False, False, False],
+    ]
+)
+
+
+def test_ibotpp_loss_mask__all() -> None:
+    mask = ibotpp_loss_mask(_COLLATED_MASKS, mode="all")
+    assert mask.dtype == torch.bool
+    assert mask.shape == _COLLATED_MASKS.shape
+    assert mask.all()
+    indices, weights = mask_indices_and_weights(mask)
+    assert indices.tolist() == list(range(_COLLATED_MASKS.numel()))
+    assert torch.allclose(weights, torch.full((18,), 1 / 6))
+
+
+def test_ibotpp_loss_mask__masked() -> None:
+    mask = ibotpp_loss_mask(_COLLATED_MASKS, mode="masked")
+    assert mask.dtype == torch.bool
+    assert mask[0].all()
+    assert not mask[1].any()
+    assert mask[2].all()
+    indices, weights = mask_indices_and_weights(mask)
+    assert indices.tolist() == list(range(6)) + list(range(12, 18))
+    assert torch.allclose(weights, torch.full((12,), 1 / 6))
+
+
+def test_ibotpp_loss_mask__unknown_mode() -> None:
+    with pytest.raises(ValueError, match="Unknown iBOT\\+\\+ mode"):
+        ibotpp_loss_mask(_COLLATED_MASKS, mode="visible")  # type: ignore[arg-type]
 
 
 def test_get_optimizer_with_decay() -> None:

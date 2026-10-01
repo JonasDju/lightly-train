@@ -42,6 +42,7 @@ method:
   dino_loss_weight: 1.0
   ibot_loss_weight: 1.0
   koleo_loss_weight: 0.1
+  ibotpp: null  # null = plain iBOT, "all" = iBOT++, "masked" = something in between
   center_method: softmax
   center_momentum: 0.9
   momentum_start: 0.992

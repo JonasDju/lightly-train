@@ -43,7 +43,9 @@ from lightly_train._methods.dinov2.utils import (
     MaskingGenerator,
     create_collated_masks,
     get_optimizer_with_decay,
+    ibotpp_loss_mask,
     is_tokenization_param,
+    mask_indices_and_weights,
 )
 from lightly_train._methods.method import Method, TrainingStepResult
 from lightly_train._methods.method_args import MethodArgs
@@ -109,6 +111,13 @@ class DINOv2Args(MethodArgs):
     dino_loss_weight: float = 1.0
     ibot_loss_weight: float = 1.0
     koleo_loss_weight: float = 0.1
+
+    # iBOT++ (TIPSv2, https://arxiv.org/abs/2604.12012): drop iBOT's mask indicator so
+    # the visible patch tokens of the student are supervised too. The student input is
+    # masked as before. None is plain iBOT (masked tokens only). "all" computes the loss
+    # on every patch token of every global crop. "masked" does so only for the crops
+    # with masked tokens -> crops the student saw unmasked contribute 0, as in iBOT.
+    ibotpp: Literal["all", "masked"] | None = None
 
     # softmax/sinkhorn_knopp for fast/long setup in original DINOv2
     center_method: Literal["softmax", "sinkhorn_knopp"] = "softmax"
@@ -351,7 +360,17 @@ class DINOv2(Method):
             device=self.device, non_blocking=True
         )
         masks_weight = masks["masks_weight"].to(device=self.device, non_blocking=True) # [M,]
-        n_masked_patches = mask_indices_list.shape[0]
+
+        # Patch tokens the iBOT loss is computed on: the masked ones, or for iBOT++
+        # whole crops. collated_masks still masks the student input either way.
+        if self.method_args.ibotpp is None:
+            ibot_masks = collated_masks
+            ibot_indices = mask_indices_list
+            ibot_weights = masks_weight
+        else:
+            ibot_masks = ibotpp_loss_mask(collated_masks, mode=self.method_args.ibotpp)
+            ibot_indices, ibot_weights = mask_indices_and_weights(ibot_masks)
+        n_ibot_patches = ibot_indices.shape[0]
 
         # Process global views through teacher and student networks
         # TODO(Jonas 06/25): kwargs
@@ -360,8 +379,8 @@ class DINOv2(Method):
             self._forward_teacher(
                 global_views,
                 batch_size,
-                mask_indices_list,
-                n_masked_patches,
+                ibot_indices,
+                n_ibot_patches,
                 teacher_temp,
             )  # [G, B, out_dim], [M, out_dim]
         )
@@ -372,7 +391,7 @@ class DINOv2(Method):
         ) = self._forward_student_global(
             x=global_views,
             masks=collated_masks,
-            mask_indices_list=mask_indices_list,
+            mask_indices_list=ibot_indices,
         )  # [G*B, out_dim], [G*B, emb_dim], [M, out_dim]
 
         # TODO(Jonas 06/25): clarify if we actually need this list variant --> simplify interface
@@ -414,9 +433,9 @@ class DINOv2(Method):
         ibot_loss = self.ibot_loss.forward_masked(
             student_patch_tokens_masked=student_masked_patch_tokens_global,
             teacher_patch_tokens_masked=teacher_masked_patch_tokens_centered,
-            student_masks_flat=collated_masks,
-            n_masked_patches=n_masked_patches,
-            masks_weight=masks_weight,
+            student_masks_flat=ibot_masks,
+            n_masked_patches=n_ibot_patches,
+            masks_weight=ibot_weights,
         )
 
         koleo_loss = sum(
@@ -464,7 +483,7 @@ class DINOv2(Method):
             cls_tokens
         )  # [G*B, out_dim]
 
-        # process the masked patch tokens
+        # process the masked patch tokens (for iBOT++ all tokens of the selected crops)
         patch_tokens = tokens["features"]  # [G*B, emb_dim, patD, patH, patW]
         patch_tokens = patch_tokens.flatten(2).permute(0, 2, 1)  # [G*B, patD*patH*patW, emb_dim]
 

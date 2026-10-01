@@ -92,12 +92,16 @@ class TestDINOv2:
         assert DINOv2.optimizer_args_cls(optim_type=optim_type) == expected
 
     @pytest.mark.parametrize(
-        "n_local_crops, ibot_separate_head, center_method",
+        "n_local_crops, ibot_separate_head, center_method, ibotpp",
         [
-            (8, False, "softmax"),
-            (0, False, "softmax"),
-            (8, True, "softmax"),
-            (8, True, "sinkhorn_knopp"),
+            (8, False, "softmax", None),
+            (0, False, "softmax", None),
+            (8, True, "softmax", None),
+            (8, True, "sinkhorn_knopp", None),
+            (8, False, "softmax", "all"),
+            (0, False, "softmax", "masked"),
+            (8, True, "sinkhorn_knopp", "all"),
+            (8, False, "sinkhorn_knopp", "masked"),
         ],
     )
     def test_train_step_impl(
@@ -106,6 +110,7 @@ class TestDINOv2:
         n_local_crops: int,
         ibot_separate_head: bool,
         center_method: Literal["softmax", "sinkhorn_knopp"],
+        ibotpp: Literal["all", "masked"] | None,
     ) -> None:
         emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
         b = 16
@@ -122,7 +127,9 @@ class TestDINOv2:
 
         # run DINOv2
         dinov2_args = DINOv2Args(
-            ibot_separate_head=ibot_separate_head, center_method=center_method
+            ibot_separate_head=ibot_separate_head,
+            center_method=center_method,
+            ibotpp=ibotpp,
         )
         dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, b)
 
@@ -174,6 +181,63 @@ class TestDINOv2:
         out = dinov2.training_step_impl(batch, 0)
         assert spy.call_args.kwargs["input_size"] == (2, 4, 4)
         assert torch.isfinite(out.loss)
+
+    @pytest.mark.parametrize("ibotpp", [None, "all", "masked"])
+    def test_train_step_impl__ibotpp_tokens(
+        self, mocker: MockerFixture, ibotpp: Literal["all", "masked"] | None
+    ) -> None:
+        # Non-cubic (2, 4, 4) patch grid, see test_train_step_impl__anisotropic_views.
+        emb_model = EmbeddingModel(
+            wrapped_model=dummy_dinov2_vit_model(
+                patch_size=(4, 2, 2), img_size=(16, 8, 4)
+            )
+        )
+        b = 4
+        n_crops = 2 * b
+        n_patches = 2 * 4 * 4
+        views = [torch.rand(b, 1, 4, 16, 8) for _ in range(2)] + [
+            torch.rand(b, 1, 2, 8, 4) for _ in range(2)
+        ]
+        batch: Batch = {"views": views, "filename": [f"img_{i}" for i in range(b)]}
+        dinov2 = setup_dinov2_helper(
+            DINOv2Args(mask_probability=0.5, ibotpp=ibotpp), mocker, emb_model, b
+        )
+        masks_spy = mocker.spy(dinov2_module, "create_collated_masks")
+        student_spy = mocker.spy(
+            dinov2.student_embedding_model.wrapped_model, "forward_features"
+        )
+        loss_spy = mocker.spy(dinov2.ibot_loss, "forward_masked")
+
+        out = dinov2.training_step_impl(batch, 0)
+
+        assert torch.isfinite(out.loss)
+        collated_masks = masks_spy.spy_return["collated_masks"]
+        assert collated_masks.shape == (n_crops, n_patches)
+        n_masked_crops = int(collated_masks.any(-1).sum())
+        assert 0 < n_masked_crops < n_crops
+        # The student input is masked the same way in every mode.
+        global_call = student_spy.call_args_list[0]
+        assert torch.equal(global_call.kwargs["masks"], collated_masks)
+
+        loss_kwargs = loss_spy.call_args.kwargs
+        ibot_masks = loss_kwargs["student_masks_flat"]
+        if ibotpp is None:
+            assert torch.equal(ibot_masks, collated_masks)
+        elif ibotpp == "all":
+            assert ibot_masks.shape == (n_crops, n_patches)
+            assert ibot_masks.all()
+        else:
+            expected = collated_masks.any(-1, keepdim=True).expand_as(collated_masks)
+            assert torch.equal(ibot_masks, expected)
+        n_tokens = int(ibot_masks.sum())
+        if ibotpp == "all":
+            assert n_tokens == n_crops * n_patches
+        elif ibotpp == "masked":
+            assert n_tokens == n_masked_crops * n_patches
+        assert loss_kwargs["n_masked_patches"] == n_tokens
+        assert loss_kwargs["student_patch_tokens_masked"].shape[0] == n_tokens
+        assert loss_kwargs["teacher_patch_tokens_masked"].shape[0] == n_tokens
+        assert loss_kwargs["masks_weight"].shape == (n_tokens,)
 
     def test_layerwise_decay_optimizer(self, mocker: MockerFixture) -> None:
         emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())

@@ -44,7 +44,11 @@ PYTHON="$REPO_DIR/.venv/bin/python"
 # --- Data -> node-local scratch ($TMP/kneeno_data/{unlabeled,labeled}); skipped if already populated -------
 # Exactly one extraction per node
 srun --nodes="${SLURM_NNODES:-1}" --ntasks="${SLURM_NNODES:-1}" --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --unlabeled-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
-                                                                      --pool-size 16
+     --pool-size 16 --data-root /dev/shm/kneeno_data
 
 # --- Training ---------------------------------------------------------------------------------------------
 srun "$PYTHON" cluster/pretrain_dinov2_kneeno.py --config "$CONFIG" --pg-timeout-minutes "$PG_TIMEOUT_MINUTES"
+
+# Cleanup
+rm -rf /dev/shm/kneeno_data
+echo "Deleted KneeNo data"

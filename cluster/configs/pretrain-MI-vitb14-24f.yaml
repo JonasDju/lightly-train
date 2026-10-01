@@ -14,7 +14,7 @@ model: dinov2/vitb14-notpretrained
 # Required block, every key required. series_depth/resample_mode must match eval.data's (checked at startup).
 data:
   out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.256px  # logs, checkpoints, exported model; rerunning resumes from it
-  data_root: $TMP/kneeno_data/unlabeled  # extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py)
+  data_root: /dev/shm/kneeno_data/unlabeled  # extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py)
   data_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_unlabeled.json
   series_depth: 24  # > 0 resamples every volume to this many slices; <= 0 keeps native depth
   resample_mode: nearest
@@ -145,7 +145,7 @@ eval:
   split:
     test_fraction: 0.2
   data:
-    data_root: $TMP/kneeno_data/unlabeled
+    data_root: /dev/shm/kneeno_data/unlabeled
     label_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_labeled.json
     series_depth: 24  # match the pretraining series_depth -- no resampling distribution shift
     resample_mode: nearest
@@ -158,9 +158,9 @@ eval:
     per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.256px/eval/in-training/eval_per_label
     tag_prefix: eval
   freq:
-    knn: 10
-    linear: 10
-    linear_pool: 10
+    knn: 5
+    linear: 5
+    linear_pool: 5
     attentive_pool: null  # Takes too long (~2h on 12k exams) -> only run once training is finished
   knn:
     k: [5, 20, 50, 100]

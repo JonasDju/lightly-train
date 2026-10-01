@@ -41,7 +41,8 @@ cd "$REPO_DIR"
 PYTHON="$REPO_DIR/.venv/bin/python"
 
 # --- Data -> node-local scratch ($TMP/kneeno_data/{unlabeled,labeled}); skipped if already populated -------
-srun --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --unlabeled-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
+# Exactly one extraction per node
+srun --nodes="${SLURM_NNODES:-1}" --ntasks="${SLURM_NNODES:-1}" --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --unlabeled-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
                                                                       --pool-size 16
 
 # --- Training ---------------------------------------------------------------------------------------------

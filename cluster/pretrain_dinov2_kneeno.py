@@ -47,6 +47,10 @@ import os
 # Workers inherit the environment, under fork and spawn alike.
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
+# Expandable segments let freed memory be reused for any size. setdefault, so an explicit setting in the job
+# environment wins.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import argparse  # noqa: E402
 from datetime import timedelta  # noqa: E402
 from pathlib import Path  # noqa: E402

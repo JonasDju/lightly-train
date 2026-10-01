@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import pickle
 
+import numpy as np
+import pytest
 import torch
 from kneeno.evaluation.adapter import EncoderAdapter
 
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
+from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
+from lightly_train._transforms.view_transform import (
+    RESIZE_INTERPOLATION,
+    RESIZE_UPSCALE_INTERPOLATION,
+)
 
 from .. import helpers
 
@@ -57,6 +64,52 @@ def test_dinov2_adapter__prepare_input_normalizes_like_view_transform() -> None:
     out = adapter.prepare_input(volume)
     expected = (255.0 - 0.25 * 255.0) / (0.5 * 255.0)
     assert torch.allclose(out, torch.full_like(out, expected))
+
+
+@pytest.mark.parametrize(
+    "native_dhw",
+    [
+        (7, 20, 11),  # every axis shrinks: area
+        (3, 20, 5),  # D and W grow (linear), H shrinks (area)
+    ],
+)
+def test_dinov2_adapter__prepare_input_resizes_like_training(
+    native_dhw: tuple[int, int, int],
+) -> None:
+    """Same resampler as training: RandomResizedCrop3D at scale=ratio=1, then normalize.
+
+    Training views are area-resampled (linear on enlarged axes); a trilinear resize instead
+    keeps noise and aliasing on downsampled axes that the encoder never saw in training.
+    """
+    adapter, _ = _adapter_and_model()
+    volume = torch.randint(0, 256, (1, *native_dhw), dtype=torch.uint8)
+
+    crop = RandomResizedCrop3D(
+        size=IMAGE_SIZE,
+        scale=(1.0, 1.0),
+        ratio=(1.0, 1.0),
+        interpolation=RESIZE_INTERPOLATION,
+        upscale_interpolation=RESIZE_UPSCALE_INTERPOLATION,
+        output_dtype=np.float32,
+    )
+    resized = crop(volume.permute(0, 2, 3, 1).numpy())  # (1, H, W, D)
+    expected = (torch.from_numpy(resized).permute(0, 3, 1, 2) - 127.5) / 127.5
+
+    out = adapter.prepare_input(volume)
+    assert out.shape == expected.shape
+    assert torch.allclose(out, expected, atol=1e-6)
+
+
+def test_dinov2_adapter__prepare_input_does_not_mix_slices_at_target_depth() -> None:
+    """When the native depth already matches, only the in-plane axes are resized."""
+    adapter, _ = _adapter_and_model()
+    depth = IMAGE_SIZE[2]
+    volume = torch.randint(0, 200, (1, depth, 20, 11), dtype=torch.uint8)
+    perturbed = volume.clone()
+    perturbed[:, 1] += 50
+
+    changed = (adapter.prepare_input(volume) != adapter.prepare_input(perturbed)).flatten(2)
+    assert changed.any(dim=2).squeeze(0).tolist() == [d == 1 for d in range(depth)]
 
 
 def test_dinov2_adapter__prepare_input_is_deterministic() -> None:

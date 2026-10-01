@@ -32,6 +32,7 @@ from lightly_train._transforms.monai_wrappers import (
     AnisotropyTrackingRandomResizedCrop3D,
     AlphaRandHistogramShift
 )
+from lightly_train._transforms.random_resized_crop import InterpolationMode
 from lightly_train._transforms.transform import (
     ColorJitterArgs,
     GaussianBlurArgs,
@@ -51,6 +52,11 @@ from lightly_train.types import TransformInput, TransformOutputSingleView
 
 ALBUMENTATIONS_VERSION_2XX = RequirementCache("albumentations>=2.0.0")
 ALBUMENTATIONS_VERSION_GREATER_EQUAL_1_4_22 = RequirementCache("albumentations>=1.4.22")
+
+# Resampling of the random resized crop. Shared with DINOv2Adapter.prepare_input, so evaluation
+# resizes volumes exactly like training does.
+RESIZE_INTERPOLATION: InterpolationMode = "area"
+RESIZE_UPSCALE_INTERPOLATION: InterpolationMode = "linear"
 
 
 class ToTensor(Transform):
@@ -155,8 +161,8 @@ class ViewTransform:
             AnisotropyTrackingRandomResizedCrop3D(
                 size=args.random_resized_crop.size,
                 scale=args.random_resized_crop.scale.as_tuple(),
-                interpolation="area",
-                upscale_interpolation="linear",
+                interpolation=RESIZE_INTERPOLATION,
+                upscale_interpolation=RESIZE_UPSCALE_INTERPOLATION,
                 # Deviates from CV2 INTER_AREA slightly, but looks better in my opinion.
                 # Select None for the closest 3D approximation of CV2s' INTER_AREA
                 # float32 instead of the default round-trip to the input dtype: a uint8

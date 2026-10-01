@@ -21,11 +21,16 @@ from __future__ import annotations
 from logging import getLogger
 from typing import Any, Sequence
 
+import numpy as np
 import torch
-import torch.nn.functional as F
 from kneeno.evaluation.adapter import EncoderAdapter
 from torch import Tensor
 
+from lightly_train._transforms.random_resized_crop import _resample
+from lightly_train._transforms.view_transform import (
+    RESIZE_INTERPOLATION,
+    RESIZE_UPSCALE_INTERPOLATION,
+)
 from lightly_train.types import ImageSizeTuple
 
 logger = getLogger(__name__)
@@ -81,12 +86,19 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
     def prepare_input(self, volume: Tensor) -> Tensor:
         """``(1, D, H, W)`` raw volume -> ``(1, D', H', W')`` normalized float32.
 
-        Normalize, then trilinearly resize all three axes to the configured training crop
-        size. Resizing depth as well (V-JEPA 2.1's adapter leaves it native) is what makes
-        this the faithful counterpart of *this* repo's training pipeline: the random
-        resized crop there always emits a fixed output size, so the encoder never saw a
-        variable depth. It also keeps every evaluation batch uniformly shaped, so the
-        positional embedding is not re-interpolated on every batch.
+        Resize all three axes to the configured training crop size, then normalize -- the
+        same order and the same resampler as training, i.e. ``RandomResizedCrop3D`` at
+        ``scale=ratio=1`` (whose crop is the whole volume). Resizing depth as well (V-JEPA
+        2.1's adapter leaves it native) is what makes this the faithful counterpart of
+        *this* repo's training pipeline: the random resized crop there always emits a fixed
+        output size, so the encoder never saw a variable depth. It also keeps every
+        evaluation batch uniformly shaped, so the positional embedding is not
+        re-interpolated on every batch.
+
+        Not ``F.interpolate(mode="trilinear")``: it has no anti-aliasing in 3D, so
+        downsampling (e.g. 672 -> 224 in-plane) keeps noise and aliasing that the
+        area-resampled training views never contain. An axis that already has its target
+        size is left untouched, so slices are never mixed when the depth already matches.
 
         Runs in DataLoader worker processes: stays on the CPU and holds nothing
         unpicklable.
@@ -95,17 +107,18 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
             volume = torch.as_tensor(volume)
         buffer = volume.float()  # (C, D, H, W), C == 1
 
-        buffer = (buffer - self.mean) / self.std
-
         if tuple(buffer.shape[1:]) != self.size:
-            # interpolate() wants a batch axis; trilinear needs a 5D input.
-            buffer = F.interpolate(
-                buffer.unsqueeze(0),
-                size=self.size,
-                mode="trilinear",
-                align_corners=False,
-            ).squeeze(0)
-        return buffer
+            # The resampler works on (C, H, W, D) numpy arrays, like the training transforms.
+            resized = _resample(
+                buffer.permute(0, 2, 3, 1).numpy(),
+                (self.size[1], self.size[2], self.size[0]),  # H W D
+                RESIZE_INTERPOLATION,
+                RESIZE_UPSCALE_INTERPOLATION,
+            )
+            buffer = torch.from_numpy(np.ascontiguousarray(resized.transpose(0, 3, 1, 2))) # back to (C, D, H, W)
+
+        # Normalize last, as ViewTransform does.
+        return (buffer - self.mean) / self.std
 
     def forward_features(self, model: Any, batch: Tensor) -> dict[str, Tensor | None]:
         """``batch``: ``(B, 1, D, H, W)`` -- the inherited ``collate`` stacks

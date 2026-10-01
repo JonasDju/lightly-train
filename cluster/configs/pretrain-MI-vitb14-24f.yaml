@@ -154,7 +154,7 @@ eval:
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.256px/eval/in-training/eval_per_sample
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.256px/eval/in-training/eval_per_label
     tag_prefix: eval
   freq:
     knn: 10

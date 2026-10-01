@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +19,11 @@ import pytest
 import yaml
 from kneeno.evaluation import load_eval_config
 
+import lightly_train
+from lightly_train._commands.train import FunctionTrainConfig
 from lightly_train._methods.dinov2.dinov2 import DINOv2Args
 from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
+from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 
 CLUSTER_DIR = Path(__file__).parents[1] / "cluster"
 RUN_CONFIGS = sorted((CLUSTER_DIR / "configs").glob("*.yaml"))
@@ -66,6 +71,22 @@ def test_run_config__valid(path: Path) -> None:
         assert eval_config["logging"]["tensorboard_dir"] is None
         # DINOv2 has a cls token, so unlike vjepa2 the linear task stays enabled.
         assert eval_config["freq"]["linear"] is not None
+
+
+@pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
+def test_run_config__train_valid(path: Path) -> None:
+    # load_run_config only checks the train keys' names; their values are checked
+    # by pretrain's own config, which would otherwise only fail on the cluster.
+    config = load_run_config(path)
+    FunctionTrainConfig.model_validate(
+        {**config["data"], **config.get("train", {}), "model": config["model"]}
+    )
+
+
+@pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
+def test_run_config__model_builds(path: Path) -> None:
+    name = load_run_config(path)["model"].removeprefix("dinov2/")
+    DINOv2ViTPackage.get_model(name, num_input_channels=1, load_weights=False)
 
 
 def test_load_run_config__missing_and_null_blocks(tmp_path: Path) -> None:
@@ -135,3 +156,82 @@ def test_load_run_config__eval_depth_mismatch(tmp_path: Path) -> None:
     config = {"model": MODEL, "data": DATA, "eval": {"data": {"series_depth": 16}}}
     with pytest.raises(ValueError, match="eval.data.series_depth"):
         load_run_config(_write(tmp_path, config))
+
+
+def test_train_keys_are_pretrain_arguments() -> None:
+    assert set(run_config.TRAIN_KEYS) <= set(
+        inspect.signature(lightly_train.pretrain).parameters
+    )
+    # Passed to pretrain together with the data block, so they must not overlap.
+    assert not set(run_config.TRAIN_KEYS) & set(run_config.DATA_KEYS)
+
+
+def test_load_run_config__train_block(tmp_path: Path) -> None:
+    train = {"batch_size": 32, "epochs": 2, "trainer_args": {"limit_train_batches": 5}}
+    path = _write(tmp_path, {"model": MODEL, "data": DATA, "train": train})
+    assert load_run_config(path)["train"] == train
+
+
+@pytest.mark.parametrize("key", ["batch_sise", "strategy", "out"])
+def test_load_run_config__unknown_train_key(tmp_path: Path, key: str) -> None:
+    path = _write(tmp_path, {"model": MODEL, "data": DATA, "train": {key: 1}})
+    with pytest.raises(ValueError, match="'train' in run config .* unknown keys"):
+        load_run_config(path)
+
+
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch, config: dict[str, Any], tmp_path: Path
+) -> dict[str, Any]:
+    """Runs cluster/pretrain_dinov2_kneeno.py's main() and returns pretrain's kwargs."""
+    # Restores the env var the script sets at import time.
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+    # The script imports run_config by name, as if run from cluster/.
+    monkeypatch.setitem(sys.modules, "run_config", run_config)
+    spec = importlib.util.spec_from_file_location(
+        "pretrain_dinov2_kneeno", CLUSTER_DIR / "pretrain_dinov2_kneeno.py"
+    )
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(lightly_train, "pretrain", lambda **kw: calls.append(kw))
+    monkeypatch.setenv("SLURM_NNODES", "2")
+    monkeypatch.delenv("SLURM_NTASKS", raising=False)
+    path = _write(tmp_path, config)
+    monkeypatch.setattr(
+        sys, "argv", ["pretrain_dinov2_kneeno.py", "--config", str(path)]
+    )
+    script.main()
+    assert len(calls) == 1
+    return calls[0]
+
+
+def test_main__passes_train_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    train = {"batch_size": 32, "epochs": 2, "trainer_args": {"limit_train_batches": 5}}
+    kwargs = _run_main(
+        monkeypatch, {"model": MODEL, "data": DATA, "train": train}, tmp_path
+    )
+    assert {k: kwargs[k] for k in DATA} == DATA
+    assert {k: kwargs[k] for k in train} == train
+    assert kwargs["model"] == MODEL
+    assert kwargs["num_nodes"] == 2
+    assert kwargs["callbacks"] is None
+
+
+def test_main__no_train_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = _run_main(monkeypatch, {"model": MODEL, "data": DATA}, tmp_path)
+    # Left to pretrain's defaults.
+    assert not set(run_config.TRAIN_KEYS) & set(kwargs)
+
+
+def test_main__every_train_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A train key that the script also passes itself would raise "got multiple values
+    # for keyword argument" only once the job starts on the cluster.
+    train = {key: None for key in run_config.TRAIN_KEYS}
+    kwargs = _run_main(
+        monkeypatch, {"model": MODEL, "data": DATA, "train": train}, tmp_path
+    )
+    assert set(run_config.TRAIN_KEYS) <= set(kwargs)

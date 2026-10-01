@@ -1,6 +1,6 @@
 # 3D DINOv2 pretraining on the unlabeled KneeNo volumes -- run config for cluster/pretrain_dinov2_kneeno.py
-# (--config), the only source of the run's settings. The script passes model and the data block's keys to
-# lightly_train.pretrain directly and the other three blocks as method_args, transform_args and the KneeNo eval
+# (--config), the only source of the run's settings. The script passes model and the data and train blocks' keys
+# to lightly_train.pretrain directly and the other three blocks as method_args, transform_args and the KneeNo eval
 # callback's config; lightly-train copies this file into data.out as params-pretrain.yaml
 # (params-pretrain-1.yaml, ... on each resume). Env vars ($VAR, ${VAR}, leading ~) are expanded everywhere.
 #
@@ -8,8 +8,8 @@
 # num_channels, fixed to 1 for grayscale MRI); a block, or a key within one, that is left out falls back to
 # that default. Leave out the eval block to pretrain without evaluation.
 
-# Required: any 3D dinov2/<name>, e.g. dinov2/vits14.
-model: dinov2/vitb14
+# Required: any 3D dinov2/<name>, e.g. dinov2/vits14-notpretrained.
+model: dinov2/vitb14-notpretrained
 
 # Required block, every key required. series_depth/resample_mode must match eval.data's (checked at startup).
 data:
@@ -18,6 +18,12 @@ data:
   data_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_unlabeled.json
   series_depth: 24  # > 0 resamples every volume to this many slices; <= 0 keeps native depth
   resample_mode: nearest
+
+train:
+  epochs: auto    # auto -> DINOv2's default of 125k steps, converted to epochs
+  batch_size: 128  # GLOBAL batch size, split across all GPUs of all nodes
+  num_workers: auto  # auto -> cpus-per-task - 1, per rank
+  precision: auto
 
 method:
   lr_scale_method: sqrt

@@ -2,21 +2,23 @@
 
 Everything about the experiment comes from a run config (``--config``), like vjepa2's ``configs/``: a YAML with
 
-    model:      -> lightly_train.pretrain(model=...), e.g. dinov2/vitb14 (any 3D dinov2/<name>)
+    model:      -> lightly_train.pretrain(model=...), e.g. dinov2/vitb14-notpretrained (any 3D dinov2/<name>)
     data:       -> lightly_train.pretrain(out=, data_root=, data_meta=, series_depth=, resample_mode=)
+    train:      -> lightly_train.pretrain(epochs=, batch_size=, num_workers=, trainer_args=) (optional)
     method:     -> lightly_train.pretrain(method_args=...)      (DINOv2Args)
     transform:  -> lightly_train.pretrain(transform_args=...)   (DINOv2ViTTransformArgs)
     eval:       -> the KneeNo eval callback's config            (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
 
-``model`` and ``data`` (with all five keys) are required. A missing ``method``/``transform`` block, or a
-missing key within one, falls back to lightly-train's default; a missing ``eval`` block means no evaluation at
+``model`` and ``data`` (with all five keys) are required. A missing ``train``/``method``/``transform`` block, or
+a missing key within one, falls back to lightly-train's default; a missing ``eval`` block means no evaluation at
 all. Environment variables (``$VAR``, ``${VAR}``, leading ``~``) are expanded in every string value with
 KneeNo's ``expand_env_vars`` (loading and validation: ``run_config.load_run_config``).
-``cluster/configs/pretrain-MI-vitb14-24f.yaml`` lists every default explicitly.
+``cluster/configs/pretrain-MI-vitb14-24f.yaml`` lists every method/transform default explicitly.
 lightly-train copies the file into ``data.out`` as ``params-pretrain.yaml`` (``params-pretrain-1.yaml``, ...
 on each resume), so that copy is the complete record of the run's settings. The only command-line option
-besides ``--config`` is the multi-GPU process-group timeout, which does not affect training. Everything else
-(optimizer, epochs, batch size, ...) is ``lightly_train.pretrain``'s default for ``method="dinov2"``.
+besides ``--config`` is the multi-GPU process-group timeout, which does not affect training. Whatever the
+``train`` block (``run_config.TRAIN_KEYS``) leaves out (optimizer, epochs, batch size, ...) is
+``lightly_train.pretrain``'s default for ``method="dinov2"``.
 
 The eval block's ``$TMP/kneeno_data/labeled`` data must exist by the time the first eval epoch ends
 (``submit_pretrain_dinov2_kneeno.sh`` extracts it). If it cannot be loaded the callback only logs a warning
@@ -30,7 +32,7 @@ Rerunning with the same ``data.out`` resumes from ``<out>/checkpoints/last.ckpt`
 
 Multi-GPU / multi-node: nothing to configure here. Devices, ranks and world size come from the SLURM job
 (``--ntasks-per-node`` = GPUs per node, launched with ``srun``), and ``num_nodes`` is read from
-``SLURM_NNODES``. The batch size is left at lightly-train's default, which is the *global* batch size.
+``SLURM_NNODES``. ``train.batch_size`` (default 128) is the *global* batch size.
 """
 
 from __future__ import annotations
@@ -93,6 +95,7 @@ def main() -> None:
 
     lightly_train.pretrain(
         **config["data"],
+        **config.get("train", {}),
         model=config["model"],
         method="dinov2",
         method_args=config.get("method"),

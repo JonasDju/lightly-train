@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Literal
+import random
+from functools import partial
+from typing import Any, Literal
 
 import pytest
 import torch
+import torch._dynamo
 from pytest_mock import MockerFixture
 from torch import Size
+from torch._dynamo.utils import counters
 
 from lightly_train._methods.dinov2 import dinov2 as dinov2_module
 from lightly_train._methods.dinov2.dinov2 import (
@@ -23,6 +27,16 @@ from lightly_train._methods.dinov2.dinov2 import (
     DINOv2Args,
 )
 from lightly_train._methods.dinov2.utils import is_tokenization_param
+from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
+from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.attention import (
+    SDPAttention,
+)
+from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.block import (
+    NestedTensorBlock,
+)
+from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
+    DinoVisionTransformer,
+)
 from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._optim.optimizer_args import OptimizerArgs
 from lightly_train._optim.optimizer_type import OptimizerType
@@ -421,6 +435,125 @@ class TestDINOv2:
             dinov2.on_before_optimizer_step(optim_mock)
 
         assert "Unfreezing the transformer blocks" not in caplog.text
+
+
+def _compile_test_model() -> EmbeddingModel:
+    """Small, but with the block layout of the shipped dinov2/vitb14-notpretrained: unchunked blocks, the same
+    drop path rate in every block (drop_path_uniform), registers, LayerScale."""
+    torch.manual_seed(0)
+    model = DinoVisionTransformer(
+        img_size=(8, 8, 8),
+        patch_size=(2, 2, 2),
+        in_chans=1,
+        embed_dim=16,
+        depth=4,
+        num_heads=2,
+        mlp_ratio=1,
+        block_fn=partial(NestedTensorBlock, attn_class=SDPAttention),
+        block_chunks=0,
+        num_register_tokens=4,
+        drop_path_rate=0.2,
+        drop_path_uniform=True,
+        init_values=1e-5,
+    )
+    return EmbeddingModel(wrapped_model=DINOv2ViTModelWrapper(model=model))
+
+
+def _backbone_blocks(dinov2: DINOv2) -> list[torch.nn.Module]:
+    return [
+        block
+        for embedding_model in (
+            dinov2.teacher_embedding_model,
+            dinov2.student_embedding_model,
+        )
+        for block in embedding_model.wrapped_model.get_model().blocks  # type: ignore[operator, union-attr]
+    ]
+
+
+class TestDINOv2CompileBlocks:
+    """compile_blocks on the CPU, with Dynamo's "eager" backend: what is traced and how often.
+
+    Inductor's numerics (compiled vs. eager vs. a higher-precision reference) are checked on a GPU by
+    test_dinov2_compile_cuda.py.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _dynamo(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        # DINOv2.__init__ sets optimize_ddp globally; restore it afterwards.
+        monkeypatch.setattr(
+            torch._dynamo.config, "optimize_ddp", torch._dynamo.config.optimize_ddp
+        )
+        # Blocks falling back to eager after too many recompiles must fail, not pass.
+        monkeypatch.setattr(torch._dynamo.config, "fail_on_recompile_limit_hit", True)
+        # Trace with Dynamo but run the captured graphs as they are, without Inductor.
+        compile_ = torch.nn.Module.compile
+        monkeypatch.setattr(
+            torch.nn.Module,
+            "compile",
+            lambda self, *args, **kwargs: compile_(self, backend="eager"),
+        )
+        torch._dynamo.reset()
+        counters.clear()
+        yield
+        torch._dynamo.reset()
+
+    def _setup(self, mocker: MockerFixture, compile_blocks: bool) -> DINOv2:
+        return setup_dinov2_helper(
+            DINOv2Args(compile_blocks=compile_blocks),
+            mocker,
+            _compile_test_model(),
+            batch_size=4,
+        )
+
+    def test_compiles_every_block(self, mocker: MockerFixture) -> None:
+        eager = self._setup(mocker, compile_blocks=False)
+        assert torch._dynamo.config.optimize_ddp
+        compiled = self._setup(mocker, compile_blocks=True)
+        assert not torch._dynamo.config.optimize_ddp
+        assert all(b._compiled_call_impl is None for b in _backbone_blocks(eager))
+        assert all(
+            b._compiled_call_impl is not None for b in _backbone_blocks(compiled)
+        )
+        # Checkpoints and the exported model are unaffected.
+        assert compiled.state_dict().keys() == eager.state_dict().keys()
+
+    def test_training_step(self, mocker: MockerFixture) -> None:
+        eager = self._setup(mocker, compile_blocks=False)
+        compiled = self._setup(mocker, compile_blocks=True)
+        compiled.load_state_dict(eager.state_dict())
+
+        def step(dinov2: DINOv2, batch_size: int) -> dict[str, torch.Tensor]:
+            torch.manual_seed(1)
+            views = [torch.rand(batch_size, 1, 8, 8, 8) for _ in range(2)] + [
+                torch.rand(batch_size, 1, 4, 4, 4) for _ in range(4)
+            ]
+            torch.manual_seed(2)  # drop path
+            random.seed(2)  # iBOT masks
+            dinov2.zero_grad()
+            out = dinov2.training_step_impl(
+                {"views": views, "filename": [""] * batch_size}, 0
+            )
+            out.loss.backward()
+            return {"loss": out.loss.detach()} | {
+                name: param.grad
+                for name, param in dinov2.named_parameters()
+                if param.grad is not None
+            }
+
+        # The second, smaller batch is the dynamic-shape recompile (last batch of an epoch).
+        for batch_size in (4, 3):
+            expected = step(eager, batch_size)
+            actual = step(compiled, batch_size)
+            assert actual.keys() == expected.keys()
+            for name in expected:
+                torch.testing.assert_close(actual[name], expected[name], msg=name)
+
+        # The blocks of the student and the teacher share their graphs: one per mode -- teacher (no grad),
+        # student global views, student local views (dynamic shapes from the second view size on) -- plus one
+        # when the teacher sees its second batch size. Separate graphs per block (e.g. from per-block drop path
+        # rates) would pass Dynamo's recompile limit after 8 and silently run the rest eagerly.
+        assert counters["stats"]["unique_graphs"] == 4
+        assert not counters["graph_break"]
 
 
 class TestDINOv2Args:

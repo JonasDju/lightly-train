@@ -58,6 +58,7 @@ method:
   weight_decay_start: auto
   weight_decay_end: 0.4
   gradient_clip_val: 3.0
+  compile_blocks: true
 
 transform:
   image_size:

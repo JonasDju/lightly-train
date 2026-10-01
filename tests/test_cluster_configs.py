@@ -89,6 +89,20 @@ def test_run_config__model_builds(path: Path) -> None:
     DINOv2ViTPackage.get_model(name, num_input_channels=1, load_weights=False)
 
 
+@pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
+def test_run_config__compile_blocks_share_graphs(path: Path) -> None:
+    # compile_blocks compiles every block on its own, and the blocks only share Dynamo's compiled graphs if
+    # nothing they branch on differs between them. Per-block drop path rates (drop_path_uniform: false) give
+    # every block its own graphs: past Dynamo's recompile limit of 8 the remaining blocks silently run eagerly.
+    config = load_run_config(path)
+    if not config.get("method", {}).get("compile_blocks", False):
+        pytest.skip("compile_blocks is off")
+    name = config["model"].removeprefix("dinov2/")
+    model = DINOv2ViTPackage.get_model(name, num_input_channels=1, load_weights=False)
+    assert not model.chunked_blocks
+    assert len({block.sample_drop_ratio for block in model.blocks}) == 1
+
+
 def test_load_run_config__missing_and_null_blocks(tmp_path: Path) -> None:
     path = _write(
         tmp_path,

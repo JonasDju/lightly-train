@@ -152,6 +152,13 @@ class DINOv2Args(MethodArgs):
     # gradient clipping
     gradient_clip_val: float = 3.0
 
+    # Performance only, does not change what is computed: torch.compile every transformer block of the student and
+    # the teacher backbone in place (regional compilation). The 12 identical blocks share one compiled graph per
+    # input shape, so compiling costs a few seconds per new shape (global / local views, eval batches). Checkpoints
+    # are unaffected: Module.compile() keeps the state_dict keys, and a pickled or deep-copied module drops the
+    # compiled wrapper.
+    compile_blocks: bool = False
+
     def resolve_auto(
         self,
         scaling_info: ScalingInfo,
@@ -268,6 +275,20 @@ class DINOv2(Method):
             center_momentum=method_args.center_momentum,
         )
         self.koleo_loss = KoLeoLoss()
+
+        if method_args.compile_blocks:
+            # Dynamo's DDPOptimizer splits every compiled graph at DDP's gradient-bucket boundaries. Pointless for
+            # graphs of one transformer block (about one 25 MB bucket each), and on 4 GPUs (stage-2 debug job
+            # 4569534) the AOT partitioner crashed on such a split graph ("Node view_11 was invalid, but is
+            # output"); vjepa2's compile_models disables it for the same reason. Without the split, DDP still
+            # overlaps the all-reduce with the backward pass between the blocks.
+            torch._dynamo.config.optimize_ddp = False
+            # After the deepcopy above: a deep copy drops the compiled wrapper, so compile both copies.
+            for embedding_model in (self.teacher_embedding_model, self.student_embedding_model):
+                backbone = embedding_model.wrapped_model.get_model()
+                for block in backbone.blocks:
+                    block.compile()
+            logger.info("Compiling the transformer blocks of the student and the teacher (compile_blocks=True).")
 
         # Tracks whether the tokenization-only phase is currently active, so
         # on_before_optimizer_step can detect the exact step it ends and log it once.

@@ -4,8 +4,9 @@
 #     sbatch --gres=gpu:4 --ntasks-per-node=4 --cpus-per-task=8 cluster/submit_pretrain_dinov2_kneeno.sh
 #     sbatch --nodes=2 --gres=gpu:4 --ntasks-per-node=4 --cpus-per-task=8 cluster/submit_pretrain_dinov2_kneeno.sh
 # --cpus-per-task is per GPU (= per rank): each rank runs (cpus-per-task - 1) dataloader workers, plus 16 for the
-# eval loader. batch_size stays the global default (128), split across all ranks. Set PG_TIMEOUT_MINUTES (default
-# 240) above the duration of one eval round: in a multi-GPU run the other ranks wait for rank 0's eval.
+# eval loader. The run config's train.batch_size is the global batch size, split across all ranks. Set
+# PG_TIMEOUT_MINUTES (default 240) above the duration of one eval round: in a multi-GPU run the other ranks wait for
+# rank 0's eval.
 ##SBATCH --account=truhnlab
 ##SBATCH --partition=truhnlab
 #SBATCH --nodes=1

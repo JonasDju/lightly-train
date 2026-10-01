@@ -21,9 +21,11 @@ data:
 
 train:
   epochs: auto    # auto -> DINOv2's default of 125k steps, converted to epochs
-  batch_size: 128  # GLOBAL batch size, split across all GPUs of all nodes
+  batch_size: 128  # GLOBAL batch size, split across all GPUs of all nodes (use 32x N_GPU)
   num_workers: auto  # auto -> cpus-per-task - 1, per rank
   precision: auto
+  loader_args:
+    pin_memory: true
 
 method:
   lr_scale_method: sqrt

@@ -13,7 +13,7 @@ model: dinov2/vitb14-notpretrained
 
 # Required block, every key required. series_depth/resample_mode must match eval.data's (checked at startup).
 data:
-  out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.256px  # logs, checkpoints, exported model; rerunning resumes from it
+  out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
   data_root: /dev/shm/kneeno_data/unlabeled  # extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py)
   data_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_unlabeled.json
   series_depth: 24  # > 0 resamples every volume to this many slices; <= 0 keeps native depth
@@ -155,7 +155,7 @@ eval:
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.256px/eval/in-training/eval_per_label
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.224px/eval/in-training/eval_per_label
     tag_prefix: eval
   freq:
     knn: 5

@@ -7,6 +7,7 @@
 #
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from pytest_mock import MockerFixture
 
 from lightly_train._callbacks.callback_args import CallbackArgs
 from lightly_train._callbacks.kneeno_eval import KneeNoEval, KneeNoEvalArgs
+from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._transforms.transform import NormalizeArgs
 
 from .. import helpers
@@ -28,14 +30,19 @@ IMAGE_SIZE = (16, 8, 4)  # (H, W, D), non-cubic to catch an axis-order swap.
 class _FakeLabeledDataset(
     torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor]]
 ):
-    """Stands in for LabeledInternalKneeMRIDataset, which needs a dataset on the cluster."""
+    """Stands in for the labeled KneeNo datasets, which need data on the cluster.
+
+    ``raw=True`` mimics LabeledExternalKneeMRIDataset: int16 volumes far outside 0..255 instead of
+    the internal dataset's uint8 ones.
+    """
 
     num_classes = 4
     # One item is an exam: one volume per sequence, in this order.
     sequences = ("sag", "st1", "cor", "tra")
 
-    def __init__(self, n: int = 16) -> None:
+    def __init__(self, n: int = 16, raw: bool = False) -> None:
         self.n = n
+        self.raw = raw
 
     def __len__(self) -> int:
         return self.n
@@ -46,10 +53,10 @@ class _FakeLabeledDataset(
         volumes = tuple(
             torch.randint(
                 0,
-                256,
+                4000 if self.raw else 256,
                 (1, 5 + ((index + s) % 3), 20, 11),
                 generator=gen,
-                dtype=torch.uint8,
+                dtype=torch.int16 if self.raw else torch.uint8,
             )
             for s in range(len(self.sequences))
         )
@@ -138,6 +145,34 @@ def test_on_train_epoch_end__logs_metrics(mocker: MockerFixture) -> None:
     assert all(isinstance(value, float) for value in logged.values())
     # Nothing to reduce: every rank already holds the same broadcast result.
     assert module.log_dict.call_args.kwargs["sync_dist"] is False
+
+
+@pytest.mark.parametrize(
+    "dataset_type, dataset_class",
+    [
+        ("internal", "LabeledInternalKneeMRIDataset"),
+        ("external", "LabeledExternalKneeMRIDataset"),
+    ],
+)
+def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
+    mocker: MockerFixture, dataset_type: str, dataset_class: str
+) -> None:
+    callback = _callback(data={"dataset_type": dataset_type, "num_workers": 0})
+    dataset = mocker.patch(
+        f"kneeno.evaluation.classification.{dataset_class}",
+        return_value=_FakeLabeledDataset(raw=dataset_type == "external"),
+    )
+    adapter = mocker.patch(
+        "lightly_train._callbacks.kneeno_eval.DINOv2Adapter", wraps=DINOv2Adapter
+    )
+    module = _fake_module(mocker)
+
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+
+    dataset.assert_called_once()
+    assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    module.log_dict.assert_called_once()
+    assert all(math.isfinite(v) for v in module.log_dict.call_args.args[0].values())
 
 
 def test_on_train_epoch_end__skips_when_no_task_is_due(mocker: MockerFixture) -> None:

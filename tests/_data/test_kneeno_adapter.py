@@ -12,6 +12,7 @@ import pickle
 import numpy as np
 import pytest
 import torch
+from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
 
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
@@ -30,9 +31,15 @@ IMAGE_SIZE = (16, 8, 4)  # (H, W, D)
 PATCH_SIZE = (2, 2, 2)
 
 
-def _adapter_and_model() -> tuple[DINOv2Adapter, DINOv2ViTModelWrapper]:
+def _adapter_and_model(
+    dataset_type: str = "internal",
+) -> tuple[DINOv2Adapter, DINOv2ViTModelWrapper]:
     wrapper = helpers.dummy_dinov2_vit_model(patch_size=PATCH_SIZE, img_size=IMAGE_SIZE)
-    adapter = DINOv2Adapter(embed_dim=wrapper.feature_dim(), image_size=IMAGE_SIZE)
+    adapter = DINOv2Adapter(
+        dataset_type=dataset_type,
+        embed_dim=wrapper.feature_dim(),
+        image_size=IMAGE_SIZE,
+    )
     return adapter, wrapper
 
 
@@ -57,7 +64,10 @@ def test_dinov2_adapter__prepare_input_resizes_to_image_size() -> None:
 def test_dinov2_adapter__prepare_input_normalizes_like_view_transform() -> None:
     """Matches NormalizeIntensity(subtrahend=[m * 255], divisor=[s * 255])."""
     adapter = DINOv2Adapter(
-        embed_dim=8, image_size=IMAGE_SIZE, normalize=((0.25,), (0.5,))
+        dataset_type="internal",
+        embed_dim=8,
+        image_size=IMAGE_SIZE,
+        normalize=((0.25,), (0.5,)),
     )
     # Already the target size, so no interpolation runs and values map exactly.
     volume = torch.full((1, IMAGE_SIZE[2], IMAGE_SIZE[0], IMAGE_SIZE[1]), 255.0)
@@ -98,6 +108,27 @@ def test_dinov2_adapter__prepare_input_resizes_like_training(
     out = adapter.prepare_input(volume)
     assert out.shape == expected.shape
     assert torch.allclose(out, expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("dtype", [np.int16, np.uint16, np.float32])
+def test_dinov2_adapter__external_volume_is_prepared_like_its_uint8_version(
+    dtype: type,
+) -> None:
+    """dataset_type="external": the raw NIfTI volume is first quantized the way the internal
+    JPEGs were (LabeledExternalKneeMRIDataset.to_uint8); the rest is the internal path."""
+    external, _ = _adapter_and_model(dataset_type="external")
+    internal, _ = _adapter_and_model(dataset_type="internal")
+    rng = np.random.default_rng(0)
+    raw = torch.from_numpy((rng.random((1, 7, 20, 11)) * 1000).astype(dtype))
+    quantized = torch.from_numpy(LabeledExternalKneeMRIDataset.to_uint8(raw.numpy()))
+    assert torch.equal(external.prepare_input(raw), internal.prepare_input(quantized))
+
+
+@pytest.mark.parametrize("dataset_type", [None, "External", "nifti"])
+def test_dinov2_adapter__unknown_dataset_type_raises(dataset_type: str | None) -> None:
+    # Anything but "external" would otherwise silently take the internal path.
+    with pytest.raises(ValueError, match="dataset_type"):
+        DINOv2Adapter(dataset_type=dataset_type, embed_dim=8, image_size=IMAGE_SIZE)  # type: ignore[arg-type]
 
 
 def test_dinov2_adapter__prepare_input_does_not_mix_slices_at_target_depth() -> None:

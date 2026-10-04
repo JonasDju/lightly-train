@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from lightly_train._commands.eval_classification import (
     _STUDENT_PREFIX,
     EvalClassificationConfig,
 )
+from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._transforms.transform import NormalizeArgs
 
@@ -38,11 +40,18 @@ IMAGE_SIZE = (16, 8, 4)  # (H, W, D), non-cubic to catch an axis-order swap.
 class _FakeLabeledDataset(
     torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor]]
 ):
-    """Stands in for LabeledInternalKneeMRIDataset, which needs a dataset on the cluster."""
+    """Stands in for the labeled KneeNo datasets, which need data on the cluster.
+
+    ``raw=True`` mimics LabeledExternalKneeMRIDataset: int16 volumes far outside 0..255 instead of
+    the internal dataset's uint8 ones.
+    """
 
     num_classes = 4
     # One item is an exam: one volume per sequence, in this order.
     sequences = ("sag", "st1", "cor", "tra")
+
+    def __init__(self, raw: bool = False) -> None:
+        self.raw = raw
 
     def __len__(self) -> int:
         return 12
@@ -53,10 +62,10 @@ class _FakeLabeledDataset(
         volumes = tuple(
             torch.randint(
                 0,
-                256,
+                4000 if self.raw else 256,
                 (1, 5 + ((index + s) % 3), 20, 11),
                 generator=gen,
-                dtype=torch.uint8,
+                dtype=torch.int16 if self.raw else torch.uint8,
             )
             for s in range(len(self.sequences))
         )
@@ -129,6 +138,47 @@ def test_eval_classification(
     # "linear" needs a cls token, which DINOv2 has (unlike V-JEPA 2.1).
     assert {key.split("/")[0] for key in metrics} == {"knn", "linear"}
     assert all(isinstance(value, float) for value in metrics.values())
+
+
+@pytest.mark.parametrize(
+    "dataset_type, dataset_class",
+    [
+        ("internal", "LabeledInternalKneeMRIDataset"),
+        ("external", "LabeledExternalKneeMRIDataset"),
+    ],
+)
+def test_eval_classification__dataset_type_selects_dataset_and_preprocessing(
+    tmp_path: Path,
+    checkpoint_path: Path,
+    eval_config_path: Path,
+    mocker: MockerFixture,
+    dataset_type: str,
+    dataset_class: str,
+) -> None:
+    config = yaml.safe_load(eval_config_path.read_text())
+    config["eval"]["data"]["dataset_type"] = dataset_type
+    eval_config_path.write_text(yaml.safe_dump(config))
+    dataset = mocker.patch(
+        f"kneeno.evaluation.classification.{dataset_class}",
+        return_value=_FakeLabeledDataset(raw=dataset_type == "external"),
+    )
+    adapter = mocker.patch(
+        "lightly_train._commands.eval_classification.DINOv2Adapter",
+        wraps=DINOv2Adapter,
+    )
+    out_path = tmp_path / "metrics.json"
+    eval_classification.eval_classification(
+        out=out_path,
+        checkpoint=checkpoint_path,
+        eval_config=eval_config_path,
+        image_size=IMAGE_SIZE,
+        tasks=["knn"],
+        accelerator="cpu",
+    )
+    dataset.assert_called_once()
+    assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    metrics = json.loads(out_path.read_text())
+    assert metrics and all(math.isfinite(v) for v in metrics.values())
 
 
 def test_eval_classification__online_encoder(

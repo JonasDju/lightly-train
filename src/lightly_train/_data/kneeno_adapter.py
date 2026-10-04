@@ -23,6 +23,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import torch
+from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
 from torch import Tensor
 
@@ -34,6 +35,11 @@ from lightly_train._transforms.view_transform import (
 from lightly_train.types import ImageSizeTuple
 
 logger = getLogger(__name__)
+
+
+#: ``eval.data.dataset_type`` values; ``"external"`` volumes are first quantized like the
+#: internal JPEGs.
+DATASET_TYPES = ("internal", "external")
 
 
 class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
@@ -48,12 +54,17 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
 
     def __init__(
         self,
+        dataset_type: str,
         embed_dim: int,
         image_size: ImageSizeTuple | Sequence[int],
         normalize: tuple[Sequence[float], Sequence[float]] = ((0.5,), (0.5,)),
     ) -> None:
         """
         Args:
+            dataset_type:
+                Describes the type of eval dataset, either "internal" or "external"
+                (anything else raises a ``ValueError``). Controls the preprocessing of
+                the raw incoming volume.
             embed_dim:
                 Feature dimension of the encoder, i.e. ``wrapped_model.feature_dim()``.
             image_size:
@@ -66,6 +77,13 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 internally to match ``ViewTransform``'s
                 ``NormalizeIntensity(subtrahend=[m * 255], divisor=[s * 255])``.
         """
+        # Anything else would silently take the internal path, i.e. treat raw NIfTI
+        # intensities as 0..255.
+        if dataset_type not in DATASET_TYPES:
+            raise ValueError(
+                f"dataset_type must be one of {DATASET_TYPES}, got {dataset_type!r}"
+            )
+        self.dataset_type = dataset_type
         self._embed_dim = embed_dim
         # Config order is (H, W, D); tensors are (D, H, W). This is the one conversion.
         height, width, depth = (
@@ -106,6 +124,9 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         Runs in DataLoader worker processes: stays on the CPU and holds nothing
         unpicklable.
         """
+        if self.dataset_type == "external":
+            volume = LabeledExternalKneeMRIDataset.to_uint8(volume)
+
         if not torch.is_tensor(volume):
             volume = torch.as_tensor(volume)
         buffer = volume.float()  # (C, D, H, W), C == 1

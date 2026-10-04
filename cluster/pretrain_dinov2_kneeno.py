@@ -20,7 +20,7 @@ besides ``--config`` is the multi-GPU process-group timeout, which does not affe
 ``train`` block (``run_config.TRAIN_KEYS``) leaves out (optimizer, epochs, batch size, ...) is
 ``lightly_train.pretrain``'s default for ``method="dinov2"``.
 
-The eval block's ``$TMP/kneeno_data/labeled`` data must exist by the time the first eval epoch ends
+The eval block's ``/dev/shm/kneeno_data/internal`` data must exist by the time the first eval epoch ends
 (``submit_pretrain_dinov2_kneeno.sh`` extracts it). If it cannot be loaded the callback only logs a warning
 and disables itself, so check the log for "Disabling KneeNo evaluation".
 

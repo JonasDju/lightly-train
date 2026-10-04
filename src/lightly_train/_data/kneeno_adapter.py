@@ -83,7 +83,7 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
     def embed_dim(self) -> int:
         return self._embed_dim
 
-    def prepare_input(self, volume: Tensor) -> Tensor:
+    def prepare_input(self, volume: Tensor, orientation: str | None = None) -> Tensor:
         """``(1, D, H, W)`` raw volume -> ``(1, D', H', W')`` normalized float32.
 
         Resize all three axes to the configured training crop size, then normalize -- the
@@ -99,6 +99,9 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         downsampling (e.g. 672 -> 224 in-plane) keeps noise and aliasing that the
         area-resampled training views never contain. An axis that already has its target
         size is left untouched, so slices are never mixed when the depth already matches.
+
+        ``orientation`` is ignored: pretraining feeds the volumes in the orientation they are
+        stored in, so evaluation keeps them in the orientation the labeled dataset returns.
 
         Runs in DataLoader worker processes: stays on the CPU and holds nothing
         unpicklable.

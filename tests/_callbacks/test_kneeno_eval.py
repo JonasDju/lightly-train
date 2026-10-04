@@ -59,7 +59,7 @@ class _FakeLabeledDataset(
 
 def _config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "data": {"num_workers": 0},
+        "data": {"dataset_type": "internal", "num_workers": 0},
         "knn": {"batch_size": 4},
         "linear": {"epochs": 1, "batch_size": 4},
         "linear_pool": {"epochs": 1, "batch_size": 4},

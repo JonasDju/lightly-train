@@ -105,7 +105,9 @@ RESAMPLE_CASES = [
 ]
 
 
-@pytest.mark.parametrize("mode", ["area", "linear", "cubic"])
+@pytest.mark.parametrize(
+    "mode", ["area", "linear", "cubic", "linear+nearest", "area+nearest"]
+)
 @pytest.mark.parametrize("in_shape, out_shape", RESAMPLE_CASES)
 def test_resample__sparse_equals_dense(
     dense: Any, mode: Any, in_shape: tuple[int, ...], out_shape: tuple[int, int, int]

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 from monai.transforms import (
     OneOf,
@@ -21,11 +22,13 @@ from monai.transforms import (
 from lightly_train._methods.dino.dino_transform import DINOGaussianSharpenArgs
 from lightly_train._methods.dinov2.dinov2_transform import (
     DINOv2ViTTransform,
+    DINOv2ViTTransformArgs,
 )
 from lightly_train._transforms.monai_wrappers import (
     AlphaRandHistogramShift,
     AnisotropyAwareRandGaussianSharpen,
 )
+from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 from lightly_train._transforms.transform import (
     RandAdjustContrastArgs,
     RandGaussianNoiseArgs,
@@ -61,6 +64,36 @@ def test_dinov2_transform_args__photometric_2d_fields_have_no_dino_defaults() ->
     assert transform_args.color_jitter is None
     assert transform_args.random_gray_scale is None
     assert transform_args.solarize is None
+
+
+def test_dinov2_transform__resize_interpolation_reaches_every_view() -> None:
+    transform_args = DINOv2ViTTransformArgs(
+        resize_interpolation="area+nearest",
+        resize_upscale_interpolation="linear+nearest",
+    )
+    transform_args.resolve_auto()
+    transform_args.resolve_incompatible()
+    transform = DINOv2ViTTransform(transform_args)
+    assert len(transform.transforms) == 2 + 8
+    for view_transform in transform.transforms:
+        crop = view_transform.transform.transforms[0]
+        assert isinstance(crop, RandomResizedCrop3D)
+        assert crop.interpolation == "area+nearest"
+        assert crop.upscale_interpolation == "linear+nearest"
+
+    # Depth "nearest" only picks whole slices: on a volume whose slices are constant
+    # (value = slice index), every output slice is still one input slice's value.
+    volume = np.broadcast_to(np.arange(30, dtype=np.uint8), (1, 300, 280, 30)).copy()
+    crop = transform.transforms[0].transform.transforms[0]
+    out = crop(volume)
+    np.testing.assert_allclose(out, np.round(out), atol=1e-4)
+
+
+@pytest.mark.parametrize("field", ["resize_interpolation", "resize_upscale_interpolation"])
+@pytest.mark.parametrize("spec", ["trilinear", "area+trilinear", "linear+", "a+b+c"])
+def test_dinov2_transform_args__invalid_resize_interpolation(field: str, spec: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        DINOv2ViTTransformArgs(**{field: spec})
 
 
 def test_dinov2_transform_shapes() -> None:

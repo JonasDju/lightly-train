@@ -17,10 +17,7 @@ from kneeno.evaluation.adapter import EncoderAdapter
 
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
-from lightly_train._transforms.random_resized_crop import (
-    InterpolationMode,
-    RandomResizedCrop3D,
-)
+from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 
 from .. import helpers
 
@@ -88,12 +85,13 @@ def test_dinov2_adapter__prepare_input_normalizes_like_view_transform() -> None:
         ("area", "linear"),  # the DINOTransformArgs defaults
         ("area", None),  # area on every axis
         ("cubic", "nearest"),
+        ("area+nearest", "linear+nearest"),  # whole slices along depth
     ],
 )
 def test_dinov2_adapter__prepare_input_resizes_like_training(
     native_dhw: tuple[int, int, int],
-    interpolation: InterpolationMode,
-    upscale_interpolation: InterpolationMode | None,
+    interpolation: str,
+    upscale_interpolation: str | None,
 ) -> None:
     """Same resampler as training: RandomResizedCrop3D at scale=ratio=1 with the run's
     resize_interpolation / resize_upscale_interpolation, then normalize.
@@ -145,6 +143,22 @@ def test_dinov2_adapter__unknown_dataset_type_raises(dataset_type: str | None) -
     # Anything but "external" would otherwise silently take the internal path.
     with pytest.raises(ValueError, match="dataset_type"):
         DINOv2Adapter(dataset_type=dataset_type, embed_dim=8, image_size=IMAGE_SIZE)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"resize_interpolation": "trilinear"},
+        {"resize_upscale_interpolation": "linear+bicubic"},
+    ],
+)
+def test_dinov2_adapter__invalid_resize_interpolation_raises(
+    kwargs: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError, match="Invalid interpolation"):
+        DINOv2Adapter(
+            dataset_type="internal", embed_dim=8, image_size=IMAGE_SIZE, **kwargs
+        )
 
 
 def test_dinov2_adapter__prepare_input_does_not_mix_slices_at_target_depth() -> None:

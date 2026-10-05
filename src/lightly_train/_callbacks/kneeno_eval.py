@@ -22,7 +22,6 @@ from pytorch_lightning import Callback, LightningModule, Trainer
 from lightly_train._configs.config import PydanticConfig
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.model_wrapper import ModelWrapper
-from lightly_train._transforms.random_resized_crop import InterpolationMode
 from lightly_train._transforms.transform import NormalizeArgs
 from lightly_train.types import ImageSizeTuple
 
@@ -54,8 +53,8 @@ class KneeNoEval(Callback):
         wrapped_model: ModelWrapper,
         image_size: ImageSizeTuple,
         normalize_args: NormalizeArgs,
-        resize_interpolation: InterpolationMode,
-        resize_upscale_interpolation: InterpolationMode | None,
+        resize_interpolation: str,
+        resize_upscale_interpolation: str | None,
         config: dict[str, Any],
     ) -> None:
         self._wrapped_model = wrapped_model

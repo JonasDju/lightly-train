@@ -27,7 +27,10 @@ from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
 from torch import Tensor
 
-from lightly_train._transforms.random_resized_crop import InterpolationMode, _resample
+from lightly_train._transforms.random_resized_crop import (
+    _resample,
+    _validate_interpolation,
+)
 from lightly_train.types import ImageSizeTuple
 
 logger = getLogger(__name__)
@@ -54,8 +57,8 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         embed_dim: int,
         image_size: ImageSizeTuple | Sequence[int],
         normalize: tuple[Sequence[float], Sequence[float]] = ((0.5,), (0.5,)),
-        resize_interpolation: InterpolationMode = "area",
-        resize_upscale_interpolation: InterpolationMode | None = "linear",
+        resize_interpolation: str = "area",
+        resize_upscale_interpolation: str | None = "linear",
     ) -> None:
         """
         Args:
@@ -77,7 +80,10 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
             resize_interpolation, resize_upscale_interpolation:
                 The training run's ``DINOTransformArgs.resize_interpolation`` /
                 ``resize_upscale_interpolation``, so volumes are resampled exactly like
-                the training views. Defaults match ``DINOTransformArgs``'.
+                the training views: a mode such as ``"area"``, or
+                ``"<in-plane>+<out-of-plane>"`` such as ``"linear+nearest"`` (see
+                ``random_resized_crop.parse_interpolation``). Defaults match
+                ``DINOTransformArgs``'.
         """
         # Anything else would silently take the internal path, i.e. treat raw NIfTI
         # intensities as 0..255.
@@ -98,10 +104,12 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         # ViewTransform normalizes raw [0, 255] intensities, hence the * 255.
         self.mean = torch.tensor(mean, dtype=torch.float32).view(-1, 1, 1, 1) * 255.0
         self.std = torch.tensor(std, dtype=torch.float32).view(-1, 1, 1, 1) * 255.0
-        self.resize_interpolation: InterpolationMode = resize_interpolation
-        self.resize_upscale_interpolation: InterpolationMode | None = (
-            resize_upscale_interpolation
-        )
+        # Validated here rather than on the first volume, deep inside an evaluation.
+        _validate_interpolation(resize_interpolation)
+        if resize_upscale_interpolation is not None:
+            _validate_interpolation(resize_upscale_interpolation)
+        self.resize_interpolation = resize_interpolation
+        self.resize_upscale_interpolation = resize_upscale_interpolation
 
     @property
     def embed_dim(self) -> int:

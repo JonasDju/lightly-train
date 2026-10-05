@@ -76,6 +76,8 @@ transform:
   random_resize:
     min_scale: 0.32
     max_scale: 1.0
+  # area/linear/nearest/cubic, or <in-plane>+<depth> (e.g. area+nearest: depth nearest picks whole slices).
+  # resize_upscale_interpolation applies to enlarged axes only; null means resize_interpolation everywhere.
   resize_interpolation: area
   resize_upscale_interpolation: linear
   random_rotation: null

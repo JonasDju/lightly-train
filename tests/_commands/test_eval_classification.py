@@ -28,6 +28,7 @@ from lightly_train._commands import eval_classification
 from lightly_train._commands.eval_classification import (
     _STUDENT_PREFIX,
     EvalClassificationConfig,
+    _read_resize_args,
 )
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.embedding_model import EmbeddingModel
@@ -227,8 +228,8 @@ def test_eval_classification__run_config(
         "method": {"center_method": "softmax"},
         "transform": {
             "num_channels": 1,
-            "resize_interpolation": "cubic",
-            "resize_upscale_interpolation": "linear",
+            "resize_interpolation": "area+nearest",
+            "resize_upscale_interpolation": "linear+nearest",
         },
         **yaml.safe_load(eval_config_path.read_text()),
     }
@@ -248,15 +249,55 @@ def test_eval_classification__run_config(
         accelerator="cpu",
     )
     assert json.loads(out_path.read_text())
-    assert adapter.call_args.kwargs["resize_interpolation"] == "cubic"
-    assert adapter.call_args.kwargs["resize_upscale_interpolation"] == "linear"
+    assert adapter.call_args.kwargs["resize_interpolation"] == "area+nearest"
+    assert adapter.call_args.kwargs["resize_upscale_interpolation"] == "linear+nearest"
 
 
+@pytest.mark.parametrize(
+    "transform, missing",
+    [
+        (None, ["resize_interpolation", "resize_upscale_interpolation"]),
+        ({"num_channels": 1}, ["resize_interpolation", "resize_upscale_interpolation"]),
+        ({"resize_interpolation": "area+nearest"}, ["resize_upscale_interpolation"]),
+        (
+            {
+                "resize_interpolation": "area+nearest",
+                "resize_upscale_interpolation": None,
+            },
+            [],
+        ),
+    ],
+)
+def test_read_resize_args__warns_on_defaults(
+    tmp_path: Path,
+    mocker: MockerFixture,
+    transform: dict[str, Any] | None,
+    missing: list[str],
+) -> None:
+    """A missing resize key silently falling back to the default could evaluate a run
+    with other resampling than it was trained with."""
+    path = tmp_path / "params-pretrain.yaml"
+    path.write_text(yaml.safe_dump({"eval": {}, "transform": transform}))
+    warning = mocker.patch.object(eval_classification.logger, "warning")
+    args = _read_resize_args(path)
+    if not missing:
+        warning.assert_not_called()
+        assert args.resize_upscale_interpolation is None
+        return
+    warning.assert_called_once()
+    message = warning.call_args.args[0]
+    for key in missing:
+        assert f"transform.{key}=" in message
+    for key in {"resize_interpolation", "resize_upscale_interpolation"} - set(missing):
+        assert key not in message
+
+
+@pytest.mark.parametrize("spec", ["trilinear", "area+trilinear", "area+nearest+linear"])
 def test_eval_classification__invalid_resize_interpolation(
-    tmp_path: Path, checkpoint_path: Path, eval_config_path: Path
+    tmp_path: Path, checkpoint_path: Path, eval_config_path: Path, spec: str
 ) -> None:
     run_config = {
-        "transform": {"resize_interpolation": "trilinear"},
+        "transform": {"resize_interpolation": spec},
         **yaml.safe_load(eval_config_path.read_text()),
     }
     params_path = tmp_path / "params-pretrain.yaml"

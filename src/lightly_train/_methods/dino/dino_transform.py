@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import Field
 
 from lightly_train._configs.config import PydanticConfig
-from lightly_train._transforms.random_resized_crop import InterpolationMode
+from lightly_train._transforms.random_resized_crop import ResizeInterpolation
 from lightly_train._transforms.transform import (
     GaussianBlurArgs,
     MethodTransform,
@@ -102,8 +102,8 @@ class DINOTransformArgs(MethodTransformArgs):
     random_resize: DINORandomResizeArgs | None = Field(         # overwritten by DINOv2ViTTransformArgs
         default_factory=DINORandomResizeArgs
     )
-    resize_interpolation: InterpolationMode = "area"
-    resize_upscale_interpolation: InterpolationMode | None = "linear"
+    resize_interpolation: ResizeInterpolation = "area"
+    resize_upscale_interpolation: ResizeInterpolation | None = "linear"
 
     # Rotation
     random_rotation: RandomRotationArgs | None = None

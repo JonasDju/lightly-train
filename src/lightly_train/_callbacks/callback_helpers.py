@@ -34,7 +34,6 @@ from lightly_train._loggers.tensorboard import TensorBoardLogger
 from lightly_train._loggers.wandb import WandbLogger
 from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._models.model_wrapper import ModelWrapper
-from lightly_train._transforms.random_resized_crop import InterpolationMode
 from lightly_train._transforms.transform import NormalizeArgs
 from lightly_train.types import ImageSizeTuple
 
@@ -67,8 +66,8 @@ def get_callbacks(
     loggers: list[AnyLoggerType],
     license_info: str,
     image_size: ImageSizeTuple,
-    resize_interpolation: InterpolationMode,
-    resize_upscale_interpolation: InterpolationMode | None,
+    resize_interpolation: str,
+    resize_upscale_interpolation: str | None,
 ) -> list[Callback]:
     callbacks: list[Callback] = []
     callbacks.append(DataWaitTQDMProgressBar())

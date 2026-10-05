@@ -6,11 +6,12 @@ Works on volumes of shape ``(C, H, W, D)``
 from __future__ import annotations
 
 import math
-from typing import Literal, NamedTuple, Sequence
+from typing import Annotated, Literal, NamedTuple, Sequence
 
 import numpy as np
 from monai.transforms import Randomizable, Transform
 from numpy.typing import DTypeLike, NDArray
+from pydantic import AfterValidator
 from scipy import sparse
 
 __all__ = ["RandomResizedCrop3D", "CropParams3D"]
@@ -108,26 +109,72 @@ def _cubic_weights(in_size: int, out_size: int, a: float = -0.75) -> NDArray[np.
     return weights
 
 
+def _nearest_slice_weights(in_size: int, out_size: int) -> NDArray[np.float64]:
+    """Nearest-neighbour along the depth axis, mapped like KneeNo's ``KneeNoDataset._resample_depth``.
+
+    ``np.linspace(0, in_size - 1, out_size).round()`` keeps both end slices and spreads the dropped (or doubled)
+    slices evenly, whereas ``_nearest_weights`` (cv2's floor mapping) always drops the last ones on a reduction.
+    """
+    src = np.linspace(0, in_size - 1, out_size).round().astype(np.int64)
+    weights = np.zeros((out_size, in_size), dtype=np.float64)
+    weights[np.arange(out_size), src] = 1.0
+    return weights
+
+
 _WEIGHT_FNS = {
     "area": _area_weights,
     "linear": _linear_weights,
     "nearest": _nearest_weights,
     "cubic": _cubic_weights,
 }
+# The depth axis (out-of-plane) only differs in its nearest-neighbour mapping.
+_OUT_OF_PLANE_WEIGHT_FNS = {**_WEIGHT_FNS, "nearest": _nearest_slice_weights}
+
+
+def parse_interpolation(spec: str) -> tuple[InterpolationMode, InterpolationMode]:
+    """Split an interpolation spec into its ``(in_plane, out_of_plane)`` modes.
+
+    ``"<in-plane>+<out-of-plane>"`` sets the H/W axes and the depth axis separately, e.g. ``"linear+nearest"``
+    resamples every slice bilinearly but only picks (drops or doubles) whole slices along depth. A single mode
+    ``"X"`` is shorthand for ``"X+X"``.
+    """
+    modes = spec.split("+") if isinstance(spec, str) else []
+    if len(modes) == 1:
+        modes = modes * 2
+    if len(modes) != 2 or any(m not in _WEIGHT_FNS for m in modes):
+        raise ValueError(
+            f"Invalid interpolation {spec!r}: expected one of {sorted(_WEIGHT_FNS)}, or "
+            "'<in-plane>+<out-of-plane>' with two of them, e.g. 'linear+nearest'."
+        )
+    return modes[0], modes[1]  # type: ignore[return-value]
+
+
+def _validate_interpolation(spec: str) -> str:
+    parse_interpolation(spec)
+    return spec
+
+
+# Pydantic field type for an interpolation spec: validated, but kept as written so run configs round-trip.
+ResizeInterpolation = Annotated[str, AfterValidator(_validate_interpolation)]
 
 
 def _resample(
     volume: NDArray[np.floating],
     out_shape: tuple[int, int, int],
-    mode: InterpolationMode,
-    upscale_mode: InterpolationMode | None = None,
+    mode: str,
+    upscale_mode: str | None = None,
 ) -> NDArray:
     """Resample the last three axes of ``volume`` to ``out_shape``.
 
     ``volume`` is ``(C, H, W, D)`` and ``out_shape`` is the target ``(H, W, D)``;
     axis 0 is carried along untouched.
 
-    ``upscale_mode`` overrides ``mode`` on axes that are being enlarged.
+    ``mode`` and ``upscale_mode`` are specs as accepted by ``parse_interpolation``:
+    their in-plane mode applies to H and W, their out-of-plane mode to D.
+    ``upscale_mode`` overrides ``mode`` on axes that are being enlarged. As the
+    resampling is separable, ``"<in-plane>+nearest"`` is exactly a slice-by-slice
+    in-plane resample of the slices that the depth mapping selects. Along depth,
+    ``"nearest"`` uses KneeNo's mapping (see ``_nearest_slice_weights``).
 
     Note on ``"area"`` and cv2 parity: the area weights reproduce
     ``cv2.INTER_AREA`` exactly on every axis, in both directions -- they collapse
@@ -140,6 +187,8 @@ def _resample(
     often enlarged while H and W are heavily reduced, and cv2's rule would throw
     away the anti-aliasing exactly where it is needed.
     """
+    modes = parse_interpolation(mode)
+    upscale_modes = None if upscale_mode is None else parse_interpolation(upscale_mode)
     out = volume
     # Shrink the most-reduced axis first: every later contraction then runs on
     # less data. Resampling is separable, so the order does not affect the result.
@@ -151,8 +200,13 @@ def _resample(
         in_size = out.shape[axis]
         if in_size == out_size:
             continue
-        axis_mode = upscale_mode if (upscale_mode is not None and out_size > in_size) else mode
-        weights = _WEIGHT_FNS[axis_mode](in_size, out_size).astype(out.dtype)
+        axis_modes = upscale_modes if (upscale_modes is not None and out_size > in_size) else modes
+        # H and W (i = 0, 1) are in-plane, D (i = 2) is out-of-plane.
+        if i == 2:
+            weight_fn = _OUT_OF_PLANE_WEIGHT_FNS[axis_modes[1]]
+        else:
+            weight_fn = _WEIGHT_FNS[axis_modes[0]]
+        weights = weight_fn(in_size, out_size).astype(out.dtype)
         if np.count_nonzero(weights) <= _SPARSE_MAX_DENSITY * weights.size:
             moved = np.moveaxis(out, axis, 0)
             contracted = sparse.csr_array(weights) @ moved.reshape(in_size, -1)
@@ -189,14 +243,16 @@ class RandomResizedCrop3D(Randomizable, Transform):
         ratio: Range of the aspect-ratio jitter applied on top of the volume's
             own aspect ratio. Sampled log-uniformly, as in albumentations.
         interpolation: One of ``"area"``, ``"linear"``, ``"nearest"``,
-            ``"cubic"``. ``"area"`` is the exact 3D equivalent of
+            ``"cubic"``, or ``"<in-plane>+<out-of-plane>"`` to set the H/W axes
+            and the depth axis separately (see ``parse_interpolation``), e.g.
+            ``"area+nearest"``. ``"area"`` is the exact 3D equivalent of
             ``cv2.INTER_AREA`` and is the default, matching lightly-train's 2D
             pipeline. It is exact for enlarging axes too, where it reproduces
             cv2's behaviour of collapsing towards nearest-neighbour. See
             ``_resample`` for the one deliberate divergence from cv2.
         upscale_interpolation: Optional override used only on axes that are being
-            *enlarged*. ``None`` (the default) applies ``interpolation``
-            everywhere. Set it to
+            *enlarged*, in the same format as ``interpolation``. ``None`` (the
+            default) applies ``interpolation`` everywhere. Set it to
             ``"linear"`` if you would rather blend than duplicate when the crop
             is shallower than the output depth -- a common case for thin volumes,
             but a deliberate departure from the 2D pipeline.
@@ -217,8 +273,8 @@ class RandomResizedCrop3D(Randomizable, Transform):
         size: int | Sequence[int],
         scale: tuple[float, float] = (0.08, 1.0),
         ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0),
-        interpolation: InterpolationMode = "area",
-        upscale_interpolation: InterpolationMode | None = None,
+        interpolation: str = "area",
+        upscale_interpolation: str | None = None,
         max_attempts: int = 10,
         seed: int | np.random.RandomState | None = None,
         output_dtype: DTypeLike | None = None,
@@ -232,20 +288,16 @@ class RandomResizedCrop3D(Randomizable, Transform):
             raise ValueError(f"scale must satisfy 0 < scale[0] <= scale[1], got {scale}.")
         if not 0.0 < ratio[0] <= ratio[1]:
             raise ValueError(f"ratio must satisfy 0 < ratio[0] <= ratio[1], got {ratio}.")
-        if interpolation not in _WEIGHT_FNS:
-            raise ValueError(f"interpolation must be one of {sorted(_WEIGHT_FNS)}, got {interpolation!r}.")
-        if upscale_interpolation is not None and upscale_interpolation not in _WEIGHT_FNS:
-            raise ValueError(
-                f"upscale_interpolation must be None or one of {sorted(_WEIGHT_FNS)}, "
-                f"got {upscale_interpolation!r}."
-            )
+        _validate_interpolation(interpolation)
+        if upscale_interpolation is not None:
+            _validate_interpolation(upscale_interpolation)
 
         self.size: tuple[int, int, int] = size  # type: ignore[assignment]
         self.scale = (float(scale[0]), float(scale[1]))
         self.ratio = (float(ratio[0]), float(ratio[1]))
         self.log_ratio = (math.log(self.ratio[0]), math.log(self.ratio[1]))
-        self.interpolation: InterpolationMode = interpolation
-        self.upscale_interpolation: InterpolationMode | None = upscale_interpolation
+        self.interpolation = interpolation
+        self.upscale_interpolation = upscale_interpolation
         self.max_attempts = int(max_attempts)
         self.output_dtype = None if output_dtype is None else np.dtype(output_dtype)
         if isinstance(seed, np.random.RandomState):

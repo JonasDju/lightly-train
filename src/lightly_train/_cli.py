@@ -414,8 +414,9 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
             Path to a YAML file with a top-level `eval:` block (KneeNo's evaluation
             config), e.g. the `params-pretrain.yaml` a pretraining run wrote to its
             output directory. Its `transform:` block's `resize_interpolation` /
-            `resize_upscale_interpolation` set how volumes are resampled (the DINOv2
-            defaults if absent); other top-level blocks are ignored.
+            `resize_upscale_interpolation` set how volumes are resampled, e.g. `area`
+            or `linear+nearest` for in-plane+depth (the DINOv2 defaults if absent);
+            other top-level blocks are ignored.
         image_size ([int, int, int]):
             Global crop size (H, W, D) the model was pretrained with. The checkpoint does
             not record it, so pass it if the pretraining run overrode

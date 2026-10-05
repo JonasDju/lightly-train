@@ -7,6 +7,7 @@
 #
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -15,10 +16,13 @@ import torch
 import torch.nn.functional as F
 
 from lightly_train._transforms.random_resized_crop import (
+    _OUT_OF_PLANE_WEIGHT_FNS,
     _WEIGHT_FNS,
     CropParams3D,
     RandomResizedCrop3D,
+    _nearest_slice_weights,
     _resample,
+    parse_interpolation,
 )
 
 
@@ -33,6 +37,8 @@ class TestRandomResizedCrop3D:
             {"size": 8, "ratio": (0.0, 1.0)},
             {"size": 8, "interpolation": "bicubic"},
             {"size": 8, "upscale_interpolation": "bicubic"},
+            {"size": 8, "interpolation": "linear+bicubic"},
+            {"size": 8, "upscale_interpolation": "area+nearest+linear"},
         ],
     )
     def test_init__invalid_args(self, kwargs: dict[str, Any]) -> None:
@@ -43,7 +49,9 @@ class TestRandomResizedCrop3D:
         assert RandomResizedCrop3D(size=8).size == (8, 8, 8)
 
     @pytest.mark.parametrize("dtype", [np.uint8, np.float32, np.float64, np.bool_])
-    @pytest.mark.parametrize("interpolation", ["area", "linear", "nearest", "cubic"])
+    @pytest.mark.parametrize(
+        "interpolation", ["area", "linear", "nearest", "cubic", "linear+nearest"]
+    )
     def test_call__shape_and_dtype(self, dtype: type, interpolation: Any) -> None:
         rng = np.random.default_rng(0)
         volume = rng.uniform(0, 255, size=(1, 20, 24, 10)).astype(dtype)
@@ -158,12 +166,84 @@ class TestRandomResizedCrop3D:
         assert not set(np.unique(linear)) <= {0.0, 10.0, 20.0, 30.0}
 
 
+@pytest.mark.parametrize("fns", [_WEIGHT_FNS, _OUT_OF_PLANE_WEIGHT_FNS])
 @pytest.mark.parametrize("mode", sorted(_WEIGHT_FNS))
 @pytest.mark.parametrize("in_size, out_size", [(10, 4), (4, 10), (7, 7), (9, 3)])
-def test_weights__rows_sum_to_one(mode: str, in_size: int, out_size: int) -> None:
-    weights = _WEIGHT_FNS[mode](in_size, out_size)
+def test_weights__rows_sum_to_one(
+    fns: dict[str, Any], mode: str, in_size: int, out_size: int
+) -> None:
+    weights = fns[mode](in_size, out_size)
     assert weights.shape == (out_size, in_size)
     np.testing.assert_allclose(weights.sum(axis=1), 1.0)
+
+
+@pytest.mark.parametrize(
+    "spec, expected",
+    [
+        ("area", ("area", "area")),
+        ("cubic", ("cubic", "cubic")),
+        ("linear+nearest", ("linear", "nearest")),
+        ("nearest+area", ("nearest", "area")),
+    ],
+)
+def test_parse_interpolation(spec: str, expected: tuple[str, str]) -> None:
+    assert parse_interpolation(spec) == expected
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["", "+", "linear+", "+nearest", "area+nearest+linear", "trilinear", "linear+bicubic"],
+)
+def test_parse_interpolation__invalid(spec: str) -> None:
+    with pytest.raises(ValueError, match="Invalid interpolation"):
+        parse_interpolation(spec)
+
+
+@pytest.mark.parametrize("in_size, out_size", [(24, 16), (16, 24), (30, 24), (7, 20), (5, 2)])
+def test_nearest_slice_weights__matches_kneeno(in_size: int, out_size: int) -> None:
+    """Depth "nearest" picks the same slices as KneeNo's resample_mode="nearest"."""
+    from kneeno.dataset import KneeNoDataset
+
+    vol = np.random.default_rng(0).standard_normal((in_size, 3, 4))  # KneeNo: (D, H, W)
+    dataset = SimpleNamespace(resample_mode="nearest", series_depth=out_size)
+    expected = KneeNoDataset._resample_depth(dataset, vol)  # type: ignore[arg-type]
+    ours = np.tensordot(_nearest_slice_weights(in_size, out_size), vol, axes=([1], [0]))
+    np.testing.assert_array_equal(ours, expected)
+
+
+@pytest.mark.parametrize("depth_out", [16, 24, 40])
+def test_resample__in_plane_plus_nearest_is_slice_by_slice(depth_out: int) -> None:
+    """Every output slice is the in-plane resample of one whole input slice."""
+    volume = np.random.default_rng(0).standard_normal((2, 40, 30, 24))
+    out = _resample(volume, (20, 50, depth_out), "linear+nearest")
+    idx = np.linspace(0, 23, depth_out).round().astype(int)
+    for k, j in enumerate(idx):
+        expected = _resample(volume[..., j : j + 1], (20, 50, 1), "linear")
+        np.testing.assert_allclose(out[..., k : k + 1], expected, atol=1e-12)
+
+
+@pytest.mark.parametrize("mode", ["area", "linear", "cubic"])
+def test_resample__single_mode_equals_pair(mode: str) -> None:
+    volume = np.random.default_rng(0).standard_normal((1, 30, 20, 12))
+    np.testing.assert_array_equal(
+        _resample(volume, (14, 26, 16), mode, "linear"),
+        _resample(volume, (14, 26, 16), f"{mode}+{mode}", "linear+linear"),
+    )
+
+
+def test_resample__upscale_spec_per_plane() -> None:
+    """H is reduced, W enlarged, D enlarged: each axis takes its plane's mode of the matching spec."""
+    volume = np.random.default_rng(0).standard_normal((1, 30, 10, 12))
+    out = _resample(volume, (12, 25, 20), "area+cubic", "linear+nearest")
+    expected = np.tensordot(_WEIGHT_FNS["area"](30, 12), volume, axes=([1], [1]))
+    expected = np.moveaxis(expected, 0, 1)
+    expected = np.moveaxis(
+        np.tensordot(_WEIGHT_FNS["linear"](10, 25), expected, axes=([1], [2])), 0, 2
+    )
+    expected = np.moveaxis(
+        np.tensordot(_nearest_slice_weights(12, 20), expected, axes=([1], [3])), 0, 3
+    )
+    np.testing.assert_allclose(out, expected, atol=1e-12)
 
 
 @pytest.mark.parametrize(
@@ -174,6 +254,9 @@ def test_resample__matches_torch_interpolate(
     mode: Any, torch_mode: str, out_shape: tuple[int, int, int]
 ) -> None:
     volume = np.random.default_rng(0).standard_normal((2, 6, 10, 4))
+    if mode == "nearest":
+        # Only in-plane: depth "nearest" follows KneeNo's mapping, not torch's floor.
+        out_shape = (*out_shape[:2], volume.shape[3])
     kwargs = {"align_corners": False} if torch_mode == "trilinear" else {}
     expected = F.interpolate(
         torch.from_numpy(volume)[None], size=out_shape, mode=torch_mode, **kwargs

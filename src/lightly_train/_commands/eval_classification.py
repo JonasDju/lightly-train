@@ -68,7 +68,8 @@ def eval_classification(
             Path to a YAML file with a top-level ``eval:`` block (KneeNo's evaluation
             config), e.g. the ``params-pretrain.yaml`` a pretraining run wrote to its
             output directory. Its ``transform:`` block's ``resize_interpolation`` /
-            ``resize_upscale_interpolation`` set how volumes are resampled
+            ``resize_upscale_interpolation`` set how volumes are resampled, e.g.
+            ``area`` or ``linear+nearest`` for in-plane+depth
             (``DINOv2ViTTransformArgs``' defaults if absent); other top-level blocks
             are ignored.
         image_size:
@@ -197,17 +198,30 @@ def _read_resize_args(path: Path) -> DINOv2ViTTransformArgs:
     """The training views' resampling, from the run config's ``transform:`` block.
 
     A key (or the whole block) that is left out falls back to
-    ``DINOv2ViTTransformArgs``' default, exactly as it did for the pretraining run.
+    ``DINOv2ViTTransformArgs``' default, exactly as it did for the pretraining run, with
+    a warning: the file may just not be the run config.
     """
     with path.open() as f:
         raw = yaml.safe_load(f) or {}
     transform = raw.get("transform") if isinstance(raw, dict) else None
     keys = ("resize_interpolation", "resize_upscale_interpolation")
-    return DINOv2ViTTransformArgs.model_validate(
+    given = (
         {k: transform[k] for k in keys if k in transform}
         if isinstance(transform, dict)
         else {}
     )
+    args = DINOv2ViTTransformArgs.model_validate(given)
+    missing = [k for k in keys if k not in given]
+    if missing:
+        # A run trained with e.g. "area+nearest" but evaluated from a file without its
+        # transform block would otherwise be resampled differently without notice.
+        defaults = ", ".join(f"transform.{k}={getattr(args, k)!r}" for k in missing)
+        logger.warning(
+            f"Eval config '{path}' does not set {', '.join(missing)}; using the default "
+            f"{defaults}. Pass the pretraining run's params-pretrain.yaml if it used "
+            "other values."
+        )
+    return args
 
 
 def _get_device(accelerator: str) -> torch.device:

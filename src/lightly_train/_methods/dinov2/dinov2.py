@@ -11,7 +11,7 @@ import copy
 import logging
 import math
 from functools import partial
-from typing import Any, ClassVar, Literal, Mapping
+from typing import Any, Callable, ClassVar, Literal, Mapping
 
 import torch
 from lightly.loss import (
@@ -19,7 +19,7 @@ from lightly.loss import (
 )  # we use LightlySSL's KoLeoLoss for better numerical stability
 from lightly.utils.optim import update_param_groups
 from lightly.utils.scheduler import CosineWarmupScheduler, cosine_schedule
-from pydantic import Field
+from pydantic import Field, model_validator
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
 from torch import Tensor
@@ -31,6 +31,8 @@ from lightly_train._methods.dinov2.dinov2_head import DINOv2ProjectionHead
 from lightly_train._methods.dinov2.dinov2_loss import (
     DINOLoss,
     IBOTPatchLoss,
+    chunked_ibot_loss,
+    ibot_chunk_loss,
 )  # we use the original DINOLoss and IBOTPatchLoss
 from lightly_train._methods.dinov2.dinov2_transform import (
     DINOv2ViTTransform,
@@ -168,6 +170,48 @@ class DINOv2Args(MethodArgs):
     # compiled wrapper.
     compile_blocks: bool = False
 
+    # Performance only: torch.compile the DINO and iBOT projection heads (teacher and student) and the iBOT loss
+    # (last layers, teacher centering and softmax, cross-entropy), so that Inductor fuses the loss's
+    # [tokens, output_dim] float32 intermediates away. Uses the bottleneck-based iBOT loss (see
+    # ibot_loss_chunk_size), so it needs center_method="softmax". The DINO (cls token) loss and centering stay
+    # eager: their tensors are small. Checkpoints are unaffected, as with compile_blocks.
+    compile_heads: bool = False
+
+    # Memory only: compute the iBOT loss in chunks of this many tokens, each under activation checkpointing. Only
+    # the heads' bottleneck features ([tokens, bottleneck_dim]) are kept for the backward pass; the last layers,
+    # teacher probabilities and log-softmax ([chunk, output_dim] each) are computed chunk by chunk and recomputed in
+    # the backward pass. Same result as without chunking (up to the summation order). Needs
+    # center_method="softmax". None computes the iBOT loss as before.
+    ibot_loss_chunk_size: int | None = Field(default=None, ge=1)
+
+    # Memory only: torch._functorch.config.activation_memory_budget for the compiled regions (compile_blocks,
+    # compile_heads): the fraction of their activations kept for the backward pass, the cheapest ones are
+    # recomputed. A process-wide setting, applied when the method is built. Needs compile_blocks or compile_heads.
+    # None leaves PyTorch's default (1.0, recompute only what is free).
+    activation_memory_budget: float | None = Field(default=None, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_compile_and_chunking(self) -> DINOv2Args:
+        # A validator, so that an invalid config fails when it is parsed (train_from_config validates the method
+        # args before it loads any data), not when the method is built.
+        if (
+            self.compile_heads or self.ibot_loss_chunk_size is not None
+        ) and self.center_method != "softmax":
+            raise ValueError(
+                "compile_heads and ibot_loss_chunk_size need center_method='softmax' "
+                f"(got center_method='{self.center_method}'): they compute the iBOT "
+                "loss token chunk by token chunk, but Sinkhorn-Knopp centering "
+                "normalizes over all tokens at once."
+            )
+        if self.activation_memory_budget is not None and not (
+            self.compile_blocks or self.compile_heads
+        ):
+            raise ValueError(
+                "activation_memory_budget only applies to compiled regions, set "
+                "compile_blocks=True or compile_heads=True as well."
+            )
+        return self
+
     def resolve_auto(
         self,
         scaling_info: ScalingInfo,
@@ -285,19 +329,50 @@ class DINOv2(Method):
         )
         self.koleo_loss = KoLeoLoss()
 
-        if method_args.compile_blocks:
+        if method_args.compile_blocks or method_args.compile_heads:
             # Dynamo's DDPOptimizer splits every compiled graph at DDP's gradient-bucket boundaries. Pointless for
-            # graphs of one transformer block (about one 25 MB bucket each), and on 4 GPUs (stage-2 debug job
-            # 4569534) the AOT partitioner crashed on such a split graph ("Node view_11 was invalid, but is
-            # output"); vjepa2's compile_models disables it for the same reason. Without the split, DDP still
-            # overlaps the all-reduce with the backward pass between the blocks.
+            # graphs of one transformer block or head (about one 25 MB bucket each). vjepa2's compile_models disables
+            # it for the same reason. Without the split, DDP still overlaps the all-reduce with the backward pass between the blocks.
             torch._dynamo.config.optimize_ddp = False
+        if method_args.compile_blocks:
             # After the deepcopy above: a deep copy drops the compiled wrapper, so compile both copies.
             for embedding_model in (self.teacher_embedding_model, self.student_embedding_model):
                 backbone = embedding_model.wrapped_model.get_model()
                 for block in backbone.blocks:
                     block.compile()
             logger.info("Compiling the transformer blocks of the student and the teacher (compile_blocks=True).")
+
+        # The iBOT loss from the heads' bottleneck features (ibot_chunk_loss), instead of from the full
+        # [tokens, output_dim] head outputs. Without chunking it runs as one chunk.
+        self._fused_ibot_loss = (
+            method_args.compile_heads or method_args.ibot_loss_chunk_size is not None
+        )
+        self._ibot_chunk_fn: Callable[..., tuple[Tensor, Tensor]] = ibot_chunk_loss
+        if method_args.compile_heads:
+            # Whole heads, not their MLPs: Dynamo does not trace a module whose forward is torch's own code
+            # (nn.Sequential), it would silently run eagerly. The iBOT heads are the DINO heads unless
+            # ibot_separate_head. The iBOT path only calls them with bottleneck_only=True, the last layers are
+            # compiled as part of the iBOT loss.
+            distinct_heads = {
+                id(head): head
+                for pair in (self.teacher_head, self.student_head)
+                for head in (pair.dino_head, pair.ibot_head)
+            }
+            for head in distinct_heads.values():
+                head.compile()
+            self._ibot_chunk_fn = torch.compile(ibot_chunk_loss)
+            logger.info(
+                "Compiling the projection heads and the iBOT loss (compile_heads=True)."
+            )
+        if method_args.activation_memory_budget is not None:
+            # Process-wide: read by AOTAutograd's partitioner whenever a graph is compiled (lazily, on its first call).
+            torch._functorch.config.activation_memory_budget = (
+                method_args.activation_memory_budget
+            )
+            logger.info(
+                "Setting torch._functorch.config.activation_memory_budget to "
+                f"{method_args.activation_memory_budget}."
+            )
 
         # Tracks whether the tokenization-only phase is currently active, so
         # on_before_optimizer_step can detect the exact step it ends and log it once.
@@ -382,7 +457,8 @@ class DINOv2(Method):
                 ibot_indices,
                 n_ibot_patches,
                 teacher_temp,
-            )  # [G, B, out_dim], [M, out_dim]
+                ibot_bottleneck=self._fused_ibot_loss,
+            )  # [G, B, out_dim], [M, out_dim] ([M, bottleneck_dim] if self._fused_ibot_loss)
         )
         (
             student_cls_tokens_global,
@@ -392,7 +468,8 @@ class DINOv2(Method):
             x=global_views,
             masks=collated_masks,
             mask_indices_list=ibot_indices,
-        )  # [G*B, out_dim], [G*B, emb_dim], [M, out_dim]
+            ibot_bottleneck=self._fused_ibot_loss,
+        )  # [G*B, out_dim], [G*B, emb_dim], [M, out_dim] ([M, bottleneck_dim] if self._fused_ibot_loss)
 
         # TODO(Jonas 06/25): clarify if we actually need this list variant --> simplify interface
         # Compute the DINO loss
@@ -430,13 +507,40 @@ class DINOv2(Method):
             )
 
         # Compute the iBOT loss
-        ibot_loss = self.ibot_loss.forward_masked(
-            student_patch_tokens_masked=student_masked_patch_tokens_global,
-            teacher_patch_tokens_masked=teacher_masked_patch_tokens_centered,
-            student_masks_flat=ibot_masks,
-            n_masked_patches=n_ibot_patches,
-            masks_weight=ibot_weights,
-        )
+        if self._fused_ibot_loss:
+            # From the bottleneck features, chunk by chunk (compile_heads, ibot_loss_chunk_size). The same as
+            # below: the teacher's last layer and softmax centering, which softmax_center_teacher would do in
+            # _forward_teacher, happen inside the chunks.
+            chunk_size = self.method_args.ibot_loss_chunk_size
+            self.ibot_loss.apply_center_update()
+            ibot_loss, teacher_ibot_logits_mean = chunked_ibot_loss(
+                student_bottleneck=student_masked_patch_tokens_global,
+                teacher_bottleneck=teacher_masked_patch_tokens_centered,
+                student_weight=self.student_head.ibot_head.last_layer.weight,
+                teacher_weight=self.teacher_head.ibot_head.last_layer.weight,
+                center=self.ibot_loss.center,
+                teacher_temp=teacher_temp,
+                student_temp=self.ibot_loss.student_temp,
+                token_weights=ibot_weights,
+                n_crops=ibot_masks.shape[0],
+                chunk_size=chunk_size,
+                checkpoint=chunk_size is not None,
+                chunk_fn=self._ibot_chunk_fn,
+            )
+            if teacher_ibot_logits_mean is None:
+                # No iBOT tokens on this rank: contribute the current center, i.e. no change from this rank. The
+                # update must still happen, update_center all-reduces across ranks and every rank has to take
+                # part, or the collectives of the ranks no longer match (a hang under DDP).
+                teacher_ibot_logits_mean = self.ibot_loss.center.detach().clone()
+            self.ibot_loss.update_center(teacher_ibot_logits_mean)
+        else:
+            ibot_loss = self.ibot_loss.forward_masked(
+                student_patch_tokens_masked=student_masked_patch_tokens_global,
+                teacher_patch_tokens_masked=teacher_masked_patch_tokens_centered,
+                student_masks_flat=ibot_masks,
+                n_masked_patches=n_ibot_patches,
+                masks_weight=ibot_weights,
+            )
 
         koleo_loss = sum(
             self.koleo_loss(token)
@@ -468,6 +572,7 @@ class DINOv2(Method):
         mask_indices_list: Tensor,
         n_masked_patches: int,
         teacher_temp: float,
+        ibot_bottleneck: bool = False,
     ) -> tuple[Tensor, Tensor]:
         tokens = self.teacher_embedding_model.wrapped_model.forward_features(
             x
@@ -479,7 +584,7 @@ class DINOv2(Method):
         cls_tokens = torch.cat(
             (cls_tokens[batch_size:], cls_tokens[:batch_size])
         )  # [G*B, emb_dim]
-        cls_tokens_after_dino = self.teacher_head.dino_head.forward(
+        cls_tokens_after_dino = self.teacher_head.dino_head(
             cls_tokens
         )  # [G*B, out_dim]
 
@@ -492,9 +597,12 @@ class DINOv2(Method):
             dim=0,
             index=mask_indices_list,
         )  # [M, emb_dim]
-        masked_patch_tokens_after_ibot = self.teacher_head.ibot_head.forward(
-            masked_patch_tokens
-        )  # [M, out_dim]
+
+        # With ibot_bottleneck, the bottleneck features: the fused iBOT loss applies the last layer and the
+        # centering itself.
+        masked_patch_tokens_after_ibot = self.teacher_head.ibot_head(
+            masked_patch_tokens, bottleneck_only=ibot_bottleneck
+        )  # [M, out_dim] ([M, bottleneck_dim] if ibot_bottleneck)
 
         # centering
         # TODO(Jonas 06/25): instantiate the centering method in the loss and remove the logic from here
@@ -504,6 +612,9 @@ class DINOv2(Method):
                 cls_tokens_after_dino, teacher_temp=teacher_temp
             ).view(2, -1, *cls_tokens_after_dino.shape[1:])  # [G, B, out_dim]
             self.dino_loss.update_center(cls_tokens_after_dino)
+
+            if ibot_bottleneck:
+                return cls_tokens_centered, masked_patch_tokens_after_ibot
 
             # TODO(Jonas 06/25): change the code inside the loss to avoid the unsqueeze
             masked_patch_tokens_after_ibot = masked_patch_tokens_after_ibot.unsqueeze(0)
@@ -539,6 +650,7 @@ class DINOv2(Method):
         x: Tensor,
         masks: Tensor,
         mask_indices_list: Tensor,
+        ibot_bottleneck: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor]:
         wrapped_model: DINOv2ViTModelWrapper = (
             self.student_embedding_model.wrapped_model  # type: ignore[assignment]
@@ -547,7 +659,7 @@ class DINOv2(Method):
 
         # process the cls tokens
         cls_tokens = tokens["cls_token"]  # [G*B, emb_dim]
-        cls_tokens_after_dino = self.student_head.dino_head.forward(
+        cls_tokens_after_dino = self.student_head.dino_head(
             cls_tokens
         )  # [G*B, out_dim]
 
@@ -560,9 +672,10 @@ class DINOv2(Method):
             dim=0,
             index=mask_indices_list,
         )  # [M, emb_dim]
-        masked_patch_tokens_after_ibot = self.student_head.ibot_head.forward(
-            masked_patch_tokens
-        )  # [M, out_dim]
+        # With ibot_bottleneck, the bottleneck features: the fused iBOT loss applies the last layer itself.
+        masked_patch_tokens_after_ibot = self.student_head.ibot_head(
+            masked_patch_tokens, bottleneck_only=ibot_bottleneck
+        )  # [M, out_dim] ([M, bottleneck_dim] if ibot_bottleneck)
 
         return cls_tokens_after_dino, cls_tokens, masked_patch_tokens_after_ibot
 
@@ -574,7 +687,7 @@ class DINOv2(Method):
         # process the cls tokens
         # TODO(Jonas 06/25): unnecessary assignment, can be removed
         cls_tokens = tokens["cls_token"]  # [L*B, emb_dim]
-        cls_tokens_after_dino: Tensor = self.student_head.dino_head.forward(
+        cls_tokens_after_dino: Tensor = self.student_head.dino_head(
             cls_tokens
         )  # [L*B, out_dim]
 

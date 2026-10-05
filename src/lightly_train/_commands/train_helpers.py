@@ -418,6 +418,46 @@ def get_method_args(
     return args
 
 
+def validate_method_args(
+    method: str, method_args: dict[str, Any] | MethodArgs | None
+) -> None:
+    """Validate the method args as early as possible, before any data is loaded or
+    model built, so that an invalid config fails within seconds.
+
+    get_method_args validates them again (and resolves "auto" values) once the scaling
+    info and the model exist.
+    """
+    if method_args is None or isinstance(method_args, MethodArgs):
+        return  # Nothing to validate, or validated when it was constructed.
+    method_cls = method_helpers.get_method_cls(method=method)
+    validate.pydantic_model_validate(method_cls.method_args_cls(), dict(method_args))
+
+
+def warn_if_activation_memory_budget_with_checkpointing(
+    method_args: MethodArgs,
+    activation_checkpoint_args: ActivationCheckpointingArgs,
+) -> None:
+    """Warn when DINOv2Args.activation_memory_budget, compile_blocks and activation
+    checkpointing are all set.
+
+    Both trade compute for memory: the budget inside the compiled regions, activation
+    checkpointing for whole blocks. Inside a checkpointed block nothing is kept for the
+    backward pass anyway, so the budget only costs extra recomputation in the compiled
+    blocks there (vjepa2 applies its budget only without activation checkpointing). In
+    the compiled heads and iBOT loss (compile_heads), which are never checkpointed, it
+    still works. Silently ignored for methods whose args have no such fields.
+    """
+    budget = getattr(method_args, "activation_memory_budget", None)
+    compile_blocks = getattr(method_args, "compile_blocks", False)
+    if budget is not None and compile_blocks and activation_checkpoint_args.enabled:
+        logger.warning(
+            f"method_args.activation_memory_budget={budget} is set together with "
+            "method_args.compile_blocks=True and activation_checkpoint_args.enabled="
+            "True. Inside the checkpointed blocks the budget has no effect besides extra "
+            "recomputation; consider using only one of them for the blocks."
+        )
+
+
 def validate_tokenization_only_steps(
     method_args: MethodArgs,
     model: Any,

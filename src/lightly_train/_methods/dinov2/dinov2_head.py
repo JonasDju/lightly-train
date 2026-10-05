@@ -11,6 +11,7 @@
 # Modifications Copyright (c) Lightly AG and affiliates:
 #   - Add type hints to the functions
 #   - Modify imports to follow Lightly's conventions
+#   - Add bottleneck_only to forward (for the chunked iBOT loss)
 
 
 from __future__ import annotations
@@ -63,10 +64,14 @@ class DINOv2ProjectionHead(Module):
             if isinstance(m, Linear) and m.bias is not None:
                 init.constant_(m.bias, 0)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, bottleneck_only: bool = False) -> Tensor:
+        """bottleneck_only returns the L2-normalized bottleneck features, without
+        last_layer (for the chunked iBOT loss, which applies last_layer itself)."""
         x = self.mlp(x)
         eps = 1e-6 if x.dtype == torch.float16 else 1e-12
         x = functional.normalize(x, dim=-1, p=2, eps=eps)
+        if bottleneck_only:
+            return x
         x = self.last_layer(x)
         return x
 

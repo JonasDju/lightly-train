@@ -22,6 +22,7 @@ from pydantic import Field, field_validator, model_validator
 
 from lightly_train._configs.config import PydanticConfig
 from lightly_train._configs.validate import no_auto
+from lightly_train._transforms.random_resized_crop import InterpolationMode
 from lightly_train.types import ImageSizeTuple, TransformInput, TransformOutput
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,8 @@ class RandomResizedCropArgs(PydanticConfig):
     # however .scale comes from MethodTransformArgs.random_resize which may be None
     size: tuple[int, int, int]
     scale: RandomResizeArgs | None
+    resize_interpolation: InterpolationMode = "area"
+    resize_upscale_interpolation: InterpolationMode | None = "linear"
 
 
 class RandomFlipArgs(PydanticConfig):

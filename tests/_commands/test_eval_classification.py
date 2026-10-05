@@ -16,6 +16,7 @@ import pytest
 import torch
 import yaml
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 from pytest_mock import MockerFixture
 
 from lightly_train._checkpoint import (
@@ -177,6 +178,9 @@ def test_eval_classification__dataset_type_selects_dataset_and_preprocessing(
     )
     dataset.assert_called_once()
     assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    # No transform block: DINOv2ViTTransformArgs' defaults, as in training.
+    assert adapter.call_args.kwargs["resize_interpolation"] == "area"
+    assert adapter.call_args.kwargs["resize_upscale_interpolation"] == "linear"
     metrics = json.loads(out_path.read_text())
     assert metrics and all(math.isfinite(v) for v in metrics.values())
 
@@ -211,16 +215,29 @@ def test_eval_classification__invalid_encoder(
 
 
 def test_eval_classification__run_config(
-    tmp_path: Path, checkpoint_path: Path, eval_config_path: Path, fake_dataset: None
+    tmp_path: Path,
+    checkpoint_path: Path,
+    eval_config_path: Path,
+    fake_dataset: None,
+    mocker: MockerFixture,
 ) -> None:
-    """A pretraining run's params-pretrain.yaml: only its eval block is used."""
+    """A pretraining run's params-pretrain.yaml: its eval block and the transform block's
+    resampling are used."""
     run_config = {
         "method": {"center_method": "softmax"},
-        "transform": {"num_channels": 1},
+        "transform": {
+            "num_channels": 1,
+            "resize_interpolation": "cubic",
+            "resize_upscale_interpolation": "linear",
+        },
         **yaml.safe_load(eval_config_path.read_text()),
     }
     params_path = tmp_path / "params-pretrain.yaml"
     params_path.write_text(yaml.safe_dump(run_config))
+    adapter = mocker.patch(
+        "lightly_train._commands.eval_classification.DINOv2Adapter",
+        wraps=DINOv2Adapter,
+    )
     out_path = tmp_path / "metrics.json"
     eval_classification.eval_classification(
         out=out_path,
@@ -231,6 +248,27 @@ def test_eval_classification__run_config(
         accelerator="cpu",
     )
     assert json.loads(out_path.read_text())
+    assert adapter.call_args.kwargs["resize_interpolation"] == "cubic"
+    assert adapter.call_args.kwargs["resize_upscale_interpolation"] == "linear"
+
+
+def test_eval_classification__invalid_resize_interpolation(
+    tmp_path: Path, checkpoint_path: Path, eval_config_path: Path
+) -> None:
+    run_config = {
+        "transform": {"resize_interpolation": "trilinear"},
+        **yaml.safe_load(eval_config_path.read_text()),
+    }
+    params_path = tmp_path / "params-pretrain.yaml"
+    params_path.write_text(yaml.safe_dump(run_config))
+    with pytest.raises(ValidationError, match="resize_interpolation"):
+        eval_classification.eval_classification(
+            out=tmp_path / "metrics.json",
+            checkpoint=checkpoint_path,
+            eval_config=params_path,
+            image_size=IMAGE_SIZE,
+            accelerator="cpu",
+        )
 
 
 def test_eval_classification__no_eval_block(

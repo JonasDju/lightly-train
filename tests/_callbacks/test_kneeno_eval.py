@@ -88,6 +88,9 @@ def _callback(**overrides: Any) -> KneeNoEval:
         wrapped_model=wrapper,
         image_size=IMAGE_SIZE,
         normalize_args=NormalizeArgs(),
+        # Not the defaults, so the tests can tell they reach the adapter.
+        resize_interpolation="cubic",
+        resize_upscale_interpolation="linear",
         config=_config(**overrides),
     )
 
@@ -171,6 +174,8 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
 
     dataset.assert_called_once()
     assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    assert adapter.call_args.kwargs["resize_interpolation"] == "cubic"
+    assert adapter.call_args.kwargs["resize_upscale_interpolation"] == "linear"
     module.log_dict.assert_called_once()
     assert all(math.isfinite(v) for v in module.log_dict.call_args.args[0].values())
 

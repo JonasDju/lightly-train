@@ -76,6 +76,8 @@ transform:
   random_resize:
     min_scale: 0.32
     max_scale: 1.0
+  resize_interpolation: area
+  resize_upscale_interpolation: linear
   random_rotation: null
   normalize:
     mean:

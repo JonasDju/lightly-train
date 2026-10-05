@@ -27,11 +27,7 @@ from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
 from torch import Tensor
 
-from lightly_train._transforms.random_resized_crop import _resample
-from lightly_train._transforms.view_transform import (
-    RESIZE_INTERPOLATION,
-    RESIZE_UPSCALE_INTERPOLATION,
-)
+from lightly_train._transforms.random_resized_crop import InterpolationMode, _resample
 from lightly_train.types import ImageSizeTuple
 
 logger = getLogger(__name__)
@@ -58,6 +54,8 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         embed_dim: int,
         image_size: ImageSizeTuple | Sequence[int],
         normalize: tuple[Sequence[float], Sequence[float]] = ((0.5,), (0.5,)),
+        resize_interpolation: InterpolationMode = "area",
+        resize_upscale_interpolation: InterpolationMode | None = "linear",
     ) -> None:
         """
         Args:
@@ -76,6 +74,10 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 ``(mean, std)`` per channel, as in ``NormalizeArgs``. Scaled by 255
                 internally to match ``ViewTransform``'s
                 ``NormalizeIntensity(subtrahend=[m * 255], divisor=[s * 255])``.
+            resize_interpolation, resize_upscale_interpolation:
+                The training run's ``DINOTransformArgs.resize_interpolation`` /
+                ``resize_upscale_interpolation``, so volumes are resampled exactly like
+                the training views. Defaults match ``DINOTransformArgs``'.
         """
         # Anything else would silently take the internal path, i.e. treat raw NIfTI
         # intensities as 0..255.
@@ -96,6 +98,10 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         # ViewTransform normalizes raw [0, 255] intensities, hence the * 255.
         self.mean = torch.tensor(mean, dtype=torch.float32).view(-1, 1, 1, 1) * 255.0
         self.std = torch.tensor(std, dtype=torch.float32).view(-1, 1, 1, 1) * 255.0
+        self.resize_interpolation: InterpolationMode = resize_interpolation
+        self.resize_upscale_interpolation: InterpolationMode | None = (
+            resize_upscale_interpolation
+        )
 
     @property
     def embed_dim(self) -> int:
@@ -136,8 +142,8 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
             resized = _resample(
                 buffer.permute(0, 2, 3, 1).numpy(),
                 (self.size[1], self.size[2], self.size[0]),  # H W D
-                RESIZE_INTERPOLATION,
-                RESIZE_UPSCALE_INTERPOLATION,
+                self.resize_interpolation,
+                self.resize_upscale_interpolation,
             )
             buffer = torch.from_numpy(np.ascontiguousarray(resized.transpose(0, 3, 1, 2))) # back to (C, D, H, W)
 

@@ -447,6 +447,12 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             loggers=logger_instances,
             license_info=LICENSE_INFO,
             image_size=transform_instance.transform_args.image_size,
+            resize_interpolation=getattr(
+                transform_instance.transform_args, "resize_interpolation", "area"
+            ),
+            resize_upscale_interpolation=getattr(
+                transform_instance.transform_args, "resize_upscale_interpolation", "linear"
+            ),
         )
         config.accelerator = common_helpers.get_accelerator(
             accelerator=config.accelerator

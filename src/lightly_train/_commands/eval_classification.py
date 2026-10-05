@@ -67,7 +67,10 @@ def eval_classification(
         eval_config:
             Path to a YAML file with a top-level ``eval:`` block (KneeNo's evaluation
             config), e.g. the ``params-pretrain.yaml`` a pretraining run wrote to its
-            output directory. Other top-level blocks are ignored.
+            output directory. Its ``transform:`` block's ``resize_interpolation`` /
+            ``resize_upscale_interpolation`` set how volumes are resampled
+            (``DINOv2ViTTransformArgs``' defaults if absent); other top-level blocks
+            are ignored.
         image_size:
             Global crop size ``(H, W, D)`` the model was pretrained with. Defaults to
             ``DINOv2ViTTransformArgs.image_size``. The checkpoint does not record it, so
@@ -98,6 +101,7 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     ckpt_path = common_helpers.get_checkpoint_path(checkpoint=config.checkpoint)
 
     eval_cfg = load_eval_config(_read_eval_block(Path(config.eval_config)))
+    resize_args = _read_resize_args(Path(config.eval_config))
     encoder_choice = config.encoder or eval_cfg.get("encoder", "target")
     if encoder_choice not in ("target", "online"):
         raise ValueError(
@@ -127,6 +131,8 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
         embed_dim=wrapped_model.feature_dim(),
         image_size=image_size,
         normalize=(normalize_args.mean, normalize_args.std),
+        resize_interpolation=resize_args.resize_interpolation,
+        resize_upscale_interpolation=resize_args.resize_upscale_interpolation,
     )
 
     evaluator = ClassificationEvaluator(config=eval_cfg, adapter=adapter, device=device)
@@ -185,6 +191,23 @@ def _read_eval_block(path: Path) -> dict[str, Any]:
             "run's params-pretrain.yaml or another file with an 'eval:' block."
         )
     return raw["eval"]
+
+
+def _read_resize_args(path: Path) -> DINOv2ViTTransformArgs:
+    """The training views' resampling, from the run config's ``transform:`` block.
+
+    A key (or the whole block) that is left out falls back to
+    ``DINOv2ViTTransformArgs``' default, exactly as it did for the pretraining run.
+    """
+    with path.open() as f:
+        raw = yaml.safe_load(f) or {}
+    transform = raw.get("transform") if isinstance(raw, dict) else None
+    keys = ("resize_interpolation", "resize_upscale_interpolation")
+    return DINOv2ViTTransformArgs.model_validate(
+        {k: transform[k] for k in keys if k in transform}
+        if isinstance(transform, dict)
+        else {}
+    )
 
 
 def _get_device(accelerator: str) -> torch.device:

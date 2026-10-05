@@ -17,10 +17,9 @@ from kneeno.evaluation.adapter import EncoderAdapter
 
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
-from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
-from lightly_train._transforms.view_transform import (
-    RESIZE_INTERPOLATION,
-    RESIZE_UPSCALE_INTERPOLATION,
+from lightly_train._transforms.random_resized_crop import (
+    InterpolationMode,
+    RandomResizedCrop3D,
 )
 
 from .. import helpers
@@ -79,27 +78,44 @@ def test_dinov2_adapter__prepare_input_normalizes_like_view_transform() -> None:
 @pytest.mark.parametrize(
     "native_dhw",
     [
-        (7, 20, 11),  # every axis shrinks: area
-        (3, 20, 5),  # D and W grow (linear), H shrinks (area)
+        (7, 20, 11),  # every axis shrinks
+        (3, 20, 5),  # D and W grow (upscale mode), H shrinks
+    ],
+)
+@pytest.mark.parametrize(
+    "interpolation, upscale_interpolation",
+    [
+        ("area", "linear"),  # the DINOTransformArgs defaults
+        ("area", None),  # area on every axis
+        ("cubic", "nearest"),
     ],
 )
 def test_dinov2_adapter__prepare_input_resizes_like_training(
     native_dhw: tuple[int, int, int],
+    interpolation: InterpolationMode,
+    upscale_interpolation: InterpolationMode | None,
 ) -> None:
-    """Same resampler as training: RandomResizedCrop3D at scale=ratio=1, then normalize.
+    """Same resampler as training: RandomResizedCrop3D at scale=ratio=1 with the run's
+    resize_interpolation / resize_upscale_interpolation, then normalize.
 
-    Training views are area-resampled (linear on enlarged axes); a trilinear resize instead
-    keeps noise and aliasing on downsampled axes that the encoder never saw in training.
+    A trilinear resize instead keeps noise and aliasing on downsampled axes that the
+    area-resampled training views never contain.
     """
-    adapter, _ = _adapter_and_model()
+    adapter = DINOv2Adapter(
+        dataset_type="internal",
+        embed_dim=8,
+        image_size=IMAGE_SIZE,
+        resize_interpolation=interpolation,
+        resize_upscale_interpolation=upscale_interpolation,
+    )
     volume = torch.randint(0, 256, (1, *native_dhw), dtype=torch.uint8)
 
     crop = RandomResizedCrop3D(
         size=IMAGE_SIZE,
         scale=(1.0, 1.0),
         ratio=(1.0, 1.0),
-        interpolation=RESIZE_INTERPOLATION,
-        upscale_interpolation=RESIZE_UPSCALE_INTERPOLATION,
+        interpolation=interpolation,
+        upscale_interpolation=upscale_interpolation,
         output_dtype=np.float32,
     )
     resized = crop(volume.permute(0, 2, 3, 1).numpy())  # (1, H, W, D)

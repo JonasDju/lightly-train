@@ -22,6 +22,7 @@ from pytorch_lightning import Callback, LightningModule, Trainer
 from lightly_train._configs.config import PydanticConfig
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
 from lightly_train._models.model_wrapper import ModelWrapper
+from lightly_train._transforms.random_resized_crop import InterpolationMode
 from lightly_train._transforms.transform import NormalizeArgs
 from lightly_train.types import ImageSizeTuple
 
@@ -53,11 +54,15 @@ class KneeNoEval(Callback):
         wrapped_model: ModelWrapper,
         image_size: ImageSizeTuple,
         normalize_args: NormalizeArgs,
+        resize_interpolation: InterpolationMode,
+        resize_upscale_interpolation: InterpolationMode | None,
         config: dict[str, Any],
     ) -> None:
         self._wrapped_model = wrapped_model
         self._image_size = image_size
         self._normalize_args = normalize_args
+        self._resize_interpolation = resize_interpolation
+        self._resize_upscale_interpolation = resize_upscale_interpolation
         self._config = load_eval_config(config)
         self._evaluator: ClassificationEvaluator | None = None
         # Set once the evaluator has failed to build, so we warn once and stay quiet.
@@ -83,6 +88,8 @@ class KneeNoEval(Callback):
             embed_dim=feature_dim,
             image_size=self._image_size,
             normalize=(self._normalize_args.mean, self._normalize_args.std),
+            resize_interpolation=self._resize_interpolation,
+            resize_upscale_interpolation=self._resize_upscale_interpolation,
         )
         try:
             self._evaluator = ClassificationEvaluator(

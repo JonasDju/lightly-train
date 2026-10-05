@@ -75,6 +75,8 @@ def test_get_callbacks__default(tmp_path: Path) -> None:
         loggers=[],
         license_info="",
         image_size=(224, 224, 16),
+        resize_interpolation="area",
+        resize_upscale_interpolation="linear",
     )
     assert len(callbacks) == 5
     # KneeNo evaluation is off unless an eval config is passed.
@@ -104,6 +106,8 @@ def test_get_callbacks__mlflow(tmp_path: Path) -> None:
         loggers=loggers,
         license_info="",
         image_size=(224, 224, 16),
+        resize_interpolation="area",
+        resize_upscale_interpolation="linear",
     )
     assert len(callbacks) == 6
     early_stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
@@ -130,6 +134,8 @@ def test_get_callbacks__enable_devicestatsmonitor(tmp_path: Path) -> None:
         loggers=[],
         license_info="",
         image_size=(224, 224, 16),
+        resize_interpolation="area",
+        resize_upscale_interpolation="linear",
     )
     assert len(callbacks) == 6
     assert any(isinstance(c, DeviceStatsMonitor) for c in callbacks)
@@ -151,6 +157,8 @@ def test_get_callbacks__disable(tmp_path: Path) -> None:
         loggers=[],
         license_info="",
         image_size=(224, 224, 16),
+        resize_interpolation="area",
+        resize_upscale_interpolation="linear",
     )
     assert len(callbacks) == 3
     assert any(isinstance(c, ModelCheckpoint) for c in callbacks)
@@ -172,6 +180,8 @@ def test_get_callbacks__user_config(tmp_path: Path) -> None:
         loggers=[],
         license_info="",
         image_size=(224, 224, 16),
+        resize_interpolation="area",
+        resize_upscale_interpolation="linear",
     )
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     assert str(model_checkpoint.dirpath) == str(tmp_path / "checkpoints")

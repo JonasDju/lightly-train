@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field
 
 from lightly_train._configs.config import PydanticConfig
+from lightly_train._transforms.random_resized_crop import InterpolationMode
 from lightly_train._transforms.transform import (
     GaussianBlurArgs,
     MethodTransform,
@@ -97,10 +98,14 @@ class DINOTransformArgs(MethodTransformArgs):
     num_channels: int | Literal["auto"] = "auto"
     normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
 
-    # Resizing & rotation
+    # Resizing
     random_resize: DINORandomResizeArgs | None = Field(         # overwritten by DINOv2ViTTransformArgs
         default_factory=DINORandomResizeArgs
     )
+    resize_interpolation: InterpolationMode = "area"
+    resize_upscale_interpolation: InterpolationMode | None = "linear"
+
+    # Rotation
     random_rotation: RandomRotationArgs | None = None
 
     # Replacement for photometric ops (color_jitter/random_gray_scale/solarize)
@@ -148,6 +153,8 @@ class DINOTransform(MethodTransform):
                 random_resized_crop=RandomResizedCropArgs(
                     size=transform_args.image_size,
                     scale=transform_args.random_resize,
+                    resize_interpolation=transform_args.resize_interpolation,
+                    resize_upscale_interpolation=transform_args.resize_upscale_interpolation,
                 ),
                 random_rotation=transform_args.random_rotation,
                 gaussian_blur=transform_args.gaussian_blur,
@@ -166,6 +173,8 @@ class DINOTransform(MethodTransform):
                 random_resized_crop=RandomResizedCropArgs(
                     size=transform_args.image_size,
                     scale=transform_args.random_resize,
+                    resize_interpolation=transform_args.resize_interpolation,
+                    resize_upscale_interpolation=transform_args.resize_upscale_interpolation,
                 ),
                 random_rotation=transform_args.random_rotation,
                 gaussian_blur=transform_args.global_view_1.gaussian_blur,
@@ -188,6 +197,8 @@ class DINOTransform(MethodTransform):
                     random_resized_crop=RandomResizedCropArgs(
                         size=transform_args.local_view.view_size,
                         scale=transform_args.local_view.random_resize,
+                        resize_interpolation=transform_args.resize_interpolation,
+                        resize_upscale_interpolation=transform_args.resize_upscale_interpolation,
                     ),
                     random_rotation=transform_args.random_rotation,
                     gaussian_blur=transform_args.local_view.gaussian_blur,

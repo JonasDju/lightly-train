@@ -5,7 +5,8 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 #
-"""CUDA-only: ``method.compile_blocks: true`` must not change what a DINOv2 training step computes.
+"""CUDA-only: ``compile_blocks``, ``compile_heads`` and ``ibot_loss_chunk_size`` must not change what a DINOv2
+training step computes.
 
 Run on a GPU node (skipped without CUDA), from the repo root:
 
@@ -29,14 +30,23 @@ Environment (all optional):
     LT_COMPILE_TEST_DEVICE        default cuda. ``cpu`` runs the checks on the CPU instead of skipping -- only
                                   to debug the test itself with a small config, as Inductor's CPU code is not
                                   what training runs
+    LT_COMPILE_TEST_VARIANTS      comma-separated subset of VARIANTS to check (default: all of them)
+    LT_COMPILE_TEST_IBOTPP        ``ibotpp`` of every model (default ``all``, so that the iBOT loss covers every
+                                  token; ``none`` for plain iBOT), overriding the config's
+    LT_COMPILE_TEST_CHUNK         ``ibot_loss_chunk_size`` of the chunked variants (default 4096: with the default
+                                  views (1024 tokens per crop) 2 chunks at the strict batch, a partial last one
+                                  at the second step)
+    LT_COMPILE_TEST_BUDGET        ``activation_memory_budget`` of the budget variant (default 0.5)
 
 What is compared. Three ``DINOv2`` methods built like ``lightly_train.pretrain`` builds them, with the same
-weights: the uncompiled ("eager") one, the one with ``compile_blocks=True`` and an uncompiled reference in
-higher precision. Each runs the same training steps (same views, same iBOT masks, same stochastic-depth
+weights: the uncompiled, unchunked ("eager") one, the one with the variant's settings ("compiled", see VARIANTS)
+and an uncompiled, unchunked reference in higher precision. The ``chunk`` variant compiles nothing: it checks the
+chunked iBOT loss against the unchunked one on the GPU. Each runs the same training steps (same views, same iBOT masks, same stochastic-depth
 subsets) through ``training_step_impl`` followed by ``loss.backward()``, and per step the comparison covers
 
     * the backbone outputs (final-norm tokens) of the teacher, the student's global and local views,
     * the total loss and every loss term (dino global / local, iBOT, KoLeo),
+    * the DINO and iBOT centers after the step's update,
     * the gradient of every student parameter, of all of them as one vector, and the median of the
       per-tensor errors (the vector alone is dominated by the LayerScale gammas, see Comparison.compare),
 
@@ -63,14 +73,20 @@ is. Wrong indexing, a dropped or duplicated term or a broken recomputation shows
    check with a tight floor.
 2. ``test_training_setting``: bfloat16 autocast as Lightning's ``bf16-mixed`` (``precision: auto`` on a GPU),
    vs. the uncompiled model in float32 (TF32 off).
+3. ``test_peak_memory`` (CUDA only): the peak memory of one bf16 training step at the training-setting batch,
+   unchunked vs. chunked vs. chunked and compiled (with and without the budget). Printed; chunked must be lower.
 
-Compilation uses the method's own ``Module.compile()`` (Inductor). ``fail_on_recompile_limit_hit`` is set,
-so blocks silently falling back to eager after too many recompiles fails the test instead of passing it.
+Both checks run once per variant.
+
+Compilation uses the method's own ``Module.compile()`` / ``torch.compile`` (Inductor). ``fail_on_recompile_limit_hit``
+is set, so blocks or heads silently falling back to eager after too many recompiles fails the test instead of
+passing it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import math
 import os
 import random
@@ -118,6 +134,33 @@ pytestmark = pytest.mark.skipif(
     DEVICE == "cuda" and not torch.cuda.is_available(), reason="CUDA not available"
 )
 
+_IBOTPP = os.environ.get("LT_COMPILE_TEST_IBOTPP", "all")
+IBOTPP = None if _IBOTPP.lower() in ("none", "null", "") else _IBOTPP
+CHUNK = int(os.environ.get("LT_COMPILE_TEST_CHUNK", 4096))
+BUDGET = float(os.environ.get("LT_COMPILE_TEST_BUDGET", 0.5))
+
+# The settings of the "compiled" model per variant; the eager model and the reference have none of them.
+VARIANTS: dict[str, dict[str, Any]] = {
+    "blocks": {"compile_blocks": True},
+    "heads": {"compile_heads": True},
+    "blocks+heads": {"compile_blocks": True, "compile_heads": True},
+    "chunk": {"ibot_loss_chunk_size": CHUNK},
+    "blocks+heads+chunk": {
+        "compile_blocks": True,
+        "compile_heads": True,
+        "ibot_loss_chunk_size": CHUNK,
+    },
+    "blocks+heads+chunk+budget": {
+        "compile_blocks": True,
+        "compile_heads": True,
+        "ibot_loss_chunk_size": CHUNK,
+        "activation_memory_budget": BUDGET,
+    },
+}
+_SELECTED = os.environ.get("LT_COMPILE_TEST_VARIANTS", ",".join(VARIANTS))
+SELECTED_VARIANTS = [name.strip() for name in _SELECTED.split(",") if name.strip()]
+assert set(SELECTED_VARIANTS) <= set(VARIANTS), (SELECTED_VARIANTS, list(VARIANTS))
+
 
 # --------------------------------------------------------------------------- setup (mirrors pretrain)
 
@@ -139,9 +182,18 @@ def _view_shapes(
     return (1, d, h, w), (1, ld, lh, lw), local.get("num_views", 8)
 
 
-def _build_method(config: dict[str, Any], compile_blocks: bool) -> DINOv2:
+def _build_method(config: dict[str, Any], overrides: dict[str, Any]) -> DINOv2:
+    """The method with the config's method args, IBOTPP, no compilation / chunking and then the overrides."""
     method_args = DINOv2Args.model_validate(
-        {**(config.get("method") or {}), "compile_blocks": compile_blocks}
+        {
+            **(config.get("method") or {}),
+            "ibotpp": IBOTPP,
+            "compile_blocks": False,
+            "compile_heads": False,
+            "ibot_loss_chunk_size": None,
+            "activation_memory_budget": None,
+            **overrides,
+        }
     )
     optimizer_args = DINOv2AdamWViTArgs()
     wrapped_model = package_helpers.get_wrapped_model(
@@ -175,10 +227,10 @@ class Models:
     weights: str = field(default="random init")
 
 
-def _build_models(reference_dtype: torch.dtype) -> Models:
+def _build_models(reference_dtype: torch.dtype, overrides: dict[str, Any]) -> Models:
     config = _load_config()
     torch.manual_seed(0)
-    eager = _build_method(config, compile_blocks=False)
+    eager = _build_method(config, {})
     checkpoint = os.environ.get("LT_COMPILE_TEST_CHECKPOINT")
     weights = "random init"
     if checkpoint:
@@ -186,9 +238,9 @@ def _build_models(reference_dtype: torch.dtype) -> Models:
         eager.load_state_dict(state["state_dict"], strict=True)
         weights = f"{checkpoint} (epoch {state.get('epoch')})"
     state_dict = eager.state_dict()
-    compiled = _build_method(config, compile_blocks=True)
-    reference = _build_method(config, compile_blocks=False)
-    # compile_blocks keeps the state_dict keys, so strict loading also checks that.
+    compiled = _build_method(config, overrides)
+    reference = _build_method(config, {})
+    # Compiling keeps the state_dict keys, so strict loading also checks that.
     compiled.load_state_dict(state_dict, strict=True)
     reference.load_state_dict(state_dict, strict=True)
 
@@ -360,6 +412,12 @@ def _train_step(
             record[f"loss/{name.removeprefix('train_loss/')}"] = torch.as_tensor(
                 value
             ).detach()
+    # The centers after this step's pending update, read from copies: the method itself must apply the update
+    # at the next step.
+    for name in ("dino", "ibot"):
+        loss_module = copy.deepcopy(getattr(method, f"{name}_loss"))
+        loss_module.apply_center_update()
+        record[f"center/{name}"] = loss_module.center.detach()
     for name, param in method.named_parameters():
         if param.grad is not None:
             record[f"grad/{name}"] = param.grad.detach().clone()
@@ -498,6 +556,7 @@ class Comparison:
 
 def _run_check(
     *,
+    variant: str,
     batch_size: int,
     dtype: torch.dtype,
     autocast_dtype: torch.dtype | None,
@@ -512,8 +571,16 @@ def _run_check(
         mp.setattr(
             torch._dynamo.config, "optimize_ddp", torch._dynamo.config.optimize_ddp
         )
+        # Restored afterwards: DINOv2.__init__ sets it globally for activation_memory_budget.
+        mp.setattr(
+            torch._functorch.config,
+            "activation_memory_budget",
+            torch._functorch.config.activation_memory_budget,
+        )
         mp.setattr(torch._dynamo.config, "fail_on_recompile_limit_hit", True)
-        models = _build_models(reference_dtype)
+        overrides = VARIANTS[variant]
+        models = _build_models(reference_dtype, overrides)
+        title = f"{title} [{variant}: {overrides}, ibotpp={IBOTPP}]"
         print(
             f"\n{title}: weights {models.weights}, batch sizes {batch_size}, {batch_size - 1}"
         )
@@ -540,13 +607,18 @@ def _run_check(
         n_graphs = counters["stats"]["unique_graphs"]
         print(f"compiled graphs: {n_graphs}")
         comparison.report(title)
-        # Something was compiled at all (the eager and reference models never are).
-        assert n_graphs > 0
+        compiles = any(
+            overrides.get(key) for key in ("compile_blocks", "compile_heads")
+        )
+        # Something was compiled at all (the eager and reference models never are), and only then.
+        assert (n_graphs > 0) == compiles
         comparison.assert_ok()
 
 
-def test_fp32_strict() -> None:
+@pytest.mark.parametrize("variant", SELECTED_VARIANTS)
+def test_fp32_strict(variant: str) -> None:
     _run_check(
+        variant=variant,
         batch_size=int(os.environ.get("LT_COMPILE_TEST_STRICT_BATCH", 3)),
         dtype=torch.float32,
         autocast_dtype=None,
@@ -556,8 +628,10 @@ def test_fp32_strict() -> None:
     )
 
 
-def test_training_setting() -> None:
+@pytest.mark.parametrize("variant", SELECTED_VARIANTS)
+def test_training_setting(variant: str) -> None:
     _run_check(
+        variant=variant,
         batch_size=int(os.environ.get("LT_COMPILE_TEST_BATCH", 8)),
         dtype=torch.float32,
         autocast_dtype=torch.bfloat16,
@@ -565,3 +639,49 @@ def test_training_setting() -> None:
         floor=FLOOR["training"],
         title="bfloat16 autocast (bf16-mixed) vs float32 reference",
     )
+
+
+@pytest.mark.skipif(DEVICE != "cuda", reason="measures CUDA memory")
+def test_peak_memory() -> None:
+    """Peak memory of a bf16 training step: unchunked vs. chunked (and compiled). Printed; chunked must be lower."""
+    config = _load_config()
+    batch_size = int(os.environ.get("LT_COMPILE_TEST_BATCH", 8))
+    shapes = _view_shapes(config.get("transform") or {})
+    settings: dict[str, dict[str, Any]] = {
+        "unchunked": {},
+        "chunk": VARIANTS["chunk"],
+        "heads+chunk": {"compile_heads": True, "ibot_loss_chunk_size": CHUNK},
+        "blocks+heads+chunk": VARIANTS["blocks+heads+chunk"],
+        "blocks+heads+chunk+budget": VARIANTS["blocks+heads+chunk+budget"],
+    }
+    peaks: dict[str, float] = {}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            torch._dynamo.config, "optimize_ddp", torch._dynamo.config.optimize_ddp
+        )
+        mp.setattr(
+            torch._functorch.config,
+            "activation_memory_budget",
+            torch._functorch.config.activation_memory_budget,
+        )
+        with _deterministic_drop_path():
+            for name, overrides in settings.items():
+                torch._dynamo.reset()
+                # The budget is process-wide: reset it for the settings without one.
+                torch._functorch.config.activation_memory_budget = 1.0
+                torch.manual_seed(0)
+                method = _build_method(config, overrides).to(DEVICE)
+                views = _make_batch(batch_size, shapes, seed=0)
+                # The first step compiles; measure the second.
+                for step in range(2):
+                    torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats()
+                    _train_step(method, views, step, torch.float32, torch.bfloat16)
+                    torch.cuda.synchronize()
+                peaks[name] = torch.cuda.max_memory_allocated() / 2**30
+                del method
+                torch.cuda.empty_cache()
+    print(f"\npeak memory of a training step, batch {batch_size}, ibotpp={IBOTPP}:")
+    for name, peak in peaks.items():
+        print(f"  {name:<30} {peak:8.2f} GiB")
+    assert peaks["chunk"] < peaks["unchunked"]

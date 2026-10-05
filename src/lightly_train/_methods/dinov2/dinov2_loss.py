@@ -17,15 +17,17 @@
 #   - Add type hints to the functions
 #   - Remove dead code
 #   - Add TODO for investigating the casting of self.center in IBOTPatchLoss
+#   - Add ibot_chunk_loss and chunked_ibot_loss (iBOT loss from bottleneck features, in token chunks)
 
 from __future__ import annotations
 
 import os
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch import Tensor, nn
 
 XFORMERS_ENABLED = os.environ.get("XFORMERS_DISABLED") is None
@@ -295,3 +297,129 @@ class IBOTPatchLoss(nn.Module):
             )
 
             self.updated = True
+
+
+def ibot_chunk_loss(
+    student_bottleneck: Tensor,
+    teacher_bottleneck: Tensor,
+    student_weight: Tensor,
+    teacher_weight: Tensor,
+    center: Tensor,
+    teacher_temp: float,
+    student_temp: float,
+    token_weights: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """The iBOT loss of a chunk of tokens, from the heads' bottleneck features.
+
+    Computes what the unchunked path computes with the heads' last layers,
+    IBOTPatchLoss.softmax_center_teacher and IBOTPatchLoss.forward_masked (with the
+    non-xFormers lossfunc), with the same operations in the same order.
+
+    Args:
+        student_bottleneck: [C, d] student bottleneck features of the chunk's tokens.
+        teacher_bottleneck: [C, d] teacher bottleneck features of the same tokens.
+        student_weight: [K, d] weight of the student's iBOT last layer.
+        teacher_weight: [K, d] weight of the teacher's iBOT last layer.
+        center: [1, 1, K] iBOT center (softmax centering).
+        token_weights: [C] loss weight of every token.
+
+    Returns:
+        (weighted sum of the per-token cross-entropies, not yet negated or divided by
+        the number of crops, [K] sum of the teacher logits over the chunk's tokens
+        for the center update).
+    """
+    with torch.no_grad():
+        teacher_logits = F.linear(teacher_bottleneck, teacher_weight)  # [C, K]
+        teacher_probs = F.softmax(
+            (teacher_logits - center.reshape(1, -1)) / teacher_temp, dim=-1
+        )  # [C, K]
+        teacher_logits_sum = teacher_logits.sum(
+            dim=0, dtype=torch.promote_types(teacher_logits.dtype, torch.float32)
+        )  # [K]
+    student_logits = F.linear(student_bottleneck, student_weight)  # [C, K]
+    loss = torch.sum(
+        teacher_probs * F.log_softmax(student_logits / student_temp, dim=-1), dim=-1
+    )  # [C]
+    return torch.sum(loss * token_weights), teacher_logits_sum
+
+
+def chunked_ibot_loss(
+    student_bottleneck: Tensor,
+    teacher_bottleneck: Tensor,
+    student_weight: Tensor,
+    teacher_weight: Tensor,
+    center: Tensor,
+    teacher_temp: float,
+    student_temp: float,
+    token_weights: Tensor,
+    n_crops: int,
+    chunk_size: int | None,
+    checkpoint: bool,
+    chunk_fn: Callable[..., tuple[Tensor, Tensor]] = ibot_chunk_loss,
+) -> tuple[Tensor, Tensor | None]:
+    """The iBOT loss over T tokens, computed in chunks of chunk_size tokens.
+
+    Equals IBOTPatchLoss.forward_masked on the full [T, K] teacher probabilities and
+    student logits, but only one chunk's [chunk_size, K] tensors exist at a time when
+    checkpoint is True: every chunk then runs under activation checkpointing, so only
+    its bottleneck inputs are kept for the backward pass and its logits, teacher
+    probabilities and log-softmax are recomputed there.
+
+    Args:
+        student_bottleneck: [T, d], see ibot_chunk_loss.
+        teacher_bottleneck: [T, d].
+        student_weight: [K, d].
+        teacher_weight: [K, d].
+        center: [1, 1, K].
+        token_weights: [T].
+        n_crops: Number of crops the loss is averaged over.
+        chunk_size: Tokens per chunk. None computes all tokens in one chunk.
+        checkpoint: Whether to run every chunk under activation checkpointing.
+        chunk_fn: ibot_chunk_loss, or a compiled version of it.
+
+    Returns:
+        (loss, [1, 1, K] mean teacher logits for IBOTPatchLoss.update_center, or None
+        if there are no tokens).
+    """
+    n_tokens = student_bottleneck.shape[0]
+    if chunk_size is None:
+        chunk_size = max(n_tokens, 1)
+    device_type = teacher_weight.device.type
+    if torch.is_autocast_enabled(device_type):
+        # F.linear would cast the [K, d] teacher weight to the autocast dtype in every chunk, and again when a
+        # chunk is recomputed (it is no leaf, so autocast does not cache the cast). It has no gradient: cast it
+        # once, the same rounding. The student weight is still cast per chunk, so that the per-chunk gradients
+        # are summed in its own dtype (one bf16 weight would sum them in bf16).
+        teacher_weight = teacher_weight.to(torch.get_autocast_dtype(device_type))
+    loss_sum: Tensor | None = None
+    teacher_logits_sum: Tensor | None = None
+    # One (empty) chunk without tokens, so that the loss is still part of the graph.
+    for start in range(0, max(n_tokens, 1), chunk_size):
+        end = start + chunk_size
+        args = (
+            student_bottleneck[start:end],
+            teacher_bottleneck[start:end],
+            student_weight,
+            teacher_weight,
+            center,
+            teacher_temp,
+            student_temp,
+            token_weights[start:end],
+        )
+        if checkpoint:
+            # The chunk draws no random numbers: no need to stash and restore the RNG states.
+            chunk_loss, chunk_logits_sum = torch.utils.checkpoint.checkpoint(
+                chunk_fn, *args, use_reentrant=False, preserve_rng_state=False
+            )
+        else:
+            chunk_loss, chunk_logits_sum = chunk_fn(*args)
+        if loss_sum is None or teacher_logits_sum is None:
+            loss_sum, teacher_logits_sum = chunk_loss, chunk_logits_sum
+        else:
+            loss_sum = loss_sum + chunk_loss
+            teacher_logits_sum = teacher_logits_sum + chunk_logits_sum
+    assert loss_sum is not None and teacher_logits_sum is not None
+    loss = -loss_sum / n_crops
+    if n_tokens == 0:
+        return loss, None
+    return loss, (teacher_logits_sum / n_tokens).view(1, 1, -1)

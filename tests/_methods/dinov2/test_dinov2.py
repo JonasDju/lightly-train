@@ -7,6 +7,7 @@
 #
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import random
@@ -16,6 +17,7 @@ from typing import Any, Literal
 import pytest
 import torch
 import torch._dynamo
+from pydantic import ValidationError
 from pytest_mock import MockerFixture
 from torch import Size
 from torch._dynamo.utils import counters
@@ -41,6 +43,7 @@ from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._optim.optimizer_args import OptimizerArgs
 from lightly_train._optim.optimizer_type import OptimizerType
 from lightly_train._scaling import IMAGENET_SIZE, ScalingInfo
+from lightly_train._torch_helpers import update_momentum
 from lightly_train.types import Batch
 
 from ...helpers import dummy_dinov2_vit_model
@@ -618,6 +621,315 @@ class TestDINOv2CompileBlocks:
         # rates) would pass Dynamo's recompile limit after 8 and silently run the rest eagerly.
         assert counters["stats"]["unique_graphs"] == 4
         assert not counters["graph_break"]
+
+
+def _heads(dinov2: DINOv2) -> list[torch.nn.Module]:
+    """The distinct projection heads (the iBOT heads are the DINO heads unless
+    ibot_separate_head)."""
+    heads = {
+        id(head): head
+        for heads in (dinov2.teacher_head, dinov2.student_head)
+        for head in (heads.dino_head, heads.ibot_head)
+    }
+    return list(heads.values())
+
+
+class TestDINOv2CompileHeads:
+    """compile_heads on the CPU, with Dynamo's "eager" backend: what is traced and how often.
+
+    Inductor's numerics are checked on a GPU by test_dinov2_compile_cuda.py.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _dynamo(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        # DINOv2.__init__ sets these globally; restore them afterwards.
+        monkeypatch.setattr(
+            torch._dynamo.config, "optimize_ddp", torch._dynamo.config.optimize_ddp
+        )
+        monkeypatch.setattr(
+            torch._functorch.config,
+            "activation_memory_budget",
+            torch._functorch.config.activation_memory_budget,
+        )
+        # Heads or the loss falling back to eager after too many recompiles must fail, not pass.
+        monkeypatch.setattr(torch._dynamo.config, "fail_on_recompile_limit_hit", True)
+        # Trace with Dynamo but run the captured graphs as they are, without Inductor.
+        module_compile = torch.nn.Module.compile
+        monkeypatch.setattr(
+            torch.nn.Module,
+            "compile",
+            lambda self, *args, **kwargs: module_compile(self, backend="eager"),
+        )
+        monkeypatch.setattr(torch, "compile", partial(torch.compile, backend="eager"))
+        torch._dynamo.reset()
+        counters.clear()
+        yield
+        torch._dynamo.reset()
+
+    @pytest.mark.parametrize("ibot_separate_head", [False, True])
+    def test_compiles_heads(
+        self, mocker: MockerFixture, ibot_separate_head: bool
+    ) -> None:
+        eager = _chunk_test_method(mocker, ibot_separate_head=ibot_separate_head)
+        assert torch._dynamo.config.optimize_ddp
+        compiled = _chunk_test_method(
+            mocker, ibot_separate_head=ibot_separate_head, compile_heads=True
+        )
+        assert not torch._dynamo.config.optimize_ddp
+        assert len(_heads(compiled)) == (4 if ibot_separate_head else 2)
+        assert all(head._compiled_call_impl is None for head in _heads(eager))
+        assert all(head._compiled_call_impl is not None for head in _heads(compiled))
+        assert compiled._ibot_chunk_fn is not dinov2_module.ibot_chunk_loss
+        assert eager._ibot_chunk_fn is dinov2_module.ibot_chunk_loss
+        # Checkpoints and the exported model are unaffected.
+        assert compiled.state_dict().keys() == eager.state_dict().keys()
+
+    @pytest.mark.parametrize(
+        "kwargs, n_graphs",
+        [
+            # The head forward (shared by all heads): teacher and student (grad mode) x DINO and iBOT
+            # (bottleneck_only), dynamic shapes from the second token count on, plus the teacher's DINO head at
+            # its second batch size: 5. The iBOT loss: one static graph, then one with dynamic shapes and a
+            # dynamic teacher temperature: 2.
+            ({}, 7),
+            # 48 divides neither token count of plain iBOT, but its first chunk already differs from the second
+            # token count. With ibotpp="all" (256 or 192 tokens) the partial last chunk adds one: see below.
+            ({"ibot_loss_chunk_size": 48}, 7),
+            # The blocks' 4 graphs of TestDINOv2CompileBlocks plus the teacher's at the third step.
+            ({"compile_blocks": True}, 12),
+            ({"ibot_loss_chunk_size": 48, "compile_blocks": True}, 12),
+        ],
+    )
+    @pytest.mark.parametrize("ibotpp", [None, "all"])
+    def test_training_steps(
+        self,
+        mocker: MockerFixture,
+        kwargs: dict[str, Any],
+        n_graphs: int,
+        ibotpp: Literal["all"] | None,
+    ) -> None:
+        # compile_heads always uses the bottleneck-based iBOT loss: compare with the unchunked eager one.
+        eager = _chunk_test_method(mocker, ibotpp=ibotpp)
+        compiled = _chunk_test_method(
+            mocker, ibotpp=ibotpp, compile_heads=True, **kwargs
+        )
+        compiled.load_state_dict(eager.state_dict())
+        expected = _chunk_test_steps(eager, torch.float32, n_local_crops=2)
+        actual = _chunk_test_steps(compiled, torch.float32, n_local_crops=2)
+        for step, (exp, act) in enumerate(zip(expected, actual)):
+            assert act.keys() == exp.keys()
+            for name in exp:
+                torch.testing.assert_close(
+                    act[name], exp[name], msg=f"step {step}: {name}"
+                )
+        if ibotpp == "all" and "ibot_loss_chunk_size" in kwargs:
+            # The first chunks (48 tokens) and the partial last one have different sizes: the loss compiles a
+            # static graph for the first, a dynamic one for the last and a dynamic one for the changed teacher
+            # temperature.
+            n_graphs += 1
+        assert counters["stats"]["unique_graphs"] == n_graphs
+        assert not counters["graph_break"]
+        # Steady state: further steps (new teacher temperatures, the same shapes) compile nothing new.
+        _chunk_test_steps(compiled, torch.float32, n_local_crops=2, first_step=3)
+        assert counters["stats"]["unique_graphs"] == n_graphs
+
+    def test_activation_memory_budget(self, mocker: MockerFixture) -> None:
+        assert torch._functorch.config.activation_memory_budget == 1.0
+        _chunk_test_method(mocker, compile_heads=True, activation_memory_budget=0.5)
+        assert torch._functorch.config.activation_memory_budget == 0.5
+
+
+def _chunk_test_method(mocker: MockerFixture, **kwargs: Any) -> DINOv2:
+    """A small DINOv2 on a non-cubic (2, 4, 4) patch grid, 8 global crops of 32 tokens.
+
+    output_dim (200) differs from every other size, so the [*, output_dim] tensors of
+    the losses can be told apart.
+    """
+    torch.manual_seed(0)
+    emb_model = EmbeddingModel(
+        wrapped_model=dummy_dinov2_vit_model(patch_size=(4, 2, 2), img_size=(16, 8, 4))
+    )
+    args = DINOv2Args(output_dim=200, hidden_dim=32, dino_bottleneck_dim=16, **kwargs)
+    return setup_dinov2_helper(args, mocker, emb_model, batch_size=4)
+
+
+def _chunk_test_steps(
+    method: DINOv2, dtype: torch.dtype, n_local_crops: int, first_step: int = 0
+) -> list[dict[str, torch.Tensor]]:
+    """Three training steps (batch sizes 4, 3, 4; global_step 0, 1, 2, so the teacher
+    temperature changes), each followed by an SGD step of the student and the EMA
+    update of the teacher. Records every loss term, gradient, both centers (after
+    their pending update) and every parameter after the update."""
+    records = []
+    for step, batch_size in enumerate((4, 3, 4), start=first_step):
+        method.trainer.global_step = step  # type: ignore[misc]
+        g = torch.Generator().manual_seed(100 + step)
+        views = [
+            torch.rand(batch_size, 1, 4, 16, 8, generator=g, dtype=dtype)
+            for _ in range(2)
+        ] + [
+            torch.rand(batch_size, 1, 2, 8, 4, generator=g, dtype=dtype)
+            for _ in range(n_local_crops)
+        ]
+        random.seed(step)  # iBOT masks
+        torch.manual_seed(step)  # drop path
+        method.zero_grad(set_to_none=True)
+        out = method.training_step_impl(
+            {"views": views, "filename": [""] * batch_size}, step
+        )
+        out.loss.backward()  # type: ignore[no-untyped-call]
+        assert out.log_dict is not None
+        record = {"loss": out.loss.detach()}
+        record |= {name: value.detach() for name, value in out.log_dict.items()}
+        # The centers after this step's pending update, read from copies: the method itself must apply the
+        # update at the next step.
+        for name in ("dino_loss", "ibot_loss"):
+            loss_module = copy.deepcopy(getattr(method, name))
+            loss_module.apply_center_update()
+            record[f"center/{name}"] = loss_module.center
+        for name, param in method.named_parameters():
+            if param.grad is not None:
+                record[f"grad/{name}"] = param.grad.clone()
+        with torch.no_grad():
+            for param in method.parameters():
+                if param.grad is not None:
+                    param.sub_(0.1 * param.grad)
+        update_momentum(
+            method.student_embedding_model, method.teacher_embedding_model, m=0.9
+        )
+        update_momentum(method.student_head, method.teacher_head, m=0.9)
+        for name, param in method.named_parameters():
+            record[f"param/{name}"] = param.detach().clone()
+        records.append(record)
+    return records
+
+
+class TestIBOTLossChunking:
+    """ibot_loss_chunk_size: the chunked iBOT loss against the unchunked one, over
+    whole training steps."""
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    @pytest.mark.parametrize("n_local_crops", [0, 2])
+    @pytest.mark.parametrize("ibot_separate_head", [False, True])
+    @pytest.mark.parametrize("chunk_size", [7, 64, 1_000_000])
+    @pytest.mark.parametrize("ibotpp", [None, "all", "masked"])
+    def test_training_steps__equal_to_unchunked(
+        self,
+        mocker: MockerFixture,
+        ibotpp: Literal["all", "masked"] | None,
+        chunk_size: int,
+        ibot_separate_head: bool,
+        n_local_crops: int,
+        dtype: torch.dtype,
+    ) -> None:
+        kwargs: dict[str, Any] = dict(
+            ibotpp=ibotpp, ibot_separate_head=ibot_separate_head
+        )
+        unchunked = _chunk_test_method(mocker, **kwargs).to(dtype)
+        chunked = _chunk_test_method(
+            mocker, ibot_loss_chunk_size=chunk_size, **kwargs
+        ).to(dtype)
+        chunked.load_state_dict(unchunked.state_dict())
+        expected = _chunk_test_steps(unchunked, dtype, n_local_crops)
+        actual = _chunk_test_steps(chunked, dtype, n_local_crops)
+
+        for step, (exp, act) in enumerate(zip(expected, actual)):
+            assert act.keys() == exp.keys()
+            for name in exp:
+                msg = f"step {step}: {name}"
+                if chunk_size >= 256 and not name.startswith("center/"):
+                    # A single chunk runs the unchunked operations in the same order.
+                    assert torch.equal(act[name], exp[name]), msg
+                elif dtype == torch.float64:
+                    torch.testing.assert_close(
+                        act[name], exp[name], rtol=1e-10, atol=1e-12, msg=msg
+                    )
+                else:
+                    torch.testing.assert_close(act[name], exp[name], msg=msg)
+
+    def test_training_step__keeps_no_full_size_tensors(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Nothing [> chunk_size, output_dim] is kept for the backward pass."""
+
+        def saved_logits_rows(method: DINOv2) -> list[int]:
+            rows: list[int] = []
+
+            def pack(t: torch.Tensor) -> torch.Tensor:
+                if t.dim() == 2 and t.shape[1] == 200:
+                    rows.append(t.shape[0])
+                return t
+
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+                _chunk_test_steps(method, torch.float32, n_local_crops=2)
+            return rows
+
+        unchunked = saved_logits_rows(_chunk_test_method(mocker, ibotpp="all"))
+        # All 32 tokens of the 8 (or 6) global crops.
+        assert max(unchunked) == 256
+        chunked = saved_logits_rows(
+            _chunk_test_method(mocker, ibotpp="all", ibot_loss_chunk_size=16)
+        )
+        # The DINO loss keeps its [crops, output_dim] tensors (8 rows at most).
+        assert max(chunked) <= 16
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"compile_heads": True},
+            {"ibot_loss_chunk_size": 8},
+        ],
+    )
+    def test_sinkhorn_knopp__raises(self, kwargs: dict[str, Any]) -> None:
+        # Rejected by the args themselves, i.e. when the config is parsed.
+        with pytest.raises(ValidationError, match="need center_method='softmax'"):
+            DINOv2Args(center_method="sinkhorn_knopp", **kwargs)
+
+    def test_activation_memory_budget_without_compile__raises(self) -> None:
+        with pytest.raises(ValidationError, match="only applies to compiled regions"):
+            DINOv2Args(activation_memory_budget=0.5)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"compile_heads": True},
+            {"compile_blocks": True, "activation_memory_budget": 0.5},
+            {"ibot_loss_chunk_size": 8, "compile_heads": True},
+        ],
+    )
+    def test_args__valid(self, kwargs: dict[str, Any]) -> None:
+        DINOv2Args(**kwargs)
+
+    def test_no_ibot_tokens__center_update_still_called(
+        self, mocker: MockerFixture
+    ) -> None:
+        # Without masked crops, plain iBOT has no tokens. update_center must still run: it all-reduces across
+        # ranks under DDP, so a rank skipping it would desynchronize the collectives. It contributes the
+        # current center, i.e. leaves it unchanged.
+        method = _chunk_test_method(
+            mocker, mask_probability=0.0, ibot_loss_chunk_size=8
+        )
+        method.ibot_loss.center = torch.randn(1, 1, 200)
+        center = method.ibot_loss.center.clone()
+        spy = mocker.spy(method.ibot_loss, "update_center")
+        records = _chunk_test_steps(method, torch.float32, n_local_crops=0)
+        assert spy.call_count == 3
+        for record in records:
+            assert record["train_loss/ibot_loss"].item() == 0.0
+            assert torch.isfinite(record["loss"])
+            torch.testing.assert_close(record["center/ibot_loss"], center)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"ibot_loss_chunk_size": 0},
+            {"activation_memory_budget": 0.0},
+            {"activation_memory_budget": 1.5},
+        ],
+    )
+    def test_args__out_of_range(self, kwargs: dict[str, Any]) -> None:
+        with pytest.raises(ValidationError):
+            DINOv2Args(**kwargs)
 
 
 class TestDINOv2Args:

@@ -62,6 +62,9 @@ method:
   weight_decay_end: 0.4
   gradient_clip_val: 3.0
   compile_blocks: true
+  compile_heads: false  # compile the projection heads and the iBOT loss, see DINOv2Args.compile_heads
+  ibot_loss_chunk_size: null  # e.g. 4096: iBOT loss in token chunks with activation checkpointing (ibotpp: all)
+  activation_memory_budget: null  # e.g. 0.5, for the compiled regions; needs compile_blocks or compile_heads
 
 transform:
   image_size:

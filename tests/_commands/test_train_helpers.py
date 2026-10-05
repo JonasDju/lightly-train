@@ -21,6 +21,7 @@ from torch.testing import assert_close
 from torch.utils.data import Dataset
 from torchvision.datasets import FakeData
 
+from lightly_train._activation_checkpointing import ActivationCheckpointingArgs
 from lightly_train._commands import train_helpers
 from lightly_train._data import mi_dataset
 from lightly_train._data.mi_dataset import MIDataset
@@ -787,6 +788,60 @@ def test_validate_tokenization_only_steps__raises_without_pretrained_source() ->
             checkpoint=None,
             resume_interrupted=False,
         )
+
+
+@pytest.mark.parametrize(
+    "method_args, checkpointing, warns",
+    [
+        ({"compile_blocks": True, "activation_memory_budget": 0.5}, True, True),
+        ({"compile_blocks": True, "activation_memory_budget": 0.5}, False, False),
+        # Only the heads are compiled, and they are never checkpointed: the budget works.
+        ({"compile_heads": True, "activation_memory_budget": 0.5}, True, False),
+        ({"compile_blocks": True}, True, False),
+    ],
+)
+def test_warn_if_activation_memory_budget_with_checkpointing(
+    caplog: pytest.LogCaptureFixture,
+    method_args: dict[str, Any],
+    checkpointing: bool,
+    warns: bool,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        train_helpers.warn_if_activation_memory_budget_with_checkpointing(
+            method_args=DINOv2Args(**method_args),
+            activation_checkpoint_args=ActivationCheckpointingArgs(
+                enabled=checkpointing
+            ),
+        )
+    assert ("activation_memory_budget=0.5 is set together" in caplog.text) == warns
+
+
+def test_validate_method_args() -> None:
+    train_helpers.validate_method_args(method="dinov2", method_args=None)
+    train_helpers.validate_method_args(
+        method="dinov2", method_args={"compile_heads": True}
+    )
+    with pytest.raises(ConfigValidationError, match="need center_method='softmax'"):
+        train_helpers.validate_method_args(
+            method="dinov2",
+            method_args={"compile_heads": True, "center_method": "sinkhorn_knopp"},
+        )
+    with pytest.raises(ConfigValidationError, match="ibot_loss_chunk_sizes"):
+        train_helpers.validate_method_args(
+            method="dinov2", method_args={"ibot_loss_chunk_sizes": 8}
+        )
+
+
+def test_warn_if_activation_memory_budget_with_checkpointing__other_method(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Methods whose args have no activation_memory_budget are ignored.
+    with caplog.at_level(logging.WARNING):
+        train_helpers.warn_if_activation_memory_budget_with_checkpointing(
+            method_args=DistillationV3Args(),
+            activation_checkpoint_args=ActivationCheckpointingArgs(enabled=True),
+        )
+    assert "activation_memory_budget" not in caplog.text
 
 
 def test_validate_tokenization_only_steps__default_zero_is_always_ok() -> None:

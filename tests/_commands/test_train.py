@@ -32,6 +32,7 @@ from lightly_train._methods.dinov2.dinov2 import DINOv2AdamWViTArgs, DINOv2Args
 from lightly_train._methods.dinov2.utils import is_tokenization_param
 from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from lightly_train._scaling import ScalingInfo
+from lightly_train.errors import ConfigValidationError
 
 from .. import helpers
 from ..helpers import DummyCustomModel
@@ -72,6 +73,23 @@ def _pretrain_kwargs(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
     )
     pretrain_kwargs.update(kwargs)
     return pretrain_kwargs
+
+
+def test_pretrain__invalid_method_args_fail_before_loading_data(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    dataset = mocker.patch.object(train, "MIDataset")
+    with pytest.raises(ConfigValidationError, match="need center_method='softmax'"):
+        train.pretrain(
+            **_pretrain_kwargs(
+                tmp_path,
+                method_args={
+                    "center_method": "sinkhorn_knopp",
+                    "ibot_loss_chunk_size": 8,
+                },
+            )
+        )
+    dataset.assert_not_called()
 
 
 def test_track_training_started_event(mocker: MockerFixture) -> None:

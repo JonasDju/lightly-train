@@ -352,6 +352,10 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
     _system.log_system_information(system_information=system_information)
 
     pytorch_lightning.seed_everything(seed=config.seed, workers=True)
+    # Before any data is loaded: an invalid method config should fail within seconds.
+    train_helpers.validate_method_args(
+        method=config.method, method_args=config.method_args
+    )
     config.transform_args = train_helpers.get_transform_args(
         method=config.method, transform_args=config.transform_args
     )
@@ -521,6 +525,9 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             model=config.model,
             checkpoint=config.checkpoint,
             resume_interrupted=config.resume_interrupted,
+        )
+        train_helpers.warn_if_activation_memory_budget_with_checkpointing(
+            method_args=config.method_args, activation_checkpoint_args=ac_args
         )
         method_instance = train_helpers.get_method(
             method_cls=method_cls,

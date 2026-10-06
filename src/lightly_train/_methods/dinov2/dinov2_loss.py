@@ -125,7 +125,10 @@ class DINOLoss(nn.Module):
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
 
-        total_loss: Tensor = torch.tensor(0.0, device=student_output_list[0].device)
+        # torch.zeros, not torch.tensor(0.0, device=...): that copies from pageable host memory, which waits for all
+        # queued GPU work and so stops the CPU from running ahead of the GPU. float32 as before, not the (possibly
+        # bf16) dtype of the student output.
+        total_loss: Tensor = torch.zeros((), device=student_output_list[0].device)
         for s in student_output_list:
             lsm = F.log_softmax(s / self.student_temp, dim=-1)
             for t in teacher_out_softmaxed_centered_list:

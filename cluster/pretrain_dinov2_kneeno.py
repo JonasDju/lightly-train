@@ -47,6 +47,12 @@ import os
 # Workers inherit the environment, under fork and spawn alike.
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
+# Must be set before torch is imported. torch otherwise runs CPU ops in the main process on one OpenMP thread per
+# core, on cores the DataLoader workers keep busy, so every parallel region waits for a descheduled thread. The
+# training loop has no heavy CPU tensor ops, and the workers already run torch single-threaded. setdefault,
+# so an explicit setting in the job environment wins.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 # Expandable segments let freed memory be reused for any size. setdefault, so an explicit setting in the job
 # environment wins.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")

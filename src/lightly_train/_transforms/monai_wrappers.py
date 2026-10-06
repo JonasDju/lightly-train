@@ -52,6 +52,15 @@ through ``RandGaussianSmooth``. ``ToTensor`` (the last step in
 ``view_transform.py``) already strips ``MetaTensor`` down to a plain tensor, so
 the tag never reaches the model.
 
+The same mechanism carries the optional tissue bounding box
+(``transform.crop_foreground``): ``TagForegroundBox`` runs once per sample in
+``DINOTransform.__call__``, before any view, and tags the raw volume with
+``FOREGROUND_BOX_META_KEY``. ``AnisotropyTrackingRandomResizedCrop3D`` reads it to
+place its crop on the tissue (``RandomResizedCrop3D.get_params``) and does not pass it
+on, since it is in pre-crop coordinates. The volume itself is never cropped to the box
+-- resizing a box with the tissue's proportions to the fixed view size would stretch
+the anatomy -- so the pre-crop shape above stays the full volume's.
+
 This voxel-count ratio is a heuristic approximation, not true physical spacing.
 When a real per-case anisotropy signal becomes available (e.g. loaded from a
 separate dataset-metadata file), only what populates ``ORIG_SHAPE_META_KEY``
@@ -68,7 +77,13 @@ import numpy as np
 import torch
 from monai.data import MetaTensor, get_track_meta
 from monai.networks.layers import gaussian_1d
-from monai.transforms import RandGaussianSharpen, RandGaussianSmooth, RandHistogramShift
+from monai.transforms import (
+    CropForeground,
+    RandGaussianSharpen,
+    RandGaussianSmooth,
+    RandHistogramShift,
+    Transform,
+)
 from monai.utils import convert_to_dst_type, convert_to_tensor
 from numpy.typing import NDArray
 from scipy import ndimage
@@ -77,6 +92,8 @@ from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 
 __all__ = [
     "ORIG_SHAPE_META_KEY",
+    "FOREGROUND_BOX_META_KEY",
+    "TagForegroundBox",
     "AnisotropyTrackingRandomResizedCrop3D",
     "AnisotropyAwareRandGaussianSmooth",
     "AnisotropyAwareRandGaussianSharpen",
@@ -85,6 +102,8 @@ __all__ = [
 
 # (H, W, D) of the volume before RandomResizedCrop3D's crop+resize.
 ORIG_SHAPE_META_KEY = "lt_orig_spatial_shape"
+# ((h0, w0, d0), (h1, w1, d1)) bounding box of the tissue, exclusive end.
+FOREGROUND_BOX_META_KEY = "lt_foreground_box"
 
 
 def _get_anisotropy_shape(img: Any) -> tuple[int, int, int]:
@@ -131,17 +150,62 @@ class AlphaRandHistogramShift(RandHistogramShift):
         return super().interp(x, xp, fp)
 
 
+class _AboveThreshold:
+    """``CropForeground``'s ``select_fn``: a class rather than a lambda, which does not
+    pickle -- and DataLoader workers pickle the transform under spawn/forkserver."""
+
+    def __init__(self, threshold: float) -> None:
+        self.threshold = threshold
+
+    def __call__(self, x: Any) -> Any:
+        return x > self.threshold
+
+
+class TagForegroundBox(Transform):
+    """Wraps a ``(C, H, W, D)`` volume in a ``MetaTensor`` tagged with its tissue's
+    bounding box: the voxels above ``threshold`` (raw intensity).
+
+    Only computes the box, with MONAI's ``CropForeground.compute_bounding_box``, and
+    leaves the volume as it is. Without any voxel above the threshold there is no tag,
+    so the crop falls back to uniform placement.
+    """
+
+    def __init__(self, threshold: float) -> None:
+        self.threshold = threshold
+        self._crop_foreground = CropForeground(select_fn=_AboveThreshold(threshold))
+
+    def __call__(self, data: Any) -> MetaTensor:
+        start, end = self._crop_foreground.compute_bounding_box(data)
+        out = (
+            data if isinstance(data, MetaTensor) else MetaTensor(torch.as_tensor(data))
+        )
+        if all(e > s for s, e in zip(start, end)):
+            out.meta[FOREGROUND_BOX_META_KEY] = (
+                tuple(int(s) for s in start),
+                tuple(int(e) for e in end),
+            )
+        return out
+
+
 class AnisotropyTrackingRandomResizedCrop3D(RandomResizedCrop3D):
-    """``RandomResizedCrop3D`` that tags its output with the pre-crop shape.
+    """``RandomResizedCrop3D`` that tags its output with the pre-crop shape, and places
+    its crop on the tissue if the input carries ``TagForegroundBox``'s box.
 
     Kept separate from ``RandomResizedCrop3D`` itself (which is general-purpose,
     also used to replay a crop onto a label volume, and separately tested) so
-    this anisotropy-tracking behavior stays scoped to this file's pipeline.
+    this metadata handling stays scoped to this file's pipeline.
     """
 
-    def __call__(self, data: NDArray) -> MetaTensor:
+    def __call__(self, data: NDArray | MetaTensor) -> MetaTensor:
+        foreground_box = None
+        if isinstance(data, MetaTensor):
+            foreground_box = data.meta.get(FOREGROUND_BOX_META_KEY)
+            data = data.as_tensor().numpy()  # no copy; the resampler works on numpy
         orig_shape = tuple(int(s) for s in data.shape[-3:])
-        out = super().__call__(data)
+        out = self.apply(
+            data, self.get_params(data.shape, foreground_box=foreground_box)
+        )
+        # The box is not passed on: it is in pre-crop coordinates.
         return MetaTensor(out, meta={ORIG_SHAPE_META_KEY: orig_shape})
 
 

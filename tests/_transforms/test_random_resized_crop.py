@@ -22,6 +22,7 @@ from lightly_train._transforms.random_resized_crop import (
     RandomResizedCrop3D,
     _nearest_slice_weights,
     _resample,
+    _start_range,
     parse_interpolation,
 )
 
@@ -272,3 +273,72 @@ def test_resample__area_integer_factors() -> None:
     # Integer upscaling duplicates voxels.
     expected = volume.repeat(2, axis=1).repeat(2, axis=2).repeat(2, axis=3)
     np.testing.assert_allclose(_resample(volume, (16, 24, 8), "area"), expected)
+
+
+@pytest.mark.parametrize(
+    "crop, size, box, expected",
+    [
+        (4, 10, None, (0, 6)),  # no box: anywhere
+        (3, 10, (2, 8), (2, 5)),  # fits in the box: inside it
+        (6, 10, (2, 8), (2, 2)),  # exactly the box
+        (8, 10, (2, 8), (0, 2)),  # larger than the box: contains it
+        (8, 10, (0, 3), (0, 0)),  # box at the start, crop must not leave the axis
+        (8, 10, (7, 10), (2, 2)),  # box at the end
+        (10, 10, (4, 5), (0, 0)),  # crop spans the axis
+        (4, 10, (0, 10), (0, 6)),  # box spans the axis: same as no box
+        (4, 10, (5, 5), (0, 6)),  # empty box: same as no box
+        (4, 10, (-3, 20), (0, 6)),  # clipped to the axis
+    ],
+)
+def test_start_range(
+    crop: int, size: int, box: tuple[int, int] | None, expected: tuple[int, int]
+) -> None:
+    assert _start_range(crop, size, box) == expected
+
+
+# Volume (H, W, D) and boxes with exclusive end, (start, end).
+_SHAPE = (40, 36, 12)
+_BOXES = [
+    ((10, 4, 2), (30, 30, 10)),  # centred
+    ((0, 0, 0), (12, 9, 3)),  # in a corner, small
+    ((5, 20, 0), (40, 36, 12)),  # touching the far edges
+    ((17, 17, 5), (18, 18, 6)),  # a single voxel
+]
+
+
+@pytest.mark.parametrize("scale", [(0.05, 0.32), (0.32, 1.0), (1.0, 1.0)])
+@pytest.mark.parametrize("box", _BOXES)
+def test_get_params__foreground_box_places_without_resizing(
+    scale: tuple[float, float], box: tuple[tuple[int, ...], tuple[int, ...]]
+) -> None:
+    for seed in range(300):
+        # Freshly seeded per crop: the sizes are drawn before the position, but numpy's
+        # randint consumes a range-dependent amount of randomness, so the streams of the
+        # two crops part after the first position. ratio up to 3 drives some draws into
+        # the shrink fallback, which must honour the box too.
+        kwargs: dict[str, Any] = dict(size=8, scale=scale, ratio=(1 / 3, 3), seed=seed)
+        params = RandomResizedCrop3D(**kwargs).get_params(_SHAPE, foreground_box=box)
+        plain = RandomResizedCrop3D(**kwargs).get_params(_SHAPE)
+        sizes = (params.height, params.width, params.depth)
+        # Same sizes as uniform placement: the box never stretches a crop.
+        assert sizes == (plain.height, plain.width, plain.depth)
+        starts = (params.h_start, params.w_start, params.d_start)
+        for start, crop, n, b0, b1 in zip(starts, sizes, _SHAPE, *box):
+            assert 0 <= start and start + crop <= n
+            if crop <= b1 - b0:
+                assert b0 <= start and start + crop <= b1  # inside the box
+            else:
+                assert start <= b0 and b1 <= start + crop  # around the box
+
+
+@pytest.mark.parametrize("scale", [(0.05, 0.32), (0.32, 1.0)])
+def test_get_params__whole_volume_box_matches_no_box(
+    scale: tuple[float, float],
+) -> None:
+    """A box spanning the volume draws exactly today's uniformly placed crops."""
+    with_box = RandomResizedCrop3D(size=8, scale=scale, seed=0)
+    without_box = RandomResizedCrop3D(size=8, scale=scale, seed=0)
+    whole = ((0, 0, 0), _SHAPE)
+    for _ in range(100):
+        expected = without_box.get_params(_SHAPE)
+        assert with_box.get_params(_SHAPE, foreground_box=whole) == expected

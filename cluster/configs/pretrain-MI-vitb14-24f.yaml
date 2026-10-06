@@ -80,6 +80,7 @@ transform:
   # resize_upscale_interpolation applies to enlarged axes only; null means resize_interpolation everywhere.
   resize_interpolation: area
   resize_upscale_interpolation: linear
+  crop_foreground: null
   random_rotation: null
   normalize:
     mean:

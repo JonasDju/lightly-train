@@ -26,6 +26,31 @@ InterpolationMode = Literal["area", "linear", "nearest", "cubic"]
 _SPARSE_MAX_DENSITY = 0.25
 
 
+#: ``((h0, w0, d0), (h1, w1, d1))``: a bounding box with exclusive end, as
+#: ``monai.transforms.CropForeground.compute_bounding_box`` returns it.
+ForegroundBox = tuple[Sequence[int], Sequence[int]]
+
+
+def _start_range(crop: int, size: int, box: tuple[int, int] | None) -> tuple[int, int]:
+    """Inclusive range of start indices of a ``crop``-long window on a ``size``-long
+    axis.
+
+    Without a box, anywhere in the axis. With a foreground box ``[b0, b1)``: inside the
+    box if the crop fits there, otherwise anywhere it contains the box. Both stay inside
+    the axis, and the second is never empty since ``b1 - b0 < crop <= size``. An empty
+    box (``b1 <= b0`` after clipping) counts as none.
+    """
+    low, high = 0, size - crop
+    if box is None:
+        return low, high
+    b0, b1 = max(box[0], 0), min(box[1], size)
+    if b1 <= b0:
+        return low, high
+    if crop <= b1 - b0:
+        return b0, b1 - crop
+    return max(low, b1 - crop), min(high, b0)
+
+
 class CropParams3D(NamedTuple):
     """Fully describes a crop, so it can be replayed on other volumes.
 
@@ -235,6 +260,9 @@ class RandomResizedCrop3D(Randomizable, Transform):
         w = W * (s * r_wd**2 / r_hd) ** (1/3)
         d = D * (s / (r_hd * r_wd)) ** (1/3)
 
+    The crop position is uniform, unless ``get_params`` is given a foreground box (see
+    there): then the crop is placed on the tissue, with its size left untouched.
+
     Args:
         size: Output spatial shape ``(H, W, D)``, in the same axis order as the
             volumes themselves. A single int means a cube.
@@ -315,8 +343,19 @@ class RandomResizedCrop3D(Randomizable, Transform):
         d = int(round((target_volume / (aspect_ratio_hd * aspect_ratio_wd)) ** (1.0 / 3.0)))
         return int(round(d * aspect_ratio_hd)), int(round(d * aspect_ratio_wd)), d
 
-    def get_params(self, volume_shape: Sequence[int]) -> CropParams3D:
-        """Sample crop parameters for a volume of shape ``(..., H, W, D)``."""
+    def get_params(
+        self,
+        volume_shape: Sequence[int],
+        foreground_box: ForegroundBox | None = None,
+    ) -> CropParams3D:
+        """Sample crop parameters for a volume of shape ``(..., H, W, D)``.
+
+        ``foreground_box`` is the tissue's ``((h0, w0, d0), (h1, w1, d1))`` bounding box
+        (exclusive end, as ``monai.transforms.CropForeground.compute_bounding_box``
+        returns it). It only moves the crop, never resizes it: the sizes are sampled
+        exactly as without it, so the crop is not stretched any differently. See
+        ``_start_range`` for the placement rule.
+        """
         height, width, depth = (int(s) for s in volume_shape[-3:])
         volume = float(depth) * height * width
         # Aspect ratio of the *input*, used to anchor the sampled ratios.
@@ -330,7 +369,9 @@ class RandomResizedCrop3D(Randomizable, Transform):
             aspect_ratio_wd = math.exp(self.R.uniform(*self.log_ratio)) * current_ratio_wd
             h, w, d = self._sizes_from_ratios(target_volume, aspect_ratio_hd, aspect_ratio_wd)
             if 0 < h <= height and 0 < w <= width and 0 < d <= depth:
-                return self._random_position(h, w, d, height, width, depth)
+                return self._random_position(
+                    h, w, d, height, width, depth, foreground_box
+                )
 
         # Fallback: shrink the last candidate isotropically until it fits, which
         # preserves its aspect ratio (albumentations instead center-crops).
@@ -338,13 +379,31 @@ class RandomResizedCrop3D(Randomizable, Transform):
         h = min(max(int(round(h * shrink)), 1), height)
         w = min(max(int(round(w * shrink)), 1), width)
         d = min(max(int(round(d * shrink)), 1), depth)
-        return self._random_position(h, w, d, height, width, depth)
+        return self._random_position(h, w, d, height, width, depth, foreground_box)
 
-    def _random_position(self, h: int, w: int, d: int, height: int, width: int, depth: int) -> CropParams3D:
+    def _random_position(
+        self,
+        h: int,
+        w: int,
+        d: int,
+        height: int,
+        width: int,
+        depth: int,
+        foreground_box: ForegroundBox | None = None,
+    ) -> CropParams3D:
+        starts = []
+        for axis, (crop, size) in enumerate(((h, height), (w, width), (d, depth))):
+            box = None
+            if foreground_box is not None:
+                box = (int(foreground_box[0][axis]), int(foreground_box[1][axis]))
+            low, high = _start_range(crop, size, box)
+            # One draw per axis either way, so without a box (or with one spanning the
+            # whole volume) the crops are exactly those of plain uniform placement.
+            starts.append(int(self.R.randint(low, high + 1)))
         return CropParams3D(
-            h_start=int(self.R.randint(0, height - h + 1)),
-            w_start=int(self.R.randint(0, width - w + 1)),
-            d_start=int(self.R.randint(0, depth - d + 1)),
+            h_start=starts[0],
+            w_start=starts[1],
+            d_start=starts[2],
             height=h,
             width=w,
             depth=d,

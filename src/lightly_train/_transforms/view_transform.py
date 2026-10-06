@@ -151,6 +151,9 @@ class ViewTransform:
             args.random_resized_crop.scale = RandomResizeArgs(
                 min_scale=1.0, max_scale=1.0
             )
+        # The input is the raw, uncropped volume. It may already wrapped in a MetaTensor
+        # by DINOTransform.__call__ (dino_transform.py), tagged with the tissue's bounding box
+        # (transform.crop_foreground), which this crop reads to place itself on the tissue.
         transform += [
             AnisotropyTrackingRandomResizedCrop3D(
                 size=args.random_resized_crop.size,

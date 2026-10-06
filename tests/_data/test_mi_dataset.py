@@ -39,21 +39,24 @@ class RecordingTransform:
         return [{"image": torch.from_numpy(np.ascontiguousarray(input["image"]))}]
 
 
-def _dinov2_transform() -> MethodTransform:
+def _dinov2_transform(**overrides: Any) -> MethodTransform:
     transform_args = train_helpers.get_transform_args(
-        method="dinov2", transform_args=dict(helpers.MI_DINOV2_TRANSFORM_ARGS)
+        method="dinov2",
+        transform_args={**helpers.MI_DINOV2_TRANSFORM_ARGS, **overrides},
     )
     return train_helpers.get_transform(
         method="dinov2", transform_args_resolved=transform_args
     )
 
 
-def _dinov2_dataset(tmp_path: Path, **kwargs: Any) -> MIDataset:
+def _dinov2_dataset(
+    tmp_path: Path, transform_overrides: dict[str, Any] | None = None, **kwargs: Any
+) -> MIDataset:
     data_root, data_meta = helpers.create_mi_dataset(tmp_path, **kwargs)
     return MIDataset(
         data_root=data_root,
         data_meta=data_meta,
-        transform=_dinov2_transform(),
+        transform=_dinov2_transform(**(transform_overrides or {})),
         series_depth=8,
     )
 
@@ -157,6 +160,21 @@ class TestMIDataset:
         restored = pickle.loads(pickle.dumps(dataset))
         assert len(restored) == len(dataset)
         assert restored[0]["views"][0].shape == (1, 16, 56, 56)
+
+    def test_crop_foreground__spawn_workers(self, tmp_path: Path) -> None:
+        # TagForegroundBox must pickle into spawn/forkserver workers (a lambda as
+        # CropForeground's select_fn would not), which num_workers=0 never checks.
+        dataset = _dinov2_dataset(
+            tmp_path,
+            transform_overrides={"crop_foreground": {"threshold": 10}},
+            n_cases=2,
+        )
+        dataloader = DataLoader(
+            dataset, batch_size=1, num_workers=2, multiprocessing_context="spawn"
+        )
+        batches = list(dataloader)
+        assert len(batches) == len(dataset)
+        assert batches[0]["views"][0].shape == (1, 1, 16, 56, 56)
 
 
 class TestWorkerSeeding:

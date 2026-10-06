@@ -12,8 +12,10 @@ from typing import Literal
 from pydantic import Field
 
 from lightly_train._configs.config import PydanticConfig
+from lightly_train._transforms.monai_wrappers import TagForegroundBox
 from lightly_train._transforms.random_resized_crop import ResizeInterpolation
 from lightly_train._transforms.transform import (
+    CropForegroundArgs,
     GaussianBlurArgs,
     MethodTransform,
     MethodTransformArgs,
@@ -104,6 +106,9 @@ class DINOTransformArgs(MethodTransformArgs):
     )
     resize_interpolation: ResizeInterpolation = "area"
     resize_upscale_interpolation: ResizeInterpolation | None = "linear"
+    # Places every view's crop on the tissue (inside its bounding box where the crop
+    # fits, around it otherwise) without changing the crop sizes. None disables it.
+    crop_foreground: CropForegroundArgs | None = None
 
     # Rotation
     random_rotation: RandomRotationArgs | None = None
@@ -216,7 +221,20 @@ class DINOTransform(MethodTransform):
 
         self.transforms = transforms
 
+        # Once per sample rather than in every view's pipeline: the box is the same for
+        # all views.
+        self.foreground_tag = (
+            TagForegroundBox(threshold=transform_args.crop_foreground.threshold)
+            if transform_args.crop_foreground is not None
+            else None
+        )
+
     def __call__(self, input: TransformInput) -> TransformOutput:
+        if self.foreground_tag is not None:
+            # A MetaTensor carrying the box, which the views' crops read; TransformInput
+            # only names the plain array type.
+            image = self.foreground_tag(input["image"])
+            input = {**input, "image": image}  # type: ignore[typeddict-item]
         return [transform(input) for transform in self.transforms]
 
     @staticmethod

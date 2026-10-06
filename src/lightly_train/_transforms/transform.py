@@ -61,6 +61,14 @@ class RandomResizedCropArgs(PydanticConfig):
     resize_upscale_interpolation: ResizeInterpolation | None = "linear"
 
 
+class CropForegroundArgs(PydanticConfig):
+    # Voxels with a raw intensity (0..255, before normalization) above this are
+    # foreground. Their bounding box only guides where the random resized crops are
+    # placed (see TagForegroundBox in monai_wrappers.py); the volume itself is never
+    # cropped to it, which would stretch the anatomy.
+    threshold: float
+
+
 class RandomFlipArgs(PydanticConfig):
     horizontal_prob: float = 0.5
     vertical_prob: float = 0.0

@@ -8,17 +8,21 @@
 from __future__ import annotations
 
 import math
+import pickle
 
 import numpy as np
 import pytest
+import torch
 from monai.data import MetaTensor
-from monai.transforms import RandRotate
+from monai.transforms import CropForeground, RandRotate
 
 from lightly_train._transforms.monai_wrappers import (
+    FOREGROUND_BOX_META_KEY,
     ORIG_SHAPE_META_KEY,
     AnisotropyAwareRandGaussianSharpen,
     AnisotropyAwareRandGaussianSmooth,
     AnisotropyTrackingRandomResizedCrop3D,
+    TagForegroundBox,
 )
 
 
@@ -177,3 +181,70 @@ class TestAnisotropyAwareRandGaussianSharpen:
         sharpen = _sharpen(sigma1=(1.0, 1.0), sigma2=0.5)
         sharpen(_volume(64, 64, 8))
         assert sharpen.sigma1_z[0] < sharpen._base_sigma1_z[0]
+
+
+def _tissue_volume() -> np.ndarray:
+    """(1, H, W, D) uint8: air at 0..5, a "tissue" block at [5:25, 14:34, 2:10]."""
+    rng = np.random.default_rng(0)
+    volume = rng.integers(0, 6, (1, 40, 36, 12), dtype=np.uint8)
+    volume[:, 5:25, 14:34, 2:10] = 200
+    return volume
+
+
+class TestTagForegroundBox:
+    def test_tags_monai_bounding_box(self) -> None:
+        volume = _tissue_volume()
+        out = TagForegroundBox(threshold=10)(volume)
+        assert isinstance(out, MetaTensor)
+        assert out.meta[FOREGROUND_BOX_META_KEY] == ((5, 14, 2), (25, 34, 10))
+        start, end = CropForeground(select_fn=lambda x: x > 10).compute_bounding_box(
+            torch.from_numpy(volume)
+        )
+        assert out.meta[FOREGROUND_BOX_META_KEY] == (tuple(start), tuple(end))
+        # Only tags: the volume is not cropped or changed.
+        assert np.array_equal(out.numpy(), volume)
+
+    def test_float_threshold(self) -> None:
+        out = TagForegroundBox(threshold=199.5)(_tissue_volume())
+        assert out.meta[FOREGROUND_BOX_META_KEY] == ((5, 14, 2), (25, 34, 10))
+
+    def test_no_foreground_no_tag(self) -> None:
+        out = TagForegroundBox(threshold=250)(_tissue_volume())
+        assert FOREGROUND_BOX_META_KEY not in out.meta
+
+    def test_pickles(self) -> None:
+        # DataLoader workers pickle the transform under spawn/forkserver; a lambda as
+        # select_fn would not.
+        restored = pickle.loads(pickle.dumps(TagForegroundBox(threshold=10)))
+        out = restored(_tissue_volume())
+        assert out.meta[FOREGROUND_BOX_META_KEY] == ((5, 14, 2), (25, 34, 10))
+
+
+class TestCropReadsForegroundBox:
+    def test_crops_land_on_the_tissue(self) -> None:
+        volume = _tissue_volume()
+        tagged = TagForegroundBox(threshold=10)(volume)
+        # At most 0.27 of each axis (11 x 10 x 4 voxels), so every crop fits in the
+        # block and, placed inside it, holds nothing but tissue.
+        crop = AnisotropyTrackingRandomResizedCrop3D(
+            size=(4, 4, 2), scale=(0.01, 0.02), ratio=(1.0, 1.0), seed=0
+        )
+        for _ in range(50):
+            out = crop(tagged)
+            assert out.min() >= 199
+            assert out.meta[ORIG_SHAPE_META_KEY] == (40, 36, 12)
+            # The box is in pre-crop coordinates, so it is not passed on.
+            assert FOREGROUND_BOX_META_KEY not in out.meta
+
+    def test_untagged_metatensor_matches_ndarray(self) -> None:
+        volume = _tissue_volume()
+        crop_a = AnisotropyTrackingRandomResizedCrop3D(
+            size=(8, 8, 4), scale=(0.1, 0.5), seed=0
+        )
+        crop_b = AnisotropyTrackingRandomResizedCrop3D(
+            size=(8, 8, 4), scale=(0.1, 0.5), seed=0
+        )
+        for _ in range(10):
+            a = crop_a(volume)
+            b = crop_b(MetaTensor(torch.from_numpy(volume)))
+            assert torch.equal(a.as_tensor(), b.as_tensor())

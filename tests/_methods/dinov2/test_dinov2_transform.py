@@ -7,10 +7,13 @@
 #
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 import torch
 from monai.transforms import (
+    CropForeground,
     OneOf,
     RandAdjustContrast,
     RandGaussianNoise,
@@ -18,7 +21,9 @@ from monai.transforms import (
     RandHistogramShift,
     Transform,
 )
+from pydantic import ValidationError
 
+from lightly_train._data.mi_dataset import reseed_randomizables
 from lightly_train._methods.dino.dino_transform import DINOGaussianSharpenArgs
 from lightly_train._methods.dinov2.dinov2_transform import (
     DINOv2ViTTransform,
@@ -245,3 +250,62 @@ def test_dinov2_transform__gibbs_noise_has_global_view_1_override() -> None:
     assert transform_args.global_view_1.gibbs_noise is not None
     assert probs[1] == transform_args.global_view_1.gibbs_noise.prob != 0.9
     assert probs[2:] == [0.9] * 8
+
+
+def test_dinov2_transform_args__crop_foreground() -> None:
+    assert DINOv2ViTTransformArgs().crop_foreground is None
+    args = DINOv2ViTTransformArgs.model_validate({"crop_foreground": {"threshold": 10}})
+    assert args.crop_foreground is not None
+    assert args.crop_foreground.threshold == 10.0
+    with pytest.raises(ValidationError, match="threshold"):
+        DINOv2ViTTransformArgs.model_validate({"crop_foreground": {}})
+
+
+def _small_transform(crop_foreground: dict[str, Any] | None) -> DINOv2ViTTransform:
+    transform_args = DINOv2ViTTransformArgs.model_validate(
+        {
+            "image_size": (16, 16, 8),
+            "num_channels": 1,
+            "crop_foreground": crop_foreground,
+            "local_view": {"num_views": 2, "view_size": (8, 8, 4)},
+        }
+    )
+    transform_args.resolve_auto()
+    transform_args.resolve_incompatible()
+    return DINOv2ViTTransform(transform_args)
+
+
+def _tissue_input() -> TransformInput:
+    rng = np.random.default_rng(0)
+    volume = rng.integers(0, 6, (1, 48, 40, 12), dtype=np.uint8)
+    volume[:, 4:20, 2:22, 1:9] = rng.integers(100, 256, (1, 16, 20, 8), dtype=np.uint8)
+    return {"image": volume}
+
+
+def test_dinov2_transform__crop_foreground_tags_once_per_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    original = CropForeground.compute_bounding_box
+
+    def counting(self: CropForeground, img: Any) -> Any:
+        calls.append(img.shape)
+        return original(self, img)
+
+    monkeypatch.setattr(CropForeground, "compute_bounding_box", counting)
+    transform = _small_transform({"threshold": 10})
+    views = transform(_tissue_input())
+    assert len(views) == 2 + 2
+    assert calls == [(1, 48, 40, 12)]
+
+
+def test_dinov2_transform__whole_volume_foreground_matches_disabled() -> None:
+    """threshold=-1 makes the box the whole volume, where placement is uniform: the
+    views must equal those without the option, for the same seeds."""
+    views = []
+    for crop_foreground in (None, {"threshold": -1}):
+        transform = _small_transform(crop_foreground)
+        reseed_randomizables(transform, rng=np.random.RandomState(0))
+        views.append([view["image"] for view in transform(_tissue_input())])
+    for disabled, whole_box in zip(*views):
+        assert torch.equal(disabled, whole_box)

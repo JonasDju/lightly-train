@@ -210,6 +210,11 @@ _PRETRAIN_HELP_MSG = f"""
             Backbones with chunked blocks (DINOv2 ViT-L/14 and ViT-g/14) checkpoint
             whole chunks, so there `every_n_blocks` counts chunks instead of blocks.
             Default: null
+        params_file (str):
+            Path to the config file this run was launched from. It is only recorded,
+            not read: a copy is written to `out/params-pretrain.yaml` (or
+            `params-pretrain-1.yaml`, `-2`, ... if that exists, e.g. on resume).
+            Default: null
         resume (bool):
             Deprecated. Use `resume_interrupted` instead.
             Default: null

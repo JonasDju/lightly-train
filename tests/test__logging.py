@@ -94,6 +94,22 @@ def test_set_up_file_logging(tmp_path: Path) -> None:
     assert "critical message" in logs
 
 
+def test_set_up_file_logging__kneeno(tmp_path: Path) -> None:
+    # KneeNo's INFO lines (eval dataset size, dropped exams, ...) reach the log file; its DEBUG lines do not.
+    _logging.set_up_file_logging(log_file_path=tmp_path / "test.log")
+    logging.getLogger("kneeno.evaluation.classification").debug("kneeno debug message")
+    logging.getLogger("kneeno.evaluation.classification").info("kneeno info message")
+    logs = (tmp_path / "test.log").read_text()
+    assert "kneeno info message" in logs
+    assert "kneeno debug message" not in logs
+
+
+def test__set_console_handler__kneeno() -> None:
+    handler = logging.StreamHandler()
+    _logging._set_console_handler(handler)
+    assert handler in logging.getLogger("kneeno").handlers
+
+
 class TestRegexFilter:
     def test(self, caplog: LogCaptureFixture) -> None:
         logger = logging.getLogger("test_regex_filter")

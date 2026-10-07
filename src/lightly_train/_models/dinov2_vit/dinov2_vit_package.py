@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from omegaconf import DictConfig, OmegaConf
 
 from lightly_train._data import cache
 from lightly_train._models import log_usage_example
@@ -74,6 +75,31 @@ class DINOv2ViTPackage(MultiScaleFeaturePackage):
         # Map to original model name if current name is an alias.
         model_name = model_info.get("alias_for", model_name)
         return model_name
+
+    @classmethod
+    def get_model_config_name(cls, model_name: str) -> str:
+        """The model's own config, e.g. 'train/vitb14', relative to the configs package."""
+        return str(VIT_MODELS[cls.parse_model_name(model_name)]["config"])
+
+    @classmethod
+    def get_model_config(cls, model_name: str) -> DictConfig:
+        """The config the model is built from, and nothing else.
+
+        The model's own config merged over ``ssl_default_config.yaml``, restricted to the
+        parts ``get_model`` reads: ``student`` and ``crops.global_crops_size``. The rest of
+        the merged config (optim, teacher, dino, ibot, train, ...) is never used here --
+        lightly-train takes those settings from ``DINOv2Args`` instead. Only a record of
+        the model (``common_helpers.write_model_config``): ``get_model`` itself still
+        builds from the full merged config, as in stock lightly-train.
+        """
+        config_path = get_config_path(config_name=cls.get_model_config_name(model_name))
+        cfg = load_and_merge_config(str(config_path))
+        return OmegaConf.create(
+            {
+                "student": cfg.student,
+                "crops": {"global_crops_size": cfg.crops.global_crops_size},
+            }
+        )
 
     @classmethod
     def get_model(

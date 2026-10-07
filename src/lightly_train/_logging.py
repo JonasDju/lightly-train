@@ -28,6 +28,12 @@ logging.captureWarnings(capture=True)
 lightly_logger = logging.getLogger("lightly_train")
 lightly_logger.setLevel(logging.DEBUG)
 
+# KneeNo (dataset + KneeNo evaluation) logs through its own "kneeno" logger. Without a level and handlers of its
+# own, its INFO lines (evaluation dataset size, dropped exams, feature cache size, ...) are silently dropped and
+# only warnings reach stderr. Route it to the same console/log file as lightly-train.
+kneeno_logger = logging.getLogger("kneeno")
+kneeno_logger.setLevel(logging.INFO)
+
 
 class ConsoleFormatter(logging.Formatter):
     """Custom formatter for console logging.
@@ -84,6 +90,7 @@ def _set_console_handler(handler: "logging.StreamHandler[TextIO]") -> None:
     """
     console_loggers = [
         lightly_logger,
+        kneeno_logger,
         logging.getLogger("pytorch_lightning"),
         logging.getLogger("torch"),
         logging.getLogger("py.warnings"),
@@ -151,6 +158,7 @@ def set_up_file_logging(log_file_path: Path) -> None:
     fh = _get_file_handler(log_file_path)
     file_loggers = [
         lightly_logger,
+        kneeno_logger,
         logging.getLogger("pytorch_lightning"),
         logging.getLogger("torch"),
         logging.getLogger("py.warnings"),

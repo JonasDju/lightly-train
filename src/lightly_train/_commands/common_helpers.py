@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import warnings
@@ -22,6 +23,7 @@ from typing import Any, Generator, Literal, TypeVar
 
 import torch
 from filelock import FileLock
+from omegaconf import OmegaConf
 from pytorch_lightning.accelerators.accelerator import Accelerator
 from pytorch_lightning.accelerators.cpu import CPUAccelerator
 from pytorch_lightning.accelerators.cuda import CUDAAccelerator
@@ -41,6 +43,7 @@ from lightly_train._embedding.embedding_format import EmbeddingFormat
 from lightly_train._env import Env
 from lightly_train._models import package_helpers
 from lightly_train._models.custom.custom_package import CUSTOM_PACKAGE
+from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from lightly_train._models.embedding_model import EmbeddingModel
 from lightly_train._models.model_wrapper import ModelWrapper
 from lightly_train._models.package import BasePackage
@@ -137,6 +140,61 @@ def get_out_dir(out: PathLike, resume_interrupted: bool, overwrite: bool) -> Pat
             )
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def copy_params_file(params_file: PathLike, out_dir: Path) -> Path | None:
+    """Copy the run's config file to ``out_dir/params-pretrain.yaml`` on global rank zero.
+
+    An existing copy is never overwritten: a resumed run, whose config may have been
+    edited in between, writes ``params-pretrain-1.yaml``, ``-2``, ... instead (as
+    vjepa2's ``app/main.py`` does). Returns the destination, or None on other ranks.
+    """
+    if not distributed_helpers.is_global_rank_zero():
+        return None
+    dest = out_dir / "params-pretrain.yaml"
+    i = 0
+    while dest.exists():
+        i += 1
+        dest = out_dir / f"params-pretrain-{i}.yaml"
+    shutil.copyfile(params_file, dest)
+    logger.info(f"Copied '{params_file}' to '{dest}'.")
+    return dest
+
+
+def write_model_config(
+    model: Any, model_args: dict[str, Any] | None, out_dir: Path
+) -> Path | None:
+    """Write the config a DINOv2 model is built from to ``out_dir/model-config.yaml``.
+
+    Only on global rank zero, only for a model given by name from the DINOv2 package
+    (``dinov2/<name>``; see ``DINOv2ViTPackage.get_model_config``), and only if the file
+    does not exist yet: a resumed run keeps the record of the run that created the
+    model. Returns the destination, or None if nothing was written.
+    """
+    if not distributed_helpers.is_global_rank_zero() or not isinstance(model, str):
+        return None
+    package_name, model_name = package_helpers.parse_model_name(model)
+    if package_name != DINOv2ViTPackage.name:
+        return None
+    dest = out_dir / "model-config.yaml"
+    if dest.exists():
+        logger.info(f"Keeping existing '{dest}'.")
+        return None
+
+    config_name = DINOv2ViTPackage.get_model_config_name(model_name)
+    text = (
+        f"# Config of model '{model}': {config_name}.yaml merged over\n"
+        "# ssl_default_config.yaml, restricted to the parts that build the model.\n"
+        + OmegaConf.to_yaml(DINOv2ViTPackage.get_model_config(model_name))
+    )
+    if model_args:
+        text += (
+            "# model_args: override the model builder arguments derived from the above.\n"
+            + OmegaConf.to_yaml(OmegaConf.create({"model_args": model_args}))
+        )
+    dest.write_text(text)
+    logger.info(f"Wrote the model config to '{dest}'.")
+    return dest
 
 
 def get_tmp_dir() -> Path:

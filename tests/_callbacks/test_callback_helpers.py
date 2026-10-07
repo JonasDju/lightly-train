@@ -74,6 +74,7 @@ def test_get_callbacks__default(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        num_channels=3,
         image_size=(224, 224),
     )
     assert len(callbacks) == 5
@@ -103,6 +104,7 @@ def test_get_callbacks__mlflow(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=loggers,
         license_info="",
+        num_channels=3,
         image_size=(224, 224),
     )
     assert len(callbacks) == 6
@@ -129,6 +131,7 @@ def test_get_callbacks__enable_devicestatsmonitor(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        num_channels=3,
         image_size=(224, 224),
     )
     assert len(callbacks) == 6
@@ -150,6 +153,7 @@ def test_get_callbacks__disable(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        num_channels=3,
         image_size=(224, 224),
     )
     assert len(callbacks) == 3
@@ -171,6 +175,7 @@ def test_get_callbacks__user_config(tmp_path: Path) -> None:
         normalize_args=NormalizeArgs(),
         loggers=[],
         license_info="",
+        num_channels=3,
         image_size=(224, 224),
     )
     model_checkpoint = next(c for c in callbacks if isinstance(c, ModelCheckpoint))

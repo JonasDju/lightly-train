@@ -52,7 +52,10 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 
 - `src/lightly_train/_data/kneeno_adapter.py`: `DINOv2Adapter(EncoderAdapter)`, a **stub**.
   - Real: `has_cls_token = True` (so the `linear` task is available), the constructor (`dataset_type` validated
-    against `internal`/`external`, `embed_dim`, `image_size` `(H, W)`, `normalize`), `embed_dim`.
+    against `internal`/`external`, `embed_dim`, `num_channels`, `image_size` `(H, W)`, `normalize`), `embed_dim`.
+  - `num_channels` is the model's resolved input-channel count (`transform_args.num_channels`, 3 with the stock
+    `auto` + ImageNet normalize), so `prepare_input` knows to repeat the grayscale volume to RGB, as vjepa2's
+    `n_channels` does for the official checkpoints. `normalize` must have 1 or `num_channels` values (checked).
   - `prepare_input` and `forward_features` raise `NotImplementedError`. How a 3D volume becomes input for the 2D
     encoder (per slice? which slices?) and how slice features are pooled back into one volume's
     `{"cls", "patches"}` is the open design question.
@@ -66,8 +69,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   - Runs in `on_train_epoch_end` for `tasks_due(epoch, config["freq"])`, on the EMA teacher by default
     (`eval.encoder: online` = student).
   - A labeled dataset that can't be loaded only logs "Disabling KneeNo evaluation" and turns eval off.
-  - Wired through `CallbackArgs.kneeno_eval` and `get_callbacks(..., image_size)` (from
-    `train.py`: `transform_args.image_size`).
+  - Wired through `CallbackArgs.kneeno_eval` and `get_callbacks(..., num_channels, image_size)` (from
+    `train.py`: the resolved `transform_args.num_channels` and `transform_args.image_size`).
 - **`evaluate()` is called on every rank, deliberately with no rank guard.** `ClassificationEvaluator` works on
   rank 0, then hits `dist.barrier()` + `dist.broadcast_object_list()`. A rank guard deadlocks multi-GPU runs.
 - **Metrics go through lightly-train's loggers.** `logging.tensorboard_dir: null` disables KneeNo's

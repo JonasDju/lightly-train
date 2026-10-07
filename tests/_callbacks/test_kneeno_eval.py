@@ -40,7 +40,7 @@ class _FakeDINOv2Adapter(DINOv2Adapter):
     ) -> torch.Tensor:
         image = volume[:, volume.shape[1] // 2].float()[None]  # (1, 1, H, W)
         image = F.interpolate(image, size=self.image_size, mode="bilinear")[0]
-        image = image.expand(3, -1, -1) / 255.0
+        image = image.expand(self.num_channels, -1, -1) / 255.0
         mean = torch.tensor(self.mean).view(-1, 1, 1)
         std = torch.tensor(self.std).view(-1, 1, 1)
         return (image - mean) / std
@@ -115,6 +115,7 @@ def _wrapper() -> Any:
 def _callback(**overrides: Any) -> KneeNoEval:
     return KneeNoEval(
         wrapped_model=_wrapper(),
+        num_channels=3,
         image_size=IMAGE_SIZE,
         normalize_args=NormalizeArgs(),
         config=_config(**overrides),
@@ -207,6 +208,7 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
 
     dataset.assert_called_once()
     assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    assert adapter.call_args.kwargs["num_channels"] == 3
     assert adapter.call_args.kwargs["image_size"] == IMAGE_SIZE
     assert adapter.call_args.kwargs["normalize"] == (
         NormalizeArgs().mean,

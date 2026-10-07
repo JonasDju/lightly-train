@@ -51,6 +51,7 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         self,
         dataset_type: str,
         embed_dim: int,
+        num_channels: int,
         image_size: ImageSizeTuple | Sequence[int],
         normalize: tuple[Sequence[float], Sequence[float]] = (
             (0.485, 0.456, 0.406),
@@ -65,6 +66,12 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 the raw incoming volume.
             embed_dim:
                 Feature dimension of the encoder, i.e. ``wrapped_model.feature_dim()``.
+            num_channels:
+                Input channels of the encoder, i.e. the resolved
+                ``DINOv2ViTTransformArgs.num_channels`` the model was built with. KneeNo's
+                volumes are grayscale (1 channel); with ``num_channels > 1`` (e.g. 3 for
+                the official RGB checkpoints) they have to be repeated along the channel
+                axis to match.
             image_size:
                 The training global-crop size as ``(H, W)``, matching
                 ``DINOv2ViTTransformArgs.image_size``.
@@ -76,10 +83,20 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
             raise ValueError(
                 f"dataset_type must be one of {DATASET_TYPES}, got {dataset_type!r}"
             )
+        if num_channels < 1:
+            raise ValueError(f"num_channels must be >= 1, got {num_channels}")
+        mean, std = tuple(normalize[0]), tuple(normalize[1])
+        # One (mean, std) per input channel, or a single pair shared by all of them.
+        if len(mean) != len(std) or len(mean) not in (1, num_channels):
+            raise ValueError(
+                f"normalize has {len(mean)} mean / {len(std)} std values, expected 1 "
+                f"or num_channels={num_channels}"
+            )
         self.dataset_type = dataset_type
         self._embed_dim = embed_dim
+        self.num_channels = num_channels
         self.image_size = (int(image_size[0]), int(image_size[1]))
-        self.mean, self.std = (tuple(normalize[0]), tuple(normalize[1]))
+        self.mean, self.std = mean, std
 
     @property
     def embed_dim(self) -> int:

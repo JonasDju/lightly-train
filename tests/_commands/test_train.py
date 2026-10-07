@@ -29,6 +29,7 @@ from lightly_train._commands.train import (
     FunctionTrainConfig,
     TrainConfig,
 )
+from lightly_train._data import kneeno_adapter
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods import method_helpers
 from lightly_train._methods.dino.dino import DINOAdamWArgs, DINOArgs
@@ -480,9 +481,13 @@ def test_pretrain__model_config(tmp_path: Path) -> None:
 
 
 def test_pretrain__kneeno_eval_without_dataset(
-    tmp_path: Path, caplog: LogCaptureFixture
+    tmp_path: Path, caplog: LogCaptureFixture, mocker: MockerFixture
 ) -> None:
     """The eval callback is wired in, and a missing labeled dataset does not stop training."""
+    adapter = mocker.patch(
+        "lightly_train._callbacks.kneeno_eval.DINOv2Adapter",
+        wraps=kneeno_adapter.DINOv2Adapter,
+    )
     eval_config = {
         "data": {
             "data_root": str(tmp_path / "missing"),
@@ -501,6 +506,9 @@ def test_pretrain__kneeno_eval_without_dataset(
         )
     assert "Disabling KneeNo evaluation" in caplog.text
     assert (tmp_path / "out" / "checkpoints" / "last.ckpt").exists()
+    # The adapter gets the model's resolved input channels: 3 with the stock transform
+    # (num_channels: auto, ImageNet normalize).
+    assert adapter.call_args.kwargs["num_channels"] == 3
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires GPU.")

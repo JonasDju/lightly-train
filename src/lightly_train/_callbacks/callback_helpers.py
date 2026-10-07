@@ -65,6 +65,7 @@ def get_callbacks(
     embedding_model: EmbeddingModel,
     loggers: list[AnyLoggerType],
     license_info: str,
+    num_channels: int,
     image_size: ImageSizeTuple,
 ) -> list[Callback]:
     callbacks: list[Callback] = []
@@ -108,6 +109,7 @@ def get_callbacks(
         callbacks.append(
             KneeNoEval(
                 wrapped_model=wrapped_model,
+                num_channels=num_channels,
                 image_size=image_size,
                 normalize_args=normalize_args,
                 **callback_args.kneeno_eval.model_dump(),

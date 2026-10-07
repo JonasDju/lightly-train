@@ -51,11 +51,13 @@ class KneeNoEval(Callback):
     def __init__(
         self,
         wrapped_model: ModelWrapper,
+        num_channels: int,
         image_size: ImageSizeTuple,
         normalize_args: NormalizeArgs,
         config: dict[str, Any],
     ) -> None:
         self._wrapped_model = wrapped_model
+        self._num_channels = num_channels
         self._image_size = image_size
         self._normalize_args = normalize_args
         self._config = load_eval_config(config)
@@ -81,6 +83,7 @@ class KneeNoEval(Callback):
         adapter = DINOv2Adapter(
             dataset_type=dataset_type,
             embed_dim=feature_dim,
+            num_channels=self._num_channels,
             image_size=self._image_size,
             normalize=(self._normalize_args.mean, self._normalize_args.std),
         )

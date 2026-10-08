@@ -25,7 +25,7 @@ The repo has three long-lived branches (restructured 2026-10-07):
 - **`2d_dinov2`** (this branch): the 2D baseline described here.
 - **`3d_dinov2`**: the 3D-native DINOv2 (patch embedding, attention, masking, MONAI transforms, KneeNo volume
   dataset). It has its own, much longer `CLAUDE.md`. Several things here were copied from there (eval callback,
-  `cluster/`, `params_file`, `write_model_config`). When changing them, check whether the other branch needs the
+  `eval_classification` command, `cluster/`, `params_file`, `write_model_config`). When changing them, check whether the other branch needs the
   same change.
 
 **This `CLAUDE.md` is tracked per branch**, so it describes this branch only and moves with the code. Facts that
@@ -84,7 +84,19 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - **Metrics go through lightly-train's loggers.** `logging.tensorboard_dir: null` disables KneeNo's
   `SummaryWriter`, and the callback re-logs the metrics via `pl_module.log_dict` under `eval/`.
 - **Config trap:** disabling a task with a nonzero default frequency needs an explicit `freq: {<task>: null}`.
-- Not ported from `3d_dinov2`: the standalone `lightly-train eval_classification` command.
+- `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
+  command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
+  `evaluate(..., log_every_head_epoch=True)`, so the whole head fine-tuning curve is logged, then writes the final
+  metrics to `out` as JSON.
+  - `eval_config` is **required**: any YAML with a top-level `eval:` block, typically the run's
+    `params-pretrain.yaml`. Other blocks are ignored; a missing `eval:` raises.
+  - `tasks` defaults to all of them, the slice tasks included. `encoder` is `target` (the EMA teacher, which the
+    checkpoint stores) or `online` (the student, loaded from the method's `state_dict`).
+  - **Differs from 3d** in what the adapter needs. `num_channels` is `len(checkpoint normalize_args.mean)`: the
+    checkpoint stores the resolved normalize args, whose length the transform matched to the resolved
+    `num_channels`, `auto` included. `image_size` `(H, W)` is taken from the CLI, else from the eval config's
+    `transform.image_size`, else the DINOv2 default with a warning. 3d instead reads
+    `resize_interpolation`/`resize_upscale_interpolation` from the transform block.
 
 ## Run bookkeeping (copied from `3d_dinov2`; doesn't change training)
 
@@ -139,8 +151,8 @@ No GPU here: CPU, `dinov2/_vittest14`. This branch has the **stock test suite wi
 
 ```bash
 .venv/bin/python -m pytest tests/_callbacks tests/_data/test_kneeno_adapter.py tests/test_cluster_configs.py \
-  tests/_commands/test_common_helpers.py tests/_commands/test_train.py tests/test__logging.py \
-  tests/_models/dinov2_vit tests/_methods/dinov2
+  tests/_commands/test_common_helpers.py tests/_commands/test_train.py tests/_commands/test_eval_classification.py \
+  tests/test__cli.py tests/test__logging.py tests/_models/dinov2_vit tests/_methods/dinov2
 ```
 
 - `tests/_data/test_kneeno_adapter.py` pins `prepare_input` (per-slice normalization and order, layout, the
@@ -148,4 +160,10 @@ No GPU here: CPU, `dinov2/_vittest14`. This branch has the **stock test suite wi
   slice by hand, DDP unwrap), plus the `prepare_input` → `collate` → `forward_features` path.
 - `tests/_callbacks/test_kneeno_eval.py` runs the real adapter on a fake labeled dataset that stands in for the
   cluster data (one fixed depth, as with `series_depth > 0`), including all seven tasks at once.
+- `tests/_commands/test_eval_classification.py` runs the command end to end on a real DINOv2 checkpoint and the same
+  kind of fake dataset (all seven tasks, `target`/`online`, `image_size` resolution, `num_channels` from the
+  checkpoint).
+- `tests/_methods/dinov2/test_dinov2_loss.py::TestDINOLoss::test_sinkhorn_knopp_teacher` (stock) is flaky in a
+  full run: unseeded `torch.randn` and an `allclose` at default tolerance, so it depends on the global RNG state the
+  earlier tests leave behind. It passes on its own.
 - Smoke-test DataLoader-adjacent code with `num_workers >= 2` (picklability; see `MA/CLAUDE.md`).

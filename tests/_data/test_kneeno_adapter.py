@@ -37,6 +37,11 @@ def test_has_cls_token() -> None:
     assert DINOv2Adapter.has_cls_token is True
 
 
+def test_has_slice_tokens() -> None:
+    # Every slice is encoded on its own, so KneeNo's slice tasks are available.
+    assert DINOv2Adapter.has_slice_tokens is True
+
+
 def test_init() -> None:
     adapter = DINOv2Adapter(
         dataset_type="external",
@@ -340,33 +345,32 @@ def test_forward_features__shapes() -> None:
     with torch.no_grad():
         out = _model_adapter(model).forward_features(model, batch)
 
-    assert set(out) == {"cls", "patches"}
-    cls, patches = out["cls"], out["patches"]
-    assert cls is not None and patches is not None
-    assert cls.shape == (2, embed_dim)
-    # All slices' patch tokens: D * P per volume.
-    assert patches.shape == (2, 5 * _NUM_PATCHES, embed_dim)
+    # Per-slice tokens only; KneeNo derives the volume-level cls / patches itself.
+    assert set(out) == {"slice_cls", "slice_patches"}
+    slice_cls, slice_patches = out["slice_cls"], out["slice_patches"]
+    assert slice_cls is not None and slice_patches is not None
+    assert slice_cls.shape == (2, 5, embed_dim)
+    assert slice_patches.shape == (2, 5, _NUM_PATCHES, embed_dim)
 
 
 def test_forward_features__matches_per_slice_encoding() -> None:
-    # cls = mean of the slices' cls tokens, patches = the slices' patch tokens in
+    # Slice d of volume b holds exactly the tokens of encoding that slice alone, in
     # slice order, and volumes in a batch do not mix.
     model = _model()
     batch = torch.randn(2, 3, 4, _IMAGE_SIZE, _IMAGE_SIZE)
 
     with torch.no_grad():
         out = _model_adapter(model).forward_features(model, batch)
-        cls, patches = out["cls"], out["patches"]
-        assert cls is not None and patches is not None
+        slice_cls, slice_patches = out["slice_cls"], out["slice_patches"]
+        assert slice_cls is not None and slice_patches is not None
         for b in range(2):
-            slices = [model.forward_features(batch[b, :, d][None]) for d in range(4)]
-            expected_cls = torch.stack([s["cls_token"][0] for s in slices]).mean(0)
-            # (E, h, w) -> (h * w, E) per slice, concatenated over slices.
-            expected_patches = torch.cat(
-                [s["features"][0].flatten(1).T for s in slices]
-            )
-            torch.testing.assert_close(cls[b], expected_cls)
-            torch.testing.assert_close(patches[b], expected_patches)
+            for d in range(4):
+                expected = model.forward_features(batch[b, :, d][None])
+                torch.testing.assert_close(slice_cls[b, d], expected["cls_token"][0])
+                # (E, h, w) -> (h * w, E)
+                torch.testing.assert_close(
+                    slice_patches[b, d], expected["features"][0].flatten(1).T
+                )
 
 
 def test_forward_features__unwraps_ddp() -> None:
@@ -385,8 +389,8 @@ def test_forward_features__unwraps_ddp() -> None:
         out = adapter.forward_features(_DDPLike(model), batch)
         expected = adapter.forward_features(model, batch)
 
-    torch.testing.assert_close(out["cls"], expected["cls"])
-    torch.testing.assert_close(out["patches"], expected["patches"])
+    torch.testing.assert_close(out["slice_cls"], expected["slice_cls"])
+    torch.testing.assert_close(out["slice_patches"], expected["slice_patches"])
 
 
 @pytest.mark.parametrize("dataset_type", ["internal", "external"])
@@ -407,9 +411,9 @@ def test_prepare_input__collate__forward_features(dataset_type: str) -> None:
         out = adapter.forward_features(model, batch)
 
     assert batch.shape == (4, 3, 3, _IMAGE_SIZE, _IMAGE_SIZE)
-    cls, patches = out["cls"], out["patches"]
-    assert cls is not None and patches is not None
-    assert cls.shape == (4, model.feature_dim())
-    assert patches.shape == (4, 3 * _NUM_PATCHES, model.feature_dim())
-    assert torch.isfinite(cls).all()
-    assert torch.isfinite(patches).all()
+    slice_cls, slice_patches = out["slice_cls"], out["slice_patches"]
+    assert slice_cls is not None and slice_patches is not None
+    assert slice_cls.shape == (4, 3, model.feature_dim())
+    assert slice_patches.shape == (4, 3, _NUM_PATCHES, model.feature_dim())
+    assert torch.isfinite(slice_cls).all()
+    assert torch.isfinite(slice_patches).all()

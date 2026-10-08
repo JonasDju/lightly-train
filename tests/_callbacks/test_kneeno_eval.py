@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 import torch
+from kneeno.evaluation.config import ALL_TASKS
 from pydantic import ValidationError
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
@@ -66,12 +67,18 @@ class _FakeLabeledDataset(
 
 
 def _config(**overrides: Any) -> dict[str, Any]:
+    attentive = {"epochs": 1, "batch_size": 4, "num_heads": 2}
     config: dict[str, Any] = {
-        "data": {"dataset_type": "internal", "num_workers": 0},
+        # series_depth: the fake dataset's depth, i.e. the slice count the slice tasks
+        # see (the dataset itself is mocked, so it is not resampled).
+        "data": {"dataset_type": "internal", "num_workers": 0, "series_depth": 5},
         "knn": {"batch_size": 4},
         "linear": {"epochs": 1, "batch_size": 4},
         "linear_pool": {"epochs": 1, "batch_size": 4},
-        "attentive_pool": {"epochs": 1, "batch_size": 4, "num_heads": 2},
+        "attentive_pool": attentive,
+        "linear_slice_cls": {"epochs": 1, "batch_size": 4},
+        "attentive_slice_cls": attentive,
+        "attentive_slice_pool": attentive,
         "freq": {
             "knn": 1,
             "linear": None,
@@ -190,11 +197,10 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
 
 
 def test_on_train_epoch_end__all_tasks(mocker: MockerFixture) -> None:
-    # The real adapter's output feeds every KneeNo task: "linear" uses its cls token,
-    # "linear_pool" and "attentive_pool" its patch tokens.
-    callback = _callback(
-        freq={"knn": 1, "linear": 1, "linear_pool": 1, "attentive_pool": 1}
-    )
+    # The real adapter's per-slice output feeds every KneeNo task: "linear" uses the
+    # slice-pooled cls token, "linear_pool" and "attentive_pool" all slices' patch tokens,
+    # and the slice tasks the per-slice tokens themselves.
+    callback = _callback(freq={task: 1 for task in ALL_TASKS})
     _install_dataset(callback, mocker)
     module = _fake_module(mocker)
 
@@ -202,7 +208,7 @@ def test_on_train_epoch_end__all_tasks(mocker: MockerFixture) -> None:
 
     assert isinstance(callback._evaluator.adapter, DINOv2Adapter)  # type: ignore[union-attr]
     logged = module.log_dict.call_args.args[0]
-    for task in ("knn", "linear", "linear_pool", "attentive_pool"):
+    for task in ALL_TASKS:
         assert any(key.startswith(f"eval/{task}/") for key in logged), (task, logged)
     assert all(math.isfinite(value) for value in logged.values())
 

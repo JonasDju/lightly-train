@@ -11,9 +11,10 @@ own image-folder dataset over the JPEG slices, its own 2D transforms, its own de
 if they don't alter training: evaluation wiring, run bookkeeping, cluster tooling. Anything that changes what
 the model sees or how it learns needs a deliberate decision, and a note in this file.
 
-**Current status (2026-10-08):** the KneeNo in-training eval is wired in, with a basic slice-wise adapter (see
-below). `cluster/` holds a SLURM script, launcher and run config. Pretraining runs end to end on CPU through the
-cluster script. Nothing has run on the cluster yet.
+**Current status (2026-10-08):** the KneeNo in-training eval is wired in, with a slice-wise adapter that hands
+KneeNo the per-slice tokens, so KneeNo's 2D-only slice tasks run too (see below). `cluster/` holds a SLURM script,
+launcher and run config. Pretraining runs end to end on CPU through the cluster script. Nothing has run on the
+cluster yet.
 
 ## Branches
 
@@ -46,14 +47,16 @@ don't depend on the branch go in the global `MA/CLAUDE.md`.
 
 ## KneeNo classification evaluation
 
-Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive-pool) lives in
+Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive-pool, plus the slice tasks
+`linear_slice_cls`, `attentive_slice_cls`, `attentive_slice_pool` for slice-wise models) lives in
 `KneeNo/kneeno/evaluation/` and is shared with vjepa2 and `3d_dinov2`; see `KneeNo/README.md`. KneeNo evaluates
 **exams**, handing the adapter one `(1, D, H, W)` volume per sequence.
 
 - `src/lightly_train/_data/kneeno_adapter.py`: `DINOv2Adapter(EncoderAdapter)`, treating a volume as `D`
   independent slices.
-  - `has_cls_token = True` (so the `linear` task is available). The constructor validates `dataset_type`
-    against `internal`/`external` and also takes `embed_dim`, `num_channels`, `image_size` `(H, W)`, `normalize`.
+  - `has_cls_token = True` (so the `linear` task is available) and `has_slice_tokens = True` (so the slice tasks
+    are). The constructor validates `dataset_type` against `internal`/`external` and also takes `embed_dim`,
+    `num_channels`, `image_size` `(H, W)`, `normalize`.
   - `num_channels` is the model's resolved input-channel count (`transform_args.num_channels`, 3 with the stock
     `auto` + ImageNet normalize), so `prepare_input` knows to repeat the grayscale volume to RGB, as vjepa2's
     `n_channels` does for the official checkpoints. `normalize` must have 1 or `num_channels` values (checked).
@@ -61,10 +64,12 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     repeated to `num_channels`, then every slice goes through lightly-train's `EmbeddingTransform` (resize to
     `image_size`, no crop; normalize with `max_pixel_value=255`). Output `(C, D, H, W)`, depth kept, so
     `eval.data.series_depth` must be `> 0` (KneeNo raises a clear error for mixed depths otherwise).
-  - `forward_features`: all `B * D` slices in one encoder call. `cls` is the mean of the slices' cls tokens;
-    `patches` are all slices' patch tokens in slice order, `D * P` per volume. Deliberately basic (a TODO in the
-    code). Each encoder forward sees `series_depth` times as many images as volumes: with the shipped eval
-    config, 32 exams x 4 sequences x 24 slices = 3,072 images of 224².
+  - `forward_features`: all `B * D` slices in one encoder call. It returns only the per-slice tokens,
+    `slice_cls` `(B, D, E)` and `slice_patches` `(B, D, P, E)`. KneeNo derives the volume-level views
+    (`kneeno.evaluation.features.feature`): the cls token is the slice cls tokens pooled with `knn.pooling` /
+    `linear.pooling` (avg | max), and `patches` are all slices' patch tokens in slice order (`D * P` per volume).
+    The slice count must equal `eval.data.series_depth`. Each encoder forward sees `series_depth` times as many
+    images as volumes: with the shipped eval config, 32 exams x 4 sequences x 24 slices = 3,072 images of 224².
 - `src/lightly_train/_callbacks/kneeno_eval.py`: `KneeNoEval` + `KneeNoEvalArgs`, copied from `3d_dinov2` minus
   its 3D resize-interpolation arguments.
   - **Off by default:** enabled only by `callbacks={"kneeno_eval": {"config": <eval dict>}}`, deep-merged over
@@ -110,9 +115,10 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - **The shipped config lists every train/method/transform key at its stock default.** Unlike `3d_dinov2`, that
   includes `num_channels: auto` (3 channels: the grayscale JPEGs are loaded as RGB). `tests/test_cluster_configs.py`
   pins equality with the defaults, so a deliberate deviation needs that test changed too.
-- The `eval:` block is copied verbatim from `3d_dinov2`, except `per_label_dir`, which follows this config's
-  `data.out`. Its `series_depth: 24` / `resample_mode` describe how KneeNo loads the eval volumes; what they
-  mean for a 2D encoder is part of the adapter design.
+- The `eval:` block is copied from `3d_dinov2`, except `per_label_dir` (follows this config's `data.out`),
+  `linear.pooling` and the three slice tasks. `linear_slice_cls` / `attentive_slice_cls` run every 5 epochs
+  (they train on the cached slice cls tokens); `attentive_slice_pool` is `null` like `attentive_pool`.
+  `series_depth: 24` is the number of slices the encoder sees per volume, and the slice tasks' slice count.
 - Same as on 3d: the env vars at the top of the launcher (`OPENBLAS_NUM_THREADS=1`, forced
   `OMP_NUM_THREADS=1`, `expandable_segments`); multi-GPU through SLURM options only (`num_nodes` from
   `SLURM_NNODES`); a longer DDP process-group timeout for the rank-0 eval; auto-resume from
@@ -141,5 +147,5 @@ No GPU here: CPU, `dinov2/_vittest14`. This branch has the **stock test suite wi
   external rescale, equality with `EmbeddingTransform`) and `forward_features` (equality with encoding each
   slice by hand, DDP unwrap), plus the `prepare_input` → `collate` → `forward_features` path.
 - `tests/_callbacks/test_kneeno_eval.py` runs the real adapter on a fake labeled dataset that stands in for the
-  cluster data (one fixed depth, as with `series_depth > 0`), including all four tasks at once.
+  cluster data (one fixed depth, as with `series_depth > 0`), including all seven tasks at once.
 - Smoke-test DataLoader-adjacent code with `num_workers >= 2` (picklability; see `MA/CLAUDE.md`).

@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 import torch
-import torch.nn.functional as F
 from pydantic import ValidationError
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
@@ -26,31 +25,6 @@ from lightly_train._transforms.transform import NormalizeArgs
 from .. import helpers
 
 IMAGE_SIZE = (16, 16)  # (H, W)
-
-
-class _FakeDINOv2Adapter(DINOv2Adapter):
-    """Test-only stand-in for the stub adapter, so the callback's wiring can be tested.
-
-    Feeds the volume's centre slice to the real 2D encoder. Not a proposal for how the
-    real adapter should handle volumes.
-    """
-
-    def prepare_input(
-        self, volume: torch.Tensor, orientation: str | None = None
-    ) -> torch.Tensor:
-        image = volume[:, volume.shape[1] // 2].float()[None]  # (1, 1, H, W)
-        image = F.interpolate(image, size=self.image_size, mode="bilinear")[0]
-        image = image.expand(self.num_channels, -1, -1) / 255.0
-        mean = torch.tensor(self.mean).view(-1, 1, 1)
-        std = torch.tensor(self.std).view(-1, 1, 1)
-        return (image - mean) / std
-
-    def forward_features(
-        self, model: Any, batch: torch.Tensor
-    ) -> dict[str, torch.Tensor | None]:
-        out = model.forward_features(batch)
-        patches = out["features"].flatten(2).permute(0, 2, 1)  # (B, P, D)
-        return {"cls": out["cls_token"], "patches": patches}
 
 
 class _FakeLabeledDataset(
@@ -75,12 +49,13 @@ class _FakeLabeledDataset(
 
     def __getitem__(self, index: int) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         gen = torch.Generator().manual_seed(index)
-        # Mixed native depths: the adapter's output does not depend on the depth.
+        # One depth for all volumes, as with eval.data.series_depth > 0: the adapter
+        # keeps the depth, so mixed depths could not be batched.
         volumes = tuple(
             torch.randint(
                 0,
                 4000 if self.raw else 256,
-                (1, 5 + ((index + s) % 3), 20, 11),
+                (1, 5, 20, 11),
                 generator=gen,
                 dtype=torch.int16 if self.raw else torch.uint8,
             )
@@ -136,19 +111,12 @@ def _fake_module(mocker: MockerFixture) -> Any:
     return module
 
 
-def _install_dataset(
-    callback: KneeNoEval, mocker: MockerFixture, fake_adapter: bool = True
-) -> None:
-    """Inject a synthetic labeled dataset instead of the cluster one and, unless
-    ``fake_adapter`` is False, a working adapter instead of the stub."""
+def _install_dataset(callback: KneeNoEval, mocker: MockerFixture) -> None:
+    """Inject a synthetic labeled dataset instead of the cluster one."""
     mocker.patch(
         "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
         return_value=_FakeLabeledDataset(),
     )
-    if fake_adapter:
-        mocker.patch(
-            "lightly_train._callbacks.kneeno_eval.DINOv2Adapter", _FakeDINOv2Adapter
-        )
 
 
 def test_callback_args__kneeno_eval_off_by_default() -> None:
@@ -200,7 +168,7 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
         return_value=_FakeLabeledDataset(raw=dataset_type == "external"),
     )
     adapter = mocker.patch(
-        "lightly_train._callbacks.kneeno_eval.DINOv2Adapter", wraps=_FakeDINOv2Adapter
+        "lightly_train._callbacks.kneeno_eval.DINOv2Adapter", wraps=DINOv2Adapter
     )
     module = _fake_module(mocker)
 
@@ -221,17 +189,22 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
     assert all(math.isfinite(v) for v in module.log_dict.call_args.args[0].values())
 
 
-def test_on_train_epoch_end__stub_adapter_raises(mocker: MockerFixture) -> None:
-    # The real adapter is a stub on this branch: a due eval must fail loudly, not
-    # silently log nothing.
-    callback = _callback()
-    _install_dataset(callback, mocker, fake_adapter=False)
+def test_on_train_epoch_end__all_tasks(mocker: MockerFixture) -> None:
+    # The real adapter's output feeds every KneeNo task: "linear" uses its cls token,
+    # "linear_pool" and "attentive_pool" its patch tokens.
+    callback = _callback(
+        freq={"knn": 1, "linear": 1, "linear_pool": 1, "attentive_pool": 1}
+    )
+    _install_dataset(callback, mocker)
+    module = _fake_module(mocker)
 
-    with pytest.raises(NotImplementedError, match="stub"):
-        callback.on_train_epoch_end(
-            _fake_trainer(mocker, epoch=0), _fake_module(mocker)
-        )
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+
     assert isinstance(callback._evaluator.adapter, DINOv2Adapter)  # type: ignore[union-attr]
+    logged = module.log_dict.call_args.args[0]
+    for task in ("knn", "linear", "linear_pool", "attentive_pool"):
+        assert any(key.startswith(f"eval/{task}/") for key in logged), (task, logged)
+    assert all(math.isfinite(value) for value in logged.values())
 
 
 def test_on_train_epoch_end__skips_when_no_task_is_due(mocker: MockerFixture) -> None:

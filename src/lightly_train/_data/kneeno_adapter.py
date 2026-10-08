@@ -11,30 +11,30 @@
 repo hands to ``kneeno.evaluation.ClassificationEvaluator``. It is the DINOv2 counterpart
 of ``vjepa2/src/datasets/kneeno_adapter.py::VJepa21Adapter``.
 
-STUB: KneeNo hands the adapter whole ``(1, D, H, W)`` volumes, while this branch's encoder
-is the stock 2D one trained on single slices. How a volume becomes 2D encoder input (and
-how the per-slice features are pooled back into one volume's features) is not designed
-yet, so ``prepare_input`` and ``forward_features`` raise ``NotImplementedError``. A run
-whose config enables evaluation therefore fails at the first epoch an eval task is due.
+KneeNo hands the adapter whole ``(1, D, H, W)`` volumes, while this branch's encoder is
+the stock 2D one trained on single slices. The adapter therefore treats a volume as ``D``
+independent slices: ``prepare_input`` runs each slice through lightly-train's
+``EmbeddingTransform`` (resize to ``image_size`` + normalize, the deterministic eval
+counterpart of the training transform), and ``forward_features`` encodes all slices in one
+batch. A volume's ``cls`` is the mean of its slices' cls tokens, its ``patches`` are all
+slices' patch tokens concatenated in slice order (``D * P`` tokens).
 """
 
 from __future__ import annotations
 
 from typing import Any, Sequence
 
+import torch
+from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
+from kneeno.evaluation.features import pool_patches
 from torch import Tensor
 
-from lightly_train.types import ImageSizeTuple
+from lightly_train._embedding.embedding_transform import EmbeddingTransform
+from lightly_train.types import ImageSizeTuple, TransformInput
 
 #: ``eval.data.dataset_type`` values.
 DATASET_TYPES = ("internal", "external")
-
-_NOT_IMPLEMENTED = (
-    "DINOv2Adapter is a stub on this branch: how KneeNo's 3D volumes are fed to the 2D "
-    "DINOv2 encoder is not implemented yet. Remove the eval block from the run config "
-    "(or disable every eval.freq task) to train without evaluation."
-)
 
 
 class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
@@ -98,15 +98,75 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         self.image_size = (int(image_size[0]), int(image_size[1]))
         self.mean, self.std = mean, std
 
+        self.embed_transform = EmbeddingTransform(
+            image_size=self.image_size,
+            mean=self.mean,
+            std=self.std,
+        )
+
     @property
     def embed_dim(self) -> int:
         return self._embed_dim
 
     def prepare_input(self, volume: Tensor, orientation: str | None = None) -> Tensor:
-        """``(1, D, H, W)`` raw volume -> encoder input. Not implemented yet."""
-        raise NotImplementedError(_NOT_IMPLEMENTED)
+        """``(1, D, H, W)`` raw volume (in [0, 255] for internal / unscaled for external)
+        -> ``(C, D, image_size[0], image_size[1])`` float32.
+        """
+        if self.dataset_type == "external":
+            volume = LabeledExternalKneeMRIDataset.to_uint8(volume)
+            volume = torch.from_numpy(volume)
+
+        if self.num_channels > 1:
+            if volume.shape[0] != 1:
+                raise ValueError(
+                    f"Can only repeat a 1-channel volume to {self.num_channels} "
+                    f"channels, got {volume.shape[0]}"
+                )
+            # (1, D, H, W) -> (num_channels, D, H, W)
+            volume = volume.repeat(self.num_channels, 1, 1, 1)
+
+        # Albumentations expects images in (H, W, C)
+        # (C, D, H, W) -> (D, H, W, C)
+        depth_slices = volume.permute(1, 2, 3, 0).numpy()
+        inputs = [TransformInput(image=depth_slice) for depth_slice in depth_slices]
+        outputs = [self.embed_transform(transform_input) for transform_input in inputs]
+        # [(C, H, W)] of length D
+        slices = [transform_output[0]["image"] for transform_output in outputs]
+        volume = torch.stack(slices)  # (D, C, H, W)
+
+        return volume.permute(1, 0, 2, 3)  # (C, D, H, W)
 
     def forward_features(self, model: Any, batch: Tensor) -> dict[str, Tensor | None]:
-        """Collated ``prepare_input`` outputs -> ``{"cls": (B, D), "patches": (B, P, D)}``.
-        Not implemented yet."""
-        raise NotImplementedError(_NOT_IMPLEMENTED)
+        """``batch``: ``(B, C, D, image_size[0], image_size[1])``
+
+        Unwraps DDP (if wrapped) before calling the encoder directly, so a frozen
+        forward pass under ``torch.no_grad()`` does not trip DDP's backward-pass
+        bookkeeping.
+        """
+        b, c, d, h, w = batch.shape
+
+        wrapper = model.module if hasattr(model, "module") else model
+        # (B, C, D, H, W) -> (B*D, C, H, W)
+        batch = batch.permute(0, 2, 1, 3, 4).flatten(0, 1)
+        out = wrapper.forward_features(batch)
+
+        # CLS tokens
+        # (B*D, embed_dim) -> (B, D, embed_dim)
+        cls_tokens = out["cls_token"].reshape(b, d, self._embed_dim)
+
+        # Patches
+        # (B*D, embed_dim, patH, patW) -> (B, D, P, embed_dim), P = patH * patW
+        patches = (
+            out["features"]
+            .flatten(2)
+            .permute(0, 2, 1)
+            .reshape(b, d, -1, self._embed_dim)
+        )
+
+        # This basic return value is the minimum required to make in-training
+        # evaluation work with KneeNo
+        # TODO: Replace this with something more powerful
+        return {
+            "cls": pool_patches(cls_tokens, "avg"),
+            "patches": patches.flatten(1, 2),
+        }

@@ -21,8 +21,8 @@ lightly-train copies the file into ``data.out`` as ``params-pretrain.yaml`` (``p
 on each resume), so that copy is the complete record of the run's settings. The only command-line option
 besides ``--config`` is the multi-GPU process-group timeout, which does not affect training.
 
-The KneeNo adapter (``src/lightly_train/_data/kneeno_adapter.py``) is still a stub: with an ``eval`` block, the run
-fails at the first epoch an eval task is due. Once implemented, the eval block's ``/dev/shm/kneeno_data/internal``
+With an ``eval`` block, the KneeNo adapter (``src/lightly_train/_data/kneeno_adapter.py``) evaluates the encoder
+slice by slice at the end of every epoch an eval task is due. The eval block's ``/dev/shm/kneeno_data/internal``
 data must exist by then (``submit_pretrain_dinov2_kneeno.sh`` extracts it); if it cannot be loaded the callback
 only logs a warning and disables itself, so check the log for "Disabling KneeNo evaluation".
 

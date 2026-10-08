@@ -700,15 +700,6 @@ timeout) whenever `SLURM_NTASKS > 1`, default 240 min (`--pg-timeout-minutes` /
 real 2-rank CPU DDP run through the script (timeout reached `init_process_group`, eval + barrier completed);
 multi-node and real NCCL have not been run.
 
-**Unattended debugging agent** (`cluster/agent/`): a Claude Code session on a login node debugged the cluster runs
-overnight on 2026-10-01 (result: `MA/FINDINGS.md`, outside this repo and untracked, a copy of
-`/hpcwork/va105917/lt-debug/FINDINGS.md`). The
-guards, installer and general lessons now live in the sibling kit `MA/cluster-agent-kit` (README there). This repo
-keeps only its own parts: `cluster/agent/kit.env` (limits, debug root, output-path keys, read-only paths), the
-brief `AGENT_TASK.md`, `probe_batch_size.sh`, the stage-4 benchmark/profiling scripts and the stage/recommended
-configs. Install on the cluster with `../cluster-agent-kit/install.sh cluster/agent/kit.env`; the guards are then
-in `~/.cluster-agent/lightly-train/guard/`.
-
 ## Open risks / known follow-ups (not yet done, not blocking)
 
 - **Eval now uses the real labeled dataset** (`KneeNo/kneeno/evaluation/dataset.py::LabeledInternalKneeMRIDataset`,

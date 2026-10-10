@@ -369,9 +369,7 @@ _EMBED_HELP_MSG = f"""
         format=csv image_size="[448, 672]"
 """
 
-_eval_classification_cfg = CLIEvalClassificationConfig(
-    out="", checkpoint="", eval_config=""
-)
+_eval_classification_cfg = CLIEvalClassificationConfig(eval_config="")
 _EVAL_CLASSIFICATION_HELP_MSG = f"""
     Evaluate a pretrained model with KneeNo's frozen-encoder classification tasks.
 
@@ -385,50 +383,36 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
         lightly-train eval_classification [options]
 
     Options:
-        out (str, required):
-            Path to a JSON file where the final metrics will be written.
-        checkpoint (str, required):
-            Path to the LightlyTrain checkpoint to evaluate. If training was run with
-            `out="out/my_experiment"`, the last checkpoint is at
-            `out/my_experiment/checkpoints/last.ckpt`.
         eval_config (str, required):
-            Path to a YAML file with a top-level `eval:` block (KneeNo's evaluation
-            config), e.g. the `params-pretrain.yaml` a pretraining run wrote to its
-            output directory. Its `transform:` block's `image_size` is the default for
-            `image_size`; other top-level blocks are ignored.
-        image_size ([int, int]):
-            Global crop size (H, W) the model was pretrained with; every slice is
-            resized to it. The checkpoint does not record it. Default: the eval config's
-            `transform.image_size`, else the DINOv2 default.
-        encoder (str):
-            Which encoder to evaluate: 'target' (the EMA teacher, which is what the
-            checkpoint stores) or 'online' (the student). Default: the config's
-            `eval.encoder`.
-        tasks ([str]):
-            Subset of ['knn', 'linear', 'linear_pool', 'attentive_pool',
-            'linear_slice_cls', 'attentive_slice_cls', 'attentive_slice_pool']. The
-            slice tasks need `eval.data.series_depth > 0`. Default: all of them.
+            Path to a YAML file with exactly these top-level keys (environment
+            variables are expanded in every value):
+              checkpoint: the LightlyTrain checkpoint to evaluate, e.g.
+                `out/my_experiment/checkpoints/last.ckpt`.
+              image_size: [H, W], the crop size the model was pretrained with; every
+                slice is resized to it. The checkpoint does not record it.
+              eval: KneeNo's evaluation config. The tasks are those with a non-null
+                `freq` (['knn', 'linear', 'linear_pool', 'attentive_pool',
+                'linear_slice_cls', 'attentive_slice_cls', 'attentive_slice_pool'];
+                the slice tasks need `data.series_depth > 0`), the encoder is
+                `encoder` ('target', the EMA teacher, or 'online', the student).
+            The final metrics are written to `results.json` and the config, with
+            environment variables expanded, to `params.yaml`, both in the parent of
+            `eval.logging.per_label_dir`. Without a `per_label_dir`, `results.json`
+            goes next to the checkpoint and no `params.yaml` is written.
         accelerator (str):
             Hardware accelerator. Can be one of ['cpu', 'gpu', 'tpu', 'ipu', 'hpu',
             'mps', 'auto']. Default: {_eval_classification_cfg.accelerator}
         overwrite (bool):
-            Overwrite the output file if it already exists.
+            Run even if results of an earlier evaluation exist (`results.json`,
+            `params.yaml`, `per_label_dir`, `tensorboard_dir`).
             Default: {_eval_classification_cfg.overwrite}
 
     Optional arguments:
         -v, --verbose  Run the command in verbose mode for detailed output.
 
     Examples:
-    # Evaluate the last checkpoint of a pretraining run
-    lightly-train eval_classification out=eval.json \\
-        checkpoint=out/my_experiment/checkpoints/last.ckpt \\
-        eval_config=out/my_experiment/params-pretrain.yaml
-
-    # Evaluate the online (student) encoder on only the slice tasks
-    lightly-train eval_classification out=eval.json \\
-        checkpoint=out/my_experiment/checkpoints/last.ckpt \\
-        eval_config=out/my_experiment/params-pretrain.yaml encoder=online \\
-        tasks=[linear_slice_cls,attentive_slice_cls,attentive_slice_pool]
+    # Evaluate the checkpoint named in an eval config
+    lightly-train eval_classification eval_config=cluster/configs/eval-MI-vitb14-2d.yaml
 """
 
 _extract_cfg = CLIExtractVideoFramesConfig(data="", out="")

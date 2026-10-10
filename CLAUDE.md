@@ -12,9 +12,9 @@ if they don't alter training: evaluation wiring, run bookkeeping, cluster toolin
 the model sees or how it learns needs a deliberate decision, and a note in this file.
 
 **Current status (2026-10-08):** the KneeNo in-training eval is wired in, with a slice-wise adapter that hands
-KneeNo the per-slice tokens, so KneeNo's 2D-only slice tasks run too (see below). `cluster/` holds a SLURM script,
-launcher and run config. Pretraining runs end to end on CPU through the cluster script. Nothing has run on the
-cluster yet.
+KneeNo the per-slice tokens, so KneeNo's 2D-only slice tasks run too (see below). `cluster/` holds SLURM scripts,
+launchers and configs for pretraining and for the standalone evaluation. Pretraining and the standalone eval run
+end to end on CPU through the cluster launchers. Nothing has run on the cluster yet.
 
 ## Branches
 
@@ -86,17 +86,28 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - **Config trap:** disabling a task with a nonzero default frequency needs an explicit `freq: {<task>: null}`.
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
-  `evaluate(..., log_every_head_epoch=True)`, so the whole head fine-tuning curve is logged, then writes the final
-  metrics to `out` as JSON.
-  - `eval_config` is **required**: any YAML with a top-level `eval:` block, typically the run's
-    `params-pretrain.yaml`. Other blocks are ignored; a missing `eval:` raises.
-  - `tasks` defaults to all of them, the slice tasks included. `encoder` is `target` (the EMA teacher, which the
-    checkpoint stores) or `online` (the student, loaded from the method's `state_dict`).
+  `evaluate(..., log_every_head_epoch=True)`, so the whole head fine-tuning curve is logged.
+  - **Arguments (2026-10-08):** only `eval_config`, `accelerator` and `overwrite`. Everything else is in the
+    eval config file: exactly the top-level keys `checkpoint`, `image_size` (`[H, W]`, required: the checkpoint
+    doesn't record it) and `eval`. It's validated by `EvalRunConfig` (`extra="forbid"`, so a leftover `transform:`
+    or `out:` is an error), and env vars are expanded in the whole file. **An unset env var is an error**:
+    `expand_env_vars` leaves it as it is, which would point to a nonexistent checkpoint or create a literal
+    `${...}` directory. A `params-pretrain.yaml` is no longer accepted.
+  - **Tasks** are those whose `eval.freq` is set, with `tasks_due`'s semantics: null or `<= 0` is off. They are
+    computed on the merged config, so a missing key keeps KneeNo's default, and no task at all is an error. The
+    **encoder** is `eval.encoder`: `target` (the EMA teacher, which the checkpoint stores) or `online` (the
+    student, loaded from the method's `state_dict`).
+  - **Outputs:**
+    - In the parent of `eval.logging.per_label_dir`: `results.json` (final metrics) and `params.yaml` (the config
+      file with env vars expanded, written *before* evaluating).
+    - Without a `per_label_dir`: a warning, `results.json` next to the checkpoint, and no `params.yaml`.
+    - Existing results (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse, before
+      the checkpoint is loaded. With `overwrite=True` it runs anyway, but the per-label CSVs are appended to and
+      TB gets a second event file.
   - **Differs from 3d** in what the adapter needs. `num_channels` is `len(checkpoint normalize_args.mean)`: the
     checkpoint stores the resolved normalize args, whose length the transform matched to the resolved
-    `num_channels`, `auto` included. `image_size` `(H, W)` is taken from the CLI, else from the eval config's
-    `transform.image_size`, else the DINOv2 default with a warning. 3d instead reads
-    `resize_interpolation`/`resize_upscale_interpolation` from the transform block.
+    `num_channels`, `auto` included. `image_size` is `(H, W)`. 3d also reads the top-level
+    `resize_interpolation`/`resize_upscale_interpolation`.
 
 ## Run bookkeeping (copied from `3d_dinov2`; doesn't change training)
 
@@ -135,6 +146,20 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   `OMP_NUM_THREADS=1`, `expandable_segments`); multi-GPU through SLURM options only (`num_nodes` from
   `SLURM_NNODES`); a longer DDP process-group timeout for the rank-0 eval; auto-resume from
   `<out>/checkpoints/last.ckpt`. The `#SBATCH` resources are 3d's values, not tuned for this run.
+- **Standalone eval** (since 2026-10-08): `PRETRAIN_JOB_ID=<id> sbatch cluster/submit_eval_dinov2_kneeno.sh`.
+  - The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no
+    process group and no `--pg-timeout-minutes`). It extracts the same internal data, then runs
+    `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-2d.yaml`). Env
+    vars: `PRETRAIN_JOB_ID` (required, checked up front), `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+  - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
+    `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here).
+  - The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which
+    in the eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
+    `eval_per_label/`, `results.json`, `params.yaml`).
+  - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
+    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed) and `data.subset: 1.0` (all
+    exams). `tests/test_cluster_configs.py` pins that, and also that `checkpoint` and `image_size` match the
+    pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).
 
 **Comparability with `3d_dinov2`:**
 - Both read `/dev/shm/kneeno_data/internal`, but the 3D run selects series through `data_meta`
@@ -161,8 +186,9 @@ No GPU here: CPU, `dinov2/_vittest14`. This branch has the **stock test suite wi
 - `tests/_callbacks/test_kneeno_eval.py` runs the real adapter on a fake labeled dataset that stands in for the
   cluster data (one fixed depth, as with `series_depth > 0`), including all seven tasks at once.
 - `tests/_commands/test_eval_classification.py` runs the command end to end on a real DINOv2 checkpoint and the same
-  kind of fake dataset (all seven tasks, `target`/`online`, `image_size` resolution, `num_channels` from the
-  checkpoint).
+  kind of fake dataset (task selection from `freq`, all seven tasks, `target`/`online`, `num_channels` from the
+  checkpoint, output locations, `params.yaml` expansion, refusal on existing results, unset env vars, invalid
+  config files). `tests/test_cluster_configs.py` covers the shipped eval config and the eval launcher.
 - `tests/_methods/dinov2/test_dinov2_loss.py::TestDINOLoss::test_sinkhorn_knopp_teacher` (stock) is flaky in a
   full run: unseeded `torch.randn` and an `allclose` at default tolerance, so it depends on the global RNG state the
   earlier tests leave behind. It passes on its own.

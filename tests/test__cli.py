@@ -62,7 +62,7 @@ def test_cli__export(mocker: MockerFixture) -> None:
 
 
 def test_cli__eval_classification(mocker: MockerFixture) -> None:
-    config = OmegaConf.from_cli(["eval_classification", "out=metrics.json"])
+    config = OmegaConf.from_cli(["eval_classification", "eval_config=eval.yaml"])
     mock_eval_from_dictconfig = mocker.patch.object(
         _cli.eval_classification, "eval_classification_from_dictconfig"
     )
@@ -132,7 +132,7 @@ def test__EVAL_CLASSIFICATION_HELP_MSG__parameters() -> None:
     """Test that the eval_classification help message contains all parameters from CLIEvalClassificationConfig."""
     _assert_help_msg_contains_params(
         msg=_cli._EVAL_CLASSIFICATION_HELP_MSG,
-        config=CLIEvalClassificationConfig(out="", checkpoint="", eval_config=""),
+        config=CLIEvalClassificationConfig(eval_config=""),
     )
 
 

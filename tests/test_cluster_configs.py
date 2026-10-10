@@ -5,7 +5,8 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 #
-"""The cluster run configs and ``cluster/run_config.py``'s ``load_run_config``."""
+"""The cluster run configs and ``cluster/run_config.py``'s ``load_run_config``, and the
+cluster eval configs and launcher."""
 
 from __future__ import annotations
 
@@ -18,15 +19,18 @@ from typing import Any
 import pytest
 import yaml
 from kneeno.evaluation import load_eval_config
+from kneeno.evaluation.config import ALL_TASKS
 
 import lightly_train
+from lightly_train._commands.eval_classification import _load_eval_run_config
 from lightly_train._commands.train import FunctionTrainConfig
 from lightly_train._methods.dinov2.dinov2 import DINOv2Args
 from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
 from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 
 CLUSTER_DIR = Path(__file__).parents[1] / "cluster"
-RUN_CONFIGS = sorted((CLUSTER_DIR / "configs").glob("*.yaml"))
+RUN_CONFIGS = sorted((CLUSTER_DIR / "configs").glob("pretrain-*.yaml"))
+EVAL_CONFIGS = sorted((CLUSTER_DIR / "configs").glob("eval-*.yaml"))
 
 
 # cluster/ is not a package, so load run_config.py from its path.
@@ -51,6 +55,12 @@ def _write(tmp_path: Path, config: dict[str, Any]) -> Path:
 
 def test_run_configs_exist() -> None:
     assert RUN_CONFIGS
+    assert EVAL_CONFIGS
+    # Any other file would be tested as neither.
+    assert set((CLUSTER_DIR / "configs").glob("*.yaml")) == {
+        *RUN_CONFIGS,
+        *EVAL_CONFIGS,
+    }
 
 
 @pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
@@ -249,3 +259,67 @@ def test_main__every_train_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         monkeypatch, {"model": MODEL, "data": DATA, "train": train}, tmp_path
     )
     assert set(run_config.TRAIN_KEYS) <= set(kwargs)
+
+
+def _pretrain_config_of(eval_path: Path) -> Path:
+    """The run config whose run an eval config evaluates: eval-<name> -> pretrain-<name>."""
+    path = eval_path.with_name(eval_path.name.replace("eval-", "pretrain-", 1))
+    assert path.is_file(), f"No pretraining config '{path.name}' for '{eval_path.name}'"
+    return path
+
+
+@pytest.mark.parametrize("path", EVAL_CONFIGS, ids=lambda p: p.name)
+def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRETRAIN_JOB_ID", "1234")
+    raw, config = _load_eval_run_config(path)
+    eval_config = load_eval_config(config.eval)
+    assert "1234" in str(config.checkpoint)
+    # Standalone, KneeNo's own SummaryWriter logs the head curves, and per_label_dir
+    # decides where results.json and params.yaml go.
+    assert eval_config["logging"]["tensorboard_dir"] is not None
+    assert eval_config["logging"]["per_label_dir"] is not None
+    # Every task explicit: a missing key would keep KneeNo's default frequency.
+    assert set(raw["eval"]["freq"]) == set(ALL_TASKS)
+
+
+@pytest.mark.parametrize("path", EVAL_CONFIGS, ids=lambda p: p.name)
+def test_eval_config__matches_pretrain_config(path: Path) -> None:
+    """The eval config evaluates its pretraining run exactly as the in-training eval did,
+    apart from where it logs, which tasks run and how many exams it uses."""
+    eval_config = yaml.safe_load(path.read_text())
+    run = yaml.safe_load(_pretrain_config_of(path).read_text())
+
+    out = run["data"]["out"].replace("${SLURM_JOB_ID}", "${PRETRAIN_JOB_ID}")
+    assert eval_config["checkpoint"] == f"{out}/checkpoints/last.ckpt"
+    for key in ("tensorboard_dir", "per_label_dir"):
+        assert eval_config["eval"]["logging"][key].startswith(f"{out}/eval/")
+    assert eval_config["image_size"] == run["transform"]["image_size"]
+
+    def without_differences(block: dict[str, Any]) -> dict[str, Any]:
+        block = {k: v for k, v in block.items() if k not in ("logging", "freq")}
+        block["data"] = {k: v for k, v in block["data"].items() if k != "subset"}
+        return block
+
+    assert without_differences(eval_config["eval"]) == without_differences(run["eval"])
+
+
+def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """cluster/eval_dinov2_kneeno.py passes the config on as eval_config."""
+    # Restores the env vars the script sets at import time.
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    spec = importlib.util.spec_from_file_location(
+        "eval_dinov2_kneeno", CLUSTER_DIR / "eval_dinov2_kneeno.py"
+    )
+    assert spec is not None and spec.loader is not None
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        lightly_train, "eval_classification", lambda **kw: calls.append(kw)
+    )
+    path = tmp_path / "eval.yaml"
+    monkeypatch.setattr(sys, "argv", ["eval_dinov2_kneeno.py", "--config", str(path)])
+    script.main()
+    assert calls == [{"eval_config": str(path)}]

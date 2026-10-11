@@ -146,20 +146,28 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   `OMP_NUM_THREADS=1`, `expandable_segments`); multi-GPU through SLURM options only (`num_nodes` from
   `SLURM_NNODES`); a longer DDP process-group timeout for the rank-0 eval; auto-resume from
   `<out>/checkpoints/last.ckpt`. The `#SBATCH` resources are 3d's values, not tuned for this run.
-- **Standalone eval** (since 2026-10-08): `PRETRAIN_JOB_ID=<id> sbatch cluster/submit_eval_dinov2_kneeno.sh`.
+- **Standalone eval** (since 2026-10-08): `sbatch --export=ALL,PRETRAIN_JOB_ID=<id>
+  cluster/submit_eval_dinov2_kneeno.sh`. **Pass env vars with `--export`**: RWTH's `sbatch` wrapper submits with
+  `--export=NONE`, so a `PRETRAIN_JOB_ID=<id> sbatch ...` prefix never reaches the job (the script then stops at its
+  check).
   - The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no
-    process group and no `--pg-timeout-minutes`). It extracts the same internal data, then runs
+    process group and no `--pg-timeout-minutes`). It extracts the internal data to the job's node-local
+    `$TMP/kneeno_data` (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
     `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-2d.yaml`). Env
-    vars: `PRETRAIN_JOB_ID` (required, checked up front), `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+    vars: `PRETRAIN_JOB_ID` (required) and `TMP`, both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
   - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
     `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here).
   - The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which
     in the eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
     `eval_per_label/`, `results.json`, `params.yaml`).
   - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
-    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed) and `data.subset: 1.0` (all
-    exams). `tests/test_cluster_configs.py` pins that, and also that `checkpoint` and `image_size` match the
-    pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).
+    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `split.test_fraction: 0.1`,
+    `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, and the head settings of
+    the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
+    `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults), and also that
+    `checkpoint` and `image_size` match the pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).
+  - Both configs spell out every attentive head's `depth`, `num_heads`, `lr`, `warmup_epochs`, `weight_decay` at
+    KneeNo's defaults.
 
 **Comparability with `3d_dinov2`:**
 - Both read `/dev/shm/kneeno_data/internal`, but the 3D run selects series through `data_meta`

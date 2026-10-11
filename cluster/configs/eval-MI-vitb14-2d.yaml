@@ -4,8 +4,9 @@
 # unset one is an error.
 #
 # ${PRETRAIN_JOB_ID} is the SLURM job ID of the pretraining run (pretrain-MI-vitb14-2d.yaml's data.out is named
-# after it). Not ${SLURM_JOB_ID}: in the eval job that is the eval job's own ID. Submit with
-#     PRETRAIN_JOB_ID=<id> sbatch cluster/submit_eval_dinov2_kneeno.sh
+# after it). Not ${SLURM_JOB_ID}: in the eval job that is the eval job's own ID. Submit with (RWTH's sbatch does not
+# export a `PRETRAIN_JOB_ID=... sbatch` prefix to the job)
+#     sbatch --export=ALL,PRETRAIN_JOB_ID=<id> cluster/submit_eval_dinov2_kneeno.sh
 #
 # Outputs, all inside the pretraining run's folder: TensorBoard head curves (eval.logging.tensorboard_dir), per-label
 # CSVs (eval.logging.per_label_dir), and in the parent of per_label_dir the final metrics (results.json) and this
@@ -20,11 +21,14 @@ image_size:
 
 # KneeNo classification evaluation -- see KneeNo/kneeno/evaluation/config.py for every key and its default.
 # Identical to pretrain-MI-vitb14-2d.yaml's eval block except:
-#   * data.subset: 1.0 -- all labeled exams, not a subsample.
+#   * split.test_fraction: 0.1.
+#   * data: subset 1.0 (all labeled exams, not a subsample), data_root on the job's node-local $TMP (where
+#     submit_eval_dinov2_kneeno.sh extracts it; /dev/shm is for pretraining only), 31 workers.
 #   * logging.tensorboard_dir is set: there are no lightly-train loggers here to re-log the metrics, so KneeNo's
 #     own SummaryWriter writes the head fine-tuning curves.
 #   * freq only selects the tasks: every task with a non-null value (> 0) runs once; the value itself is ignored.
 #     Every task is listed explicitly, because a missing key keeps KneeNo's default frequency (deep merge).
+#   * attentive_pool has a block of its own: the pretraining run never runs it, so it has none there.
 eval:
   seed: 239
   encoder: target  # target (EMA teacher) | online (student)

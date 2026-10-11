@@ -271,6 +271,7 @@ def _pretrain_config_of(eval_path: Path) -> Path:
 @pytest.mark.parametrize("path", EVAL_CONFIGS, ids=lambda p: p.name)
 def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRETRAIN_JOB_ID", "1234")
+    monkeypatch.setenv("TMP", "/tmp/job")
     raw, config = _load_eval_run_config(path)
     eval_config = load_eval_config(config.eval)
     assert "1234" in str(config.checkpoint)
@@ -284,8 +285,9 @@ def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 @pytest.mark.parametrize("path", EVAL_CONFIGS, ids=lambda p: p.name)
 def test_eval_config__matches_pretrain_config(path: Path) -> None:
-    """The eval config evaluates its pretraining run exactly as the in-training eval did,
-    apart from where it logs, which tasks run and how many exams it uses."""
+    """The eval config evaluates its pretraining run as the in-training eval did, apart
+    from the deliberate differences below. Compared after merging over KneeNo's
+    defaults, so a key spelled out at its default in only one file is no difference."""
     eval_config = yaml.safe_load(path.read_text())
     run = yaml.safe_load(_pretrain_config_of(path).read_text())
 
@@ -295,12 +297,29 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
         assert eval_config["eval"]["logging"][key].startswith(f"{out}/eval/")
     assert eval_config["image_size"] == run["transform"]["image_size"]
 
+    run_eval = load_eval_config(run["eval"])
+    # The head settings of a task the pretraining run never runs are not comparable.
+    in_training = {task for task, freq in run_eval["freq"].items() if freq}
+
     def without_differences(block: dict[str, Any]) -> dict[str, Any]:
-        block = {k: v for k, v in block.items() if k not in ("logging", "freq")}
-        block["data"] = {k: v for k, v in block["data"].items() if k != "subset"}
+        # Where it logs, which tasks run, the test split, and the data setup of a
+        # standalone job: all exams, extracted to $TMP instead of /dev/shm, more workers.
+        block = {
+            k: v
+            for k, v in block.items()
+            if k not in ("logging", "freq", "split")
+            and not (k in ALL_TASKS and k not in in_training)
+        }
+        block["data"] = {
+            k: v
+            for k, v in block["data"].items()
+            if k not in ("subset", "data_root", "num_workers")
+        }
         return block
 
-    assert without_differences(eval_config["eval"]) == without_differences(run["eval"])
+    assert without_differences(load_eval_config(eval_config["eval"])) == (
+        without_differences(run_eval)
+    )
 
 
 def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

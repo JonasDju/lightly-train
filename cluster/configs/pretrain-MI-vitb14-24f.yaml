@@ -65,7 +65,9 @@ method:
   compile_blocks: true
   compile_heads: false  # compile the projection heads and the iBOT loss, see DINOv2Args.compile_heads
   ibot_loss_chunk_size: null  # e.g. 4096: iBOT loss in token chunks with activation checkpointing (ibotpp: all)
-  activation_memory_budget: null  # e.g. 0.5, for the compiled regions; needs compile_blocks or compile_heads
+  activation_memory_budget: null  # e.g. 0.5, for the compiled regions
+                                  # DO NOT ENABLE THIS WHILE compile_blocks IS TRUE. activation_memory_budget is broken when
+                                  # the model consumes randomness (see https://github.com/pytorch/pytorch/issues/190758)
 
 transform:
   image_size:

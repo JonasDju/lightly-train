@@ -1,0 +1,93 @@
+# Standalone KneeNo classification evaluation of a finished 3D DINOv2 pretraining run -- config for
+# cluster/eval_dinov2_kneeno.py (--config), i.e. `lightly-train eval_classification eval_config=...`. Top-level keys:
+# checkpoint, image_size, resize_interpolation, resize_upscale_interpolation, eval; anything else is an error. Env
+# vars ($VAR, ${VAR}, leading ~) are expanded everywhere; an unset one is an error.
+#
+# ${PRETRAIN_JOB_ID} is the SLURM job ID of the pretraining run (pretrain-MI-vitb14-24f.yaml's data.out is named
+# after it). Not ${SLURM_JOB_ID}: in the eval job that is the eval job's own ID. Submit with (RWTH's sbatch does not
+# export a `PRETRAIN_JOB_ID=... sbatch` prefix to the job)
+#     sbatch --export=ALL,PRETRAIN_JOB_ID=<id> cluster/submit_eval_dinov2_kneeno.sh
+#
+# Outputs, all inside the pretraining run's folder: TensorBoard head curves (eval.logging.tensorboard_dir), per-label
+# CSVs (eval.logging.per_label_dir), and in the parent of per_label_dir the final metrics (results.json) and this
+# config with env vars expanded (params.yaml). The command refuses to start if any of them already exist.
+
+checkpoint: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/checkpoints/last.ckpt
+# Must equal the pretraining run's transform.image_size / resize_interpolation / resize_upscale_interpolation:
+# every volume is resized to image_size that way, and the checkpoint records none of them. A left-out resize key
+# falls back to DINOv2ViTTransformArgs' default, with a warning.
+image_size:
+- 224
+- 224
+- 16
+# area/linear/nearest/cubic, or <in-plane>+<depth> (e.g. area+nearest: depth nearest picks whole slices).
+# resize_upscale_interpolation applies to enlarged axes only; null means resize_interpolation everywhere.
+resize_interpolation: area
+resize_upscale_interpolation: linear
+
+# KneeNo classification evaluation -- see KneeNo/kneeno/evaluation/config.py for every key and its default.
+# Identical to pretrain-MI-vitb14-24f.yaml's eval block except:
+#   * split.test_fraction: 0.1.
+#   * data: subset 1.0 (all labeled exams, not a subsample), data_root on the job's node-local $TMP (where
+#     submit_eval_dinov2_kneeno.sh extracts it; /dev/shm is for pretraining only), 31 workers.
+#   * logging.tensorboard_dir is set: there are no lightly-train loggers here to re-log the metrics, so KneeNo's
+#     own SummaryWriter writes the head fine-tuning curves.
+#   * freq only selects the tasks: every task with a non-null value (> 0) runs once; the value itself is ignored.
+#     Every task is listed explicitly, because a missing key keeps KneeNo's default frequency (deep merge). The
+#     slice tasks stay off: they need a slice-wise (2D) encoder.
+eval:
+  seed: 239
+  encoder: target  # target (EMA teacher) | online (student)
+  amp_dtype: bfloat16  # frozen-encoder forward under autocast (CUDA only); null -> float32. Heads still train in float32.
+  cache_features: true  # linear / linear_pool train on embeddings extracted once instead of re-encoding every head
+                        # epoch; k-NN always uses the shared pass. attentive_pool never caches.
+  split:
+    test_fraction: 0.1
+  data:
+    data_root: $TMP/kneeno_data/internal
+    label_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_labeled.json
+    dataset_type: internal
+    series_depth: 24  # match the pretraining series_depth -- no resampling distribution shift
+    resample_mode: nearest
+    num_workers: 31
+    subset: 1.0  # seeded subsample of the labeled EXAMS: float in (0, 1] = fraction, int > 1 = count, 1.0 = all
+    multiprocessing_context: fork  # eval DataLoader worker start method; null -> inherit. Workers must never touch CUDA
+    persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
+  logging:
+    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/internal/post-training/tb
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/internal/post-training/eval_per_label
+    tag_prefix: eval
+  freq:
+    knn: 1
+    linear: 1
+    linear_pool: 1
+    attentive_pool: 1
+    linear_slice_cls: null
+    attentive_slice_cls: null
+    attentive_slice_pool: null
+  knn:
+    k: [5, 20, 50, 100]
+    metric: cosine
+    temperature: 0.07
+    pooling: avg
+    center: true  # subtract each sequence's mean feature before the per-sequence L2 normalisation
+    batch_size: 32  # exams -> 128 volumes per encoder forward
+  linear:
+    batchnorm: true  # non-affine BatchNorm1d (z-score) in front of the linear layer
+    epochs: 20
+    batch_size: 32  # exams
+    lr: 0.001
+  linear_pool:
+    pooling: avg
+    batchnorm: true  # non-affine BatchNorm1d (z-score) in front of the linear layer
+    epochs: 20
+    batch_size: 32  # exams
+    lr: 0.001
+  attentive_pool:
+    depth: 1
+    num_heads: 12
+    epochs: 20
+    batch_size: 16  # exams
+    lr: 0.0005
+    warmup_epochs: 5
+    weight_decay: 0.001

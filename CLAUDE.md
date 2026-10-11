@@ -513,7 +513,8 @@ No GPU here, so verify with small synthetic fixtures on CPU using the smallest m
   tests/_transforms/test_monai_wrappers.py tests/_transforms/test_transform_equivalence.py \
   tests/_data/test_mi_dataset.py tests/_commands/test_train.py \
   tests/_commands/test_train_helpers.py tests/_models/test_embedding_model.py \
-  tests/test_activation_checkpointing.py tests/test__cli.py
+  tests/test_activation_checkpointing.py tests/test__cli.py \
+  tests/_commands/test_eval_classification.py tests/test_cluster_configs.py
 ```
 or the whole suite with `.venv/bin/python -m pytest tests` (slow-ish; the full suite is
 ~2100 files/cases, mostly for methods/models this fork doesn't touch).
@@ -573,8 +574,8 @@ available here and is enabled in the config.
   config lacks the keys are unaffected; `null` upscale = area everywhere -- bitwise
   `RandomResizedCrop3D` at `scale=ratio=1`). The callback gets them from the transform
   args via `train.py` -> `get_callbacks`; `eval_classification` reads them from the
-  `transform:` block of the `--eval_config` file (`params-pretrain.yaml`), falling back
-  to the defaults. Not `F.interpolate(trilinear)` (used until
+  top-level `resize_interpolation` / `resize_upscale_interpolation` keys of its eval
+  config file, falling back to the defaults with a warning. Not `F.interpolate(trilinear)` (used until
   2026-10-01): it has no 3D anti-aliasing, and on real 672px exams its 672->224 output
   (pure every-3rd-pixel subsampling) had more in-plane high-frequency energy than nearly
   every training view, so eval numbers from before the switch are not comparable. Resizing depth too (vjepa2's adapter leaves it
@@ -593,14 +594,32 @@ available here and is enabled in the config.
   and closes KneeNo's own TensorBoard writer) if an evaluator was ever built.
 - `cluster/configs/pretrain-MI-vitb14-24f.yaml` — the run config's `eval:` block (the
   former `_configs/kneeno_eval.yaml`, removed), copied from vjepa2's with `linear` enabled
-  and `logging.tensorboard_dir: null`. `tests/test_cluster_configs.py` checks both.
+  and `logging.tensorboard_dir: null`. `tests/test_cluster_configs.py` checks both. It also
+  spells out an `attentive_pool` block (off in training) matching the eval config's.
 - `src/lightly_train/_commands/eval_classification.py` — the standalone
-  `lightly-train eval_classification` command. `eval_config` is **required**: any YAML with
-  a top-level `eval:` block (typically the run's `params-pretrain.yaml`; other blocks are
-  ignored, a missing `eval:` raises). `log_every_head_epoch=True` so the
-  whole head fine-tuning curve is produced. Far shorter than vjepa2's script: a
-  LightlyTrain checkpoint stores the model objects, so there is no architecture to
-  rebuild.
+  `lightly-train eval_classification` command (same interface as on `2d_dinov2` since
+  2026-10-11). `log_every_head_epoch=True` so the whole head fine-tuning curve is produced.
+  Far shorter than vjepa2's script: a LightlyTrain checkpoint stores the model objects, so
+  there is no architecture to rebuild.
+  - **Arguments:** only `eval_config`, `accelerator` and `overwrite`. Everything else is in
+    the eval config file, validated by `EvalRunConfig` (`extra="forbid"`, so a leftover
+    `transform:` or `out:` is an error; a `params-pretrain.yaml` is no longer accepted):
+    `checkpoint`, `image_size` (`[H, W, D]`, required: the checkpoint doesn't record it),
+    optional `resize_interpolation` / `resize_upscale_interpolation` (validated like the
+    transform args; a missing key falls back to `DINOv2ViTTransformArgs`' default **with a
+    warning**, detected via `model_fields_set` because `null` is a valid upscale value) and
+    `eval`. Env vars are expanded in the whole file; **an unset one is an error**
+    (`expand_env_vars` leaves it as it is).
+  - **Tasks** are those whose `eval.freq` is set (null or `<= 0` is off, `tasks_due`'s
+    semantics), computed on the merged config, so a missing key keeps KneeNo's default; no
+    task is an error. Slice tasks, if enabled, are dropped by KneeNo with a warning (this
+    adapter has no slice tokens). The **encoder** is `eval.encoder` (`target` | `online`).
+  - **Outputs:** `results.json` (final metrics) and `params.yaml` (the config file with env
+    vars expanded, written *before* evaluating) in the parent of `eval.logging.per_label_dir`;
+    without a `per_label_dir`, a warning, `results.json` next to the checkpoint and no
+    `params.yaml`. Existing results (`results.json`, `params.yaml`, `per_label_dir`,
+    `tensorboard_dir`) make it refuse before the checkpoint is loaded; `overwrite=True` runs
+    anyway (per-label CSVs are appended to, TB gets a second event file).
 
 **`evaluate()` is called on every rank, deliberately and with no rank guard.**
 `ClassificationEvaluator` does the work on rank 0 and then hits `dist.barrier()` +
@@ -699,6 +718,28 @@ timeout) whenever `SLURM_NTASKS > 1`, default 240 min (`--pg-timeout-minutes` /
 `PG_TIMEOUT_MINUTES` in the submit script) — **set it above your longest eval round**. Verified locally with a
 real 2-rank CPU DDP run through the script (timeout reached `init_process_group`, eval + barrier completed);
 multi-node and real NCCL have not been run.
+
+**Standalone eval** (since 2026-10-11, same as on `2d_dinov2`): `sbatch --export=ALL,PRETRAIN_JOB_ID=<id>
+cluster/submit_eval_dinov2_kneeno.sh`. **Pass env vars with `--export`**: RWTH's `sbatch` wrapper submits with
+`--export=NONE`, so a `PRETRAIN_JOB_ID=<id> sbatch ...` prefix never reaches the job (the script then stops at its
+check).
+- The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no process
+  group and no `--pg-timeout-minutes`). It extracts the internal data to the job's node-local `$TMP/kneeno_data`
+  (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
+  `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-24f.yaml`). Env
+  vars: `PRETRAIN_JOB_ID` (required) and `TMP`, both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+- The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
+  `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here; verified
+  end to end on CPU with a tiny model, a JPEG fixture and 2 spawn workers).
+- The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which in the
+  eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
+  `eval_per_label/`, `results.json`, `params.yaml`).
+- Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
+  loggers here), `freq` (the four volume tasks `1`, i.e. on, the slice tasks `null`; every key listed),
+  `split.test_fraction: 0.1`, `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`,
+  and the head settings of tasks the pretraining run doesn't run (`attentive_pool`). `tests/test_cluster_configs.py`
+  pins that (after merging both over KneeNo's defaults), and that `checkpoint`, `image_size` and the two resize keys
+  match the pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).
 
 ## Open risks / known follow-ups (not yet done, not blocking)
 

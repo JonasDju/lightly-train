@@ -134,6 +134,10 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `<case>/<series>/<NNN>.jpeg` slice is one sample.
   - optional `train:` (allowlist `run_config.TRAIN_KEYS`), `method:` (`DINOv2Args`), `transform:`
     (`DINOv2ViTTransformArgs`) and `eval:` (eval callback config; a missing block means no eval).
+  - optional `callbacks:` (-> `pretrain(callbacks=)`, lightly-train's own callbacks by name), e.g.
+    `model_checkpoint: {every_n_epochs: 50, save_top_k: -1}` for a checkpoint every 50 epochs besides `last.ckpt`.
+    `save_top_k` must be `-1`: the default `1` keeps only the newest. The script merges `eval:` into it as
+    `kneeno_eval`; `callbacks.kneeno_eval` is rejected.
   - Loaded by `cluster/run_config.py::load_run_config`, which expands env vars and rejects unknown keys.
 - **The shipped config lists every train/method/transform key at its stock default.** Unlike `3d_dinov2`, that
   includes `num_channels: auto` (3 channels: the grayscale JPEGs are loaded as RGB). `tests/test_cluster_configs.py`

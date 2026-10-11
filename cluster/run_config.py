@@ -13,13 +13,14 @@ from typing import Any
 import yaml
 from kneeno import expand_env_vars
 
-RUN_CONFIG_KEYS = ("model", "data", "train", "method", "transform", "eval")
-BLOCKS = ("data", "train", "method", "transform", "eval")  # the keys whose value is a mapping
+RUN_CONFIG_KEYS = ("model", "data", "train", "method", "transform", "callbacks", "eval")
+BLOCKS = ("data", "train", "method", "transform", "callbacks", "eval")  # the keys whose value is a mapping
 # Named exactly like lightly_train.pretrain's arguments, which they are passed to as-is: the output directory and
 # the image folder lightly-train searches for images itself (the JPEG slices of the unlabeled KneeNo dataset).
 DATA_KEYS = ("out", "data")
 # The optional train block: the other lightly_train.pretrain arguments a run may set, also passed as-is. Everything
-# the script derives itself (strategy, num_nodes, resume_interrupted, callbacks, params_file) is deliberately absent.
+# the script derives itself (strategy, num_nodes, resume_interrupted, params_file) is deliberately absent, and so is
+# callbacks, which has its own top-level block.
 TRAIN_KEYS = (
     "epochs",
     "batch_size",
@@ -42,7 +43,8 @@ def load_run_config(path: Path) -> dict[str, Any]:
     """A run config with env vars expanded; missing or null optional blocks are left out.
 
     Unknown top-level, ``data`` or ``train`` keys are an error, so a typo such as ``methods:`` cannot silently fall
-    back to the defaults. So is a missing ``model``, ``data`` block or ``data`` key.
+    back to the defaults. So is a missing ``model``, ``data`` block or ``data`` key, and a ``callbacks.kneeno_eval``
+    (the eval callback is configured by the top-level ``eval`` block).
     """
     with path.open() as f:
         raw = yaml.safe_load(f) or {}
@@ -72,4 +74,10 @@ def load_run_config(path: Path) -> dict[str, Any]:
     unknown = set(config.get("train", {})) - set(TRAIN_KEYS)
     if unknown:
         raise ValueError(f"'train' in run config '{path}' has unknown keys {sorted(unknown)}; valid: {TRAIN_KEYS}.")
+
+    if "kneeno_eval" in config.get("callbacks", {}):
+        raise ValueError(
+            f"'callbacks' in run config '{path}' sets 'kneeno_eval'; configure the eval callback with the top-level "
+            "'eval' block instead."
+        )
     return config

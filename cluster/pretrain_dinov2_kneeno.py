@@ -7,6 +7,7 @@ Everything about the experiment comes from a run config (``--config``), like vje
     train:      -> lightly_train.pretrain(epochs=, batch_size=, num_workers=, trainer_args=) (optional)
     method:     -> lightly_train.pretrain(method_args=...)      (DINOv2Args)
     transform:  -> lightly_train.pretrain(transform_args=...)   (DINOv2ViTTransformArgs)
+    callbacks:  -> lightly_train.pretrain(callbacks=...)        (CallbackArgs, all but kneeno_eval)
     eval:       -> the KneeNo eval callback's config            (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
 
 ``model`` and ``data`` (with all five keys) are required. A missing ``train``/``method``/``transform`` block, or
@@ -23,6 +24,18 @@ besides ``--config`` is the multi-GPU process-group timeout, which does not affe
 The eval block's ``/dev/shm/kneeno_data/internal`` data must exist by the time the first eval epoch ends
 (``submit_pretrain_dinov2_kneeno.sh`` extracts it). If it cannot be loaded the callback only logs a warning
 and disables itself, so check the log for "Disabling KneeNo evaluation".
+
+``callbacks`` configures lightly-train's own callbacks by name, each a mapping over that callback's defaults, or
+null to switch it off (a callback left out keeps its default). E.g. to keep a checkpoint every 50 epochs, besides
+``last.ckpt``:
+
+    callbacks:
+      model_checkpoint:
+        every_n_epochs: 50
+        save_top_k: -1    # the default 1 keeps only the newest periodic checkpoint
+
+Resuming needs ``<out>/checkpoints/last.ckpt``, so leave ``model_checkpoint``'s ``dirpath`` and ``save_last`` at
+their defaults. The eval callback stays in its own ``eval`` block; ``callbacks.kneeno_eval`` is an error.
 
 Submit through ``submit_pretrain_dinov2_kneeno.sh``; that also prepares the node-local data first. Run by hand:
 
@@ -102,6 +115,10 @@ def main() -> None:
     config = load_run_config(Path(args.config))
     # A re-queued job must continue rather than fail on the existing out dir.
     resume_interrupted = (Path(config["data"]["out"]) / "checkpoints" / "last.ckpt").is_file()
+    callbacks = dict(config.get("callbacks", {}))
+    # No eval block -> no evaluation: the callback is off unless given a config.
+    if "eval" in config:
+        callbacks["kneeno_eval"] = {"config": config["eval"]}
 
     lightly_train.pretrain(
         **config["data"],
@@ -110,8 +127,7 @@ def main() -> None:
         method="dinov2",
         method_args=config.get("method"),
         transform_args=config.get("transform"),
-        # No eval block -> no evaluation: the callback is off unless given a config.
-        callbacks={"kneeno_eval": {"config": config["eval"]}} if "eval" in config else None,
+        callbacks=callbacks or None,
         params_file=args.config,
         resume_interrupted=resume_interrupted,
         # devices stays "auto" (GPUs visible to each task); nodes must be passed, lightly-train does not

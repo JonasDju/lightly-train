@@ -22,6 +22,7 @@ from kneeno.evaluation import load_eval_config
 from kneeno.evaluation.config import ALL_TASKS
 
 import lightly_train
+from lightly_train._callbacks.callback_args import CallbackArgs
 from lightly_train._commands.eval_classification import _load_eval_run_config
 from lightly_train._commands.train import FunctionTrainConfig
 from lightly_train._methods.dinov2.dinov2 import DINOv2Args
@@ -91,6 +92,12 @@ def test_run_config__train_valid(path: Path) -> None:
     FunctionTrainConfig.model_validate(
         {**config["data"], **config.get("train", {}), "model": config["model"]}
     )
+
+
+@pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
+def test_run_config__callbacks_valid(path: Path) -> None:
+    # Like the train block's values, checked by pretrain only once the job runs.
+    CallbackArgs.model_validate(load_run_config(path).get("callbacks", {}))
 
 
 @pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
@@ -203,6 +210,25 @@ def test_load_run_config__unknown_train_key(tmp_path: Path, key: str) -> None:
         load_run_config(path)
 
 
+# The example in the shipped configs and the script's docstring.
+CALLBACKS = {"model_checkpoint": {"every_n_epochs": 50, "save_top_k": -1}}
+
+
+def test_load_run_config__callbacks_block(tmp_path: Path) -> None:
+    callbacks = {**CALLBACKS, "early_stopping": None}
+    path = _write(tmp_path, {"model": MODEL, "data": DATA, "callbacks": callbacks})
+    # A null callback switches it off, so it must survive loading.
+    assert load_run_config(path)["callbacks"] == callbacks
+    CallbackArgs.model_validate(callbacks)
+
+
+def test_load_run_config__callbacks_kneeno_eval(tmp_path: Path) -> None:
+    callbacks = {"kneeno_eval": {"config": {"freq": {"knn": 1}}}}
+    path = _write(tmp_path, {"model": MODEL, "data": DATA, "callbacks": callbacks})
+    with pytest.raises(ValueError, match="top-level 'eval' block"):
+        load_run_config(path)
+
+
 def _run_main(
     monkeypatch: pytest.MonkeyPatch, config: dict[str, Any], tmp_path: Path
 ) -> dict[str, Any]:
@@ -243,6 +269,20 @@ def test_main__passes_train_block(
     assert kwargs["model"] == MODEL
     assert kwargs["num_nodes"] == 2
     assert kwargs["callbacks"] is None
+
+
+def test_main__passes_callbacks_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eval_block = {"freq": {"knn": 1}}
+    config = {"model": MODEL, "data": DATA, "callbacks": CALLBACKS}
+    kwargs = _run_main(monkeypatch, config, tmp_path)
+    assert kwargs["callbacks"] == CALLBACKS
+    kwargs = _run_main(monkeypatch, {**config, "eval": eval_block}, tmp_path)
+    assert kwargs["callbacks"] == {
+        **CALLBACKS,
+        "kneeno_eval": {"config": eval_block},
+    }
 
 
 def test_main__no_train_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

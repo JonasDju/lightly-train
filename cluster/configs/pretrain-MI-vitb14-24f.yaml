@@ -1,7 +1,7 @@
 # 3D DINOv2 pretraining on the unlabeled KneeNo volumes -- run config for cluster/pretrain_dinov2_kneeno.py
 # (--config), the only source of the run's settings. The script passes model and the data and train blocks' keys
-# to lightly_train.pretrain directly and the other three blocks as method_args, transform_args and the KneeNo eval
-# callback's config; lightly-train copies this file into data.out as params-pretrain.yaml
+# to lightly_train.pretrain directly and the other blocks as method_args, transform_args, callbacks and the KneeNo
+# eval callback's config; lightly-train copies this file into data.out as params-pretrain.yaml
 # (params-pretrain-1.yaml, ... on each resume). Env vars ($VAR, ${VAR}, leading ~) are expanded everywhere.
 #
 # method/transform list every DINOv2Args / DINOv2ViTTransformArgs field at its lightly-train default (except
@@ -134,6 +134,14 @@ transform:
       - 0.4
       - 0.6
     gaussian_sharpen: null
+
+# lightly-train's own callbacks (CallbackArgs in src/lightly_train/_callbacks/callback_args.py), each a mapping
+# over that callback's defaults or null to switch it off; a callback left out keeps its default. kneeno_eval is
+# not allowed here: the eval block below configures it. Keep model_checkpoint's dirpath and save_last at their
+# defaults, resuming needs <out>/checkpoints/last.ckpt.
+model_checkpoint:
+  every_n_epochs: 50
+  save_top_k: -1  # the default 1 keeps only the newest periodic checkpoint
 
 # KneeNo classification evaluation, run on the frozen encoder every eval.freq.<task>
 # epochs -- see KneeNo/kneeno/evaluation/config.py for every key and its default.

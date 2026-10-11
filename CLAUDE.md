@@ -650,7 +650,10 @@ process-group timeout — deliberately kept as a flag: an infrastructure knob, n
 `resample_mode` — named like `pretrain`'s arguments and passed as `**data`), optional `train:` (further `pretrain`
 arguments — `epochs`, `batch_size`, `num_workers`, `precision`, `trainer_args`, ...; allowlisted in
 `run_config.TRAIN_KEYS`, unknown keys rejected, also passed as-is), `method:` (-> `method_args`),
-`transform:` (-> `transform_args`) and `eval:` (-> the eval callback's `config`), loaded and validated by
+`transform:` (-> `transform_args`), `callbacks:` (-> `callbacks`, lightly-train's own callbacks by name, e.g.
+`model_checkpoint: {every_n_epochs: 50, save_top_k: -1}` for a checkpoint every 50 epochs besides `last.ckpt`;
+`save_top_k` must be `-1`, the default `1` keeps only the newest) and `eval:` (-> the eval callback's `config`; the
+script merges it into `callbacks` as `kneeno_eval`, and `callbacks.kneeno_eval` is rejected), loaded and validated by
 `cluster/run_config.py::load_run_config` (the script imports it as `from run_config import ...`; running the script puts
 `cluster/` first on `sys.path`). **`model` and `data` with
 all five keys are required.** `load_run_config` runs KneeNo's `expand_env_vars` over the whole config

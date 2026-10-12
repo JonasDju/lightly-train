@@ -90,7 +90,11 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
   `evaluate(..., epoch=0)` once: each task logs its test metrics (KneeNo's train/val/test protocol, heads
-  early-stopped on val; `eval.verbose` logs the per-head-epoch val metrics).
+  early-stopped on val; `eval.verbose` logs the per-head-epoch val metrics), and each trained head also its best
+  epoch's `val_auroc`. The callback re-logs that as `eval/<task>/val_auroc`: compare pretraining epochs by it,
+  not by the test curves. `cluster/configs/eval-MI-*.yaml` sets `eval.data.abort_on_io_error: true` (an exam
+  that fails to load raises), `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the in-training
+  eval must not kill the run).
   - **Arguments (2026-10-08):** only `eval_config`, `accelerator` and `overwrite`. Everything else is in the
     eval config file: exactly the top-level keys `checkpoint`, `image_size` (`[H, W]`, required: the checkpoint
     doesn't record it) and `eval`. It's validated by `EvalRunConfig` (`extra="forbid"`, so a leftover `transform:`

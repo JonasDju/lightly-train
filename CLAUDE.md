@@ -602,7 +602,11 @@ available here and is enabled in the config.
 - `src/lightly_train/_commands/eval_classification.py` — the standalone
   `lightly-train eval_classification` command (same interface as on `2d_dinov2` since
   2026-10-11). One `evaluate(..., epoch=0)` call: each task logs its test metrics once (KneeNo's
-  train/val/test protocol, heads early-stopped on val; `eval.verbose` logs the val metrics per head epoch).
+  train/val/test protocol, heads early-stopped on val; `eval.verbose` logs the val metrics per head epoch),
+  and each trained head also its best epoch's `val_auroc`. The callback re-logs that as `eval/<task>/val_auroc`:
+  compare pretraining epochs by it, not by the test curves. `cluster/configs/eval-MI-*.yaml` sets
+  `eval.data.abort_on_io_error: true` (an exam that fails to load raises), `pretrain-MI-*.yaml` sets `false`
+  (it is replaced by a random one; the in-training eval must not kill the run).
   Far shorter than vjepa2's script: a LightlyTrain checkpoint stores the model objects, so
   there is no architecture to rebuild.
   - **Arguments:** only `eval_config`, `accelerator` and `overwrite`. Everything else is in

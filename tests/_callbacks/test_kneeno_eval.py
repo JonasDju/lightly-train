@@ -68,9 +68,9 @@ def _config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
         "data": {"dataset_type": "internal", "num_workers": 0},
         "knn": {"batch_size": 4},
-        "linear": {"epochs": 1, "batch_size": 4},
-        "linear_pool": {"epochs": 1, "batch_size": 4},
-        "attentive_pool": {"epochs": 1, "batch_size": 4, "num_heads": 2},
+        "linear": {"max_epochs": 1, "batch_size": 4},
+        "linear_pool": {"max_epochs": 1, "batch_size": 4},
+        "attentive_pool": {"max_epochs": 1, "batch_size": 4, "num_heads": 2},
         "freq": {
             "knn": 1,
             "linear": None,

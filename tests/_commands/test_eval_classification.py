@@ -113,9 +113,9 @@ def _eval_block(tmp_path: Path) -> dict[str, Any]:
         # Every task explicit: a missing key keeps KneeNo's default frequency.
         "freq": {task: 1 if task in VOLUME_TASKS else None for task in ALL_TASKS},
         "knn": {"batch_size": 4},
-        "linear": {"epochs": 1, "batch_size": 4},
-        "linear_pool": {"epochs": 1, "batch_size": 4},
-        "attentive_pool": {"epochs": 1, "batch_size": 4, "num_heads": 2},
+        "linear": {"max_epochs": 1, "batch_size": 4},
+        "linear_pool": {"max_epochs": 1, "batch_size": 4},
+        "attentive_pool": {"max_epochs": 1, "batch_size": 4, "num_heads": 2},
     }
 
 

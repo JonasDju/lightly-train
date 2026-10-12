@@ -589,8 +589,7 @@ available here and is enabled in the config.
   `DEFAULT_EVAL_CONFIG`). There is deliberately **no shipped default eval config** any
   more — the cluster script passes the `eval:` block of its run config. Runs in
   `on_train_epoch_end` on whatever `kneeno.evaluation.tasks_due(epoch, config["freq"])`
-  returns, with `log_every_head_epoch=False` so each task contributes one point per
-  pretraining epoch. `on_train_end` calls `ClassificationEvaluator.cleanup()` (flushes
+  returns; each task contributes one point (its test metrics) per pretraining epoch. `on_train_end` calls `ClassificationEvaluator.cleanup()` (flushes
   and closes KneeNo's own TensorBoard writer) if an evaluator was ever built.
 - `cluster/configs/pretrain-MI-vitb14-24f.yaml` — the run config's `eval:` block (the
   former `_configs/kneeno_eval.yaml`, removed), copied from vjepa2's with `linear` enabled
@@ -598,7 +597,8 @@ available here and is enabled in the config.
   spells out an `attentive_pool` block (off in training) matching the eval config's.
 - `src/lightly_train/_commands/eval_classification.py` — the standalone
   `lightly-train eval_classification` command (same interface as on `2d_dinov2` since
-  2026-10-11). `log_every_head_epoch=True` so the whole head fine-tuning curve is produced.
+  2026-10-11). One `evaluate(..., epoch=0)` call: each task logs its test metrics once (KneeNo's
+  train/val/test protocol, heads early-stopped on val; `eval.verbose` logs the val metrics per head epoch).
   Far shorter than vjepa2's script: a LightlyTrain checkpoint stores the model objects, so
   there is no architecture to rebuild.
   - **Arguments:** only `eval_config`, `accelerator` and `overwrite`. Everything else is in
@@ -739,7 +739,7 @@ check).
   `eval_per_label/`, `results.json`, `params.yaml`).
 - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
   loggers here), `freq` (the four volume tasks `1`, i.e. on, the slice tasks `null`; every key listed),
-  `split.test_fraction: 0.1`, `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`,
+  `split` (`0.8/0.1/0.1` train/val/test), `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`,
   and the head settings of tasks the pretraining run doesn't run (`attentive_pool`). `tests/test_cluster_configs.py`
   pins that (after merging both over KneeNo's defaults), and that `checkpoint`, `image_size` and the two resize keys
   match the pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).

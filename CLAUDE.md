@@ -55,12 +55,15 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - `src/lightly_train/_data/kneeno_adapter.py`: `DINOv2Adapter(EncoderAdapter)`, treating a volume as `D`
   independent slices.
   - `has_cls_token = True` (so the `linear` task is available) and `has_slice_tokens = True` (so the slice tasks
-    are). The constructor validates `dataset_type` against `internal`/`external` and also takes `embed_dim`,
-    `num_channels`, `image_size` `(H, W)`, `normalize`.
+    are). The constructor takes `embed_dim`, `num_channels`, `image_size` `(H, W)`, `normalize` (no
+    `dataset_type` since 2026-10-12).
   - `num_channels` is the model's resolved input-channel count (`transform_args.num_channels`, 3 with the stock
     `auto` + ImageNet normalize), so `prepare_input` knows to repeat the grayscale volume to RGB, as vjepa2's
     `n_channels` does for the official checkpoints. `normalize` must have 1 or `num_channels` values (checked).
-  - `prepare_input`: external volumes go through `LabeledExternalKneeMRIDataset.to_uint8` first. The volume is
+  - `prepare_input`: external volumes go through `LabeledExternalKneeMRIDataset.to_uint8` first, decided per
+    volume by the `source` argument KneeNo passes (`"internal"` / `"external"`, from the dataset's
+    `(volumes, labels, source)` items; anything else raises), so `eval.data.dataset_type: mixed` (train/val on
+    internal, test on every external exam) works without changes here. The volume is
     repeated to `num_channels`, then every slice goes through lightly-train's `EmbeddingTransform` (resize to
     `image_size`, no crop; normalize with `max_pixel_value=255`). Output `(C, D, H, W)`, depth kept, so
     `eval.data.series_depth` must be `> 0` (KneeNo raises a clear error for mixed depths otherwise).

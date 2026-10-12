@@ -79,9 +79,7 @@ class KneeNoEval(Callback):
 
         feature_dim = self._wrapped_model.feature_dim()
 
-        dataset_type = self._config.get("data").get("dataset_type")
         adapter = DINOv2Adapter(
-            dataset_type=dataset_type,
             embed_dim=feature_dim,
             num_channels=self._num_channels,
             image_size=self._image_size,

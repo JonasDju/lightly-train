@@ -22,10 +22,8 @@ from lightly_train._embedding.embedding_transform import EmbeddingTransform
 from .. import helpers
 
 
-def _adapter(dataset_type: str = "internal") -> DINOv2Adapter:
-    return DINOv2Adapter(
-        dataset_type=dataset_type, embed_dim=8, num_channels=3, image_size=(32, 16)
-    )
+def _adapter() -> DINOv2Adapter:
+    return DINOv2Adapter(embed_dim=8, num_channels=3, image_size=(32, 16))
 
 
 def test_is_encoder_adapter() -> None:
@@ -44,7 +42,6 @@ def test_has_slice_tokens() -> None:
 
 def test_init() -> None:
     adapter = DINOv2Adapter(
-        dataset_type="external",
         embed_dim=8,
         num_channels=1,
         image_size=[32, 16],
@@ -52,22 +49,14 @@ def test_init() -> None:
     )
     assert adapter.embed_dim == 8
     assert adapter.num_channels == 1
-    assert adapter.dataset_type == "external"
     assert adapter.image_size == (32, 16)
     assert adapter.mean == (0.5,)
     assert adapter.std == (0.25,)
 
 
-def test_init__invalid_dataset_type() -> None:
-    with pytest.raises(ValueError, match="dataset_type"):
-        _adapter(dataset_type="labeled")
-
-
 def test_init__invalid_num_channels() -> None:
     with pytest.raises(ValueError, match="num_channels"):
-        DINOv2Adapter(
-            dataset_type="internal", embed_dim=8, num_channels=0, image_size=(32, 16)
-        )
+        DINOv2Adapter(embed_dim=8, num_channels=0, image_size=(32, 16))
 
 
 @pytest.mark.parametrize(
@@ -82,7 +71,6 @@ def test_init__normalize_matches_num_channels(
     num_channels: int, normalize: tuple[tuple[float, ...], tuple[float, ...]]
 ) -> None:
     adapter = DINOv2Adapter(
-        dataset_type="internal",
         embed_dim=8,
         num_channels=num_channels,
         image_size=(32, 16),
@@ -105,7 +93,6 @@ def test_init__normalize_mismatch(
 ) -> None:
     with pytest.raises(ValueError, match="normalize"):
         DINOv2Adapter(
-            dataset_type="internal",
             embed_dim=8,
             num_channels=num_channels,
             image_size=(32, 16),
@@ -119,7 +106,10 @@ def test_picklable() -> None:
     unpickled = pickle.loads(pickle.dumps(adapter))
     assert unpickled.embed_dim == 8
     volume = _random_volume(depth=3)
-    assert torch.equal(unpickled.prepare_input(volume), adapter.prepare_input(volume))
+    assert torch.equal(
+        unpickled.prepare_input(volume, source="internal"),
+        adapter.prepare_input(volume, source="internal"),
+    )
 
 
 # -- prepare_input -------------------------------------------------------------------
@@ -146,13 +136,14 @@ def _expected_constant(
 @pytest.mark.parametrize("num_channels", [1, 3])
 def test_prepare_input__shape_and_dtype(num_channels: int) -> None:
     adapter = DINOv2Adapter(
-        dataset_type="internal",
         embed_dim=8,
         num_channels=num_channels,
         image_size=(32, 16),
         normalize=((0.5,), (0.25,)),
     )
-    out = adapter.prepare_input(_random_volume(depth=5, height=20, width=11))
+    out = adapter.prepare_input(
+        _random_volume(depth=5, height=20, width=11), source="internal"
+    )
     # (C, D, image_size[0], image_size[1]): every slice is resized, depth is kept.
     assert out.shape == (num_channels, 5, 32, 16)
     assert out.dtype == torch.float32
@@ -176,14 +167,13 @@ def test_prepare_input__normalizes_each_slice_in_order(
         None
     ]
     adapter = DINOv2Adapter(
-        dataset_type="internal",
         embed_dim=8,
         num_channels=num_channels,
         image_size=(16, 16),
         normalize=normalize,
     )
 
-    out = adapter.prepare_input(volume)
+    out = adapter.prepare_input(volume, source="internal")
 
     for d, value in enumerate(values):
         expected = _expected_constant(value, *normalize, num_channels=num_channels)
@@ -197,14 +187,13 @@ def test_prepare_input__keeps_spatial_layout() -> None:
     volume = torch.zeros(1, 2, 20, 12, dtype=torch.uint8)
     volume[..., 6:] = 255
     adapter = DINOv2Adapter(
-        dataset_type="internal",
         embed_dim=8,
         num_channels=1,
         image_size=(16, 8),
         normalize=((0.0,), (1.0,)),
     )
 
-    out = adapter.prepare_input(volume)
+    out = adapter.prepare_input(volume, source="internal")
 
     assert out.shape == (1, 2, 16, 8)
     torch.testing.assert_close(out[..., :3], torch.zeros(1, 2, 16, 3))
@@ -217,7 +206,10 @@ def test_prepare_input__slices_are_independent() -> None:
     changed = volume.clone()
     changed[:, 2] = 255 - changed[:, 2]
 
-    out, out_changed = adapter.prepare_input(volume), adapter.prepare_input(changed)
+    out, out_changed = (
+        adapter.prepare_input(volume, source="internal"),
+        adapter.prepare_input(changed, source="internal"),
+    )
 
     assert not torch.equal(out[:, 2], out_changed[:, 2])
     for d in (0, 1, 3):
@@ -232,7 +224,7 @@ def test_prepare_input__matches_embedding_transform() -> None:
         image_size=adapter.image_size, mean=adapter.mean, std=adapter.std
     )
 
-    out = adapter.prepare_input(volume)
+    out = adapter.prepare_input(volume, source="internal")
 
     for d in range(3):
         image = np.repeat(volume[0, d].numpy()[..., None], 3, axis=-1)  # (H, W, 3)
@@ -246,7 +238,7 @@ def test_prepare_input__float_volume() -> None:
     volume = torch.stack([torch.full((20, 11), float(v)) for v in values])[None]
     adapter = _adapter()
 
-    out = adapter.prepare_input(volume)
+    out = adapter.prepare_input(volume, source="internal")
 
     for d, value in enumerate(values):
         expected = _expected_constant(value, adapter.mean, adapter.std, 3)
@@ -270,13 +262,13 @@ def test_prepare_input__external_is_rescaled_to_uint8(
         image_size=(32, 16),
         normalize=((0.5,), (0.25,)),
     )
-    external = DINOv2Adapter(dataset_type="external", **kwargs)
-    internal = DINOv2Adapter(dataset_type="internal", **kwargs)
+    adapter = DINOv2Adapter(**kwargs)
 
-    out = external.prepare_input(volume)
+    out = adapter.prepare_input(volume, source="external")
 
-    expected = internal.prepare_input(
-        torch.from_numpy(LabeledExternalKneeMRIDataset.to_uint8(volume))
+    expected = adapter.prepare_input(
+        torch.from_numpy(LabeledExternalKneeMRIDataset.to_uint8(volume)),
+        source="internal",
     )
     assert out.shape == (num_channels, 4, 32, 16)
     torch.testing.assert_close(out, expected)
@@ -288,30 +280,37 @@ def test_prepare_input__internal_is_not_rescaled() -> None:
     volume = torch.full((1, 2, 20, 11), 10, dtype=torch.uint8)
     volume[..., 0, 0] = 20
     adapter = DINOv2Adapter(
-        dataset_type="internal",
         embed_dim=8,
         num_channels=1,
         image_size=(20, 11),
         normalize=((0.0,), (1.0,)),
     )
 
-    out = adapter.prepare_input(volume)
+    out = adapter.prepare_input(volume, source="internal")
 
     assert out.max().item() == pytest.approx(20 / 255)
+
+
+@pytest.mark.parametrize("source", [None, "External", "labeled", "mixed"])
+def test_prepare_input__unknown_source_raises(source: str | None) -> None:
+    # Anything but "external" would otherwise silently take the internal path.
+    with pytest.raises(ValueError, match="source"):
+        _adapter().prepare_input(_random_volume(), source=source)
 
 
 def test_prepare_input__ignores_orientation() -> None:
     adapter = _adapter()
     volume = _random_volume()
     assert torch.equal(
-        adapter.prepare_input(volume, orientation="LIP"), adapter.prepare_input(volume)
+        adapter.prepare_input(volume, orientation="LIP", source="internal"),
+        adapter.prepare_input(volume, source="internal"),
     )
 
 
 def test_prepare_input__multi_channel_volume_raises() -> None:
     volume = torch.zeros(3, 4, 20, 11, dtype=torch.uint8)
     with pytest.raises(ValueError, match="1-channel volume"):
-        _adapter().prepare_input(volume)
+        _adapter().prepare_input(volume, source="internal")
 
 
 # -- forward_features ----------------------------------------------------------------
@@ -330,7 +329,6 @@ def _model() -> Any:
 
 def _model_adapter(model: Any, num_channels: int = 3) -> DINOv2Adapter:
     return DINOv2Adapter(
-        dataset_type="internal",
         embed_dim=model.feature_dim(),
         num_channels=num_channels,
         image_size=(_IMAGE_SIZE, _IMAGE_SIZE),
@@ -393,20 +391,19 @@ def test_forward_features__unwraps_ddp() -> None:
     torch.testing.assert_close(out["slice_patches"], expected["slice_patches"])
 
 
-@pytest.mark.parametrize("dataset_type", ["internal", "external"])
-def test_prepare_input__collate__forward_features(dataset_type: str) -> None:
+@pytest.mark.parametrize("source", ["internal", "external"])
+def test_prepare_input__collate__forward_features(source: str) -> None:
     # The path KneeNo takes: prepare_input per volume (in DataLoader workers), the
     # default collate, then forward_features on the batch.
     model = _model()
     adapter = DINOv2Adapter(
-        dataset_type=dataset_type,
         embed_dim=model.feature_dim(),
         num_channels=3,
         image_size=(_IMAGE_SIZE, _IMAGE_SIZE),
     )
     volumes = [_random_volume(depth=3, seed=seed) for seed in range(4)]
 
-    batch = adapter.collate([adapter.prepare_input(v) for v in volumes])
+    batch = adapter.collate([adapter.prepare_input(v, source=source) for v in volumes])
     with torch.no_grad():
         out = adapter.forward_features(model, batch)
 

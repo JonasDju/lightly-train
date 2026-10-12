@@ -28,13 +28,11 @@ from typing import Any, Sequence
 import torch
 from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
+from kneeno.evaluation.dataset import SOURCES
 from torch import Tensor
 
 from lightly_train._embedding.embedding_transform import EmbeddingTransform
 from lightly_train.types import ImageSizeTuple, TransformInput
-
-#: ``eval.data.dataset_type`` values.
-DATASET_TYPES = ("internal", "external")
 
 
 class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
@@ -52,7 +50,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
 
     def __init__(
         self,
-        dataset_type: str,
         embed_dim: int,
         num_channels: int,
         image_size: ImageSizeTuple | Sequence[int],
@@ -63,10 +60,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
     ) -> None:
         """
         Args:
-            dataset_type:
-                Describes the type of eval dataset, either "internal" or "external"
-                (anything else raises a ``ValueError``). Controls the preprocessing of
-                the raw incoming volume.
             embed_dim:
                 Feature dimension of the encoder, i.e. ``wrapped_model.feature_dim()``.
             num_channels:
@@ -82,10 +75,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 ``(mean, std)`` per channel, as in ``NormalizeArgs``. Defaults match
                 ``NormalizeArgs``' (ImageNet).
         """
-        if dataset_type not in DATASET_TYPES:
-            raise ValueError(
-                f"dataset_type must be one of {DATASET_TYPES}, got {dataset_type!r}"
-            )
         if num_channels < 1:
             raise ValueError(f"num_channels must be >= 1, got {num_channels}")
         mean, std = tuple(normalize[0]), tuple(normalize[1])
@@ -95,7 +84,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 f"normalize has {len(mean)} mean / {len(std)} std values, expected 1 "
                 f"or num_channels={num_channels}"
             )
-        self.dataset_type = dataset_type
         self._embed_dim = embed_dim
         self.num_channels = num_channels
         self.image_size = (int(image_size[0]), int(image_size[1]))
@@ -111,11 +99,20 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
     def embed_dim(self) -> int:
         return self._embed_dim
 
-    def prepare_input(self, volume: Tensor, orientation: str | None = None) -> Tensor:
+    def prepare_input(
+        self, volume: Tensor, orientation: str | None = None, source: str | None = None
+    ) -> Tensor:
         """``(1, D, H, W)`` raw volume (in [0, 255] for internal / unscaled for external)
         -> ``(C, D, image_size[0], image_size[1])`` float32.
+
+        ``source`` is the dataset the volume came from (``kneeno.evaluation.dataset.SOURCES``):
+        an ``"external"`` volume (raw NIfTI intensities) is first quantized like the internal
+        JPEGs. Anything else raises, since it would silently take the internal path, i.e.
+        treat raw NIfTI intensities as 0..255.
         """
-        if self.dataset_type == "external":
+        if source not in SOURCES:
+            raise ValueError(f"source must be one of {SOURCES}, got {source!r}")
+        if source == "external":
             volume = LabeledExternalKneeMRIDataset.to_uint8(volume)
             volume = torch.from_numpy(volume)
 

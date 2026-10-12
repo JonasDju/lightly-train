@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 import torch
+from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.config import ALL_TASKS
 from pydantic import ValidationError
 from pytest import LogCaptureFixture
@@ -29,12 +30,12 @@ IMAGE_SIZE = (16, 16)  # (H, W)
 
 
 class _FakeLabeledDataset(
-    torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor]]
+    torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor, str]]
 ):
     """Stands in for the labeled KneeNo datasets, which need data on the cluster.
 
     ``raw=True`` mimics LabeledExternalKneeMRIDataset: int16 volumes far outside 0..255 instead of
-    the internal dataset's uint8 ones.
+    the internal dataset's uint8 ones, and the source ``"external"``.
     """
 
     num_classes = 4
@@ -48,7 +49,9 @@ class _FakeLabeledDataset(
     def __len__(self) -> int:
         return self.n
 
-    def __getitem__(self, index: int) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    def __getitem__(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, str]:
         gen = torch.Generator().manual_seed(index)
         # One depth for all volumes, as with eval.data.series_depth > 0: the adapter
         # keeps the depth, so mixed depths could not be batched.
@@ -63,7 +66,7 @@ class _FakeLabeledDataset(
             for s in range(len(self.sequences))
         )
         label = (torch.rand(self.num_classes, generator=gen) > 0.5).float()
-        return volumes, label
+        return volumes, label, "external" if self.raw else "internal"
 
 
 def _config(**overrides: Any) -> dict[str, Any]:
@@ -178,11 +181,14 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
         "lightly_train._callbacks.kneeno_eval.DINOv2Adapter", wraps=DINOv2Adapter
     )
     module = _fake_module(mocker)
+    to_uint8 = mocker.spy(LabeledExternalKneeMRIDataset, "to_uint8")
 
     callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
 
     dataset.assert_called_once()
-    assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    # The adapter learns each volume's source from the dataset's items: only external
+    # volumes are quantized (num_workers is 0, so the spy sees every call).
+    assert to_uint8.called == (dataset_type == "external")
     assert adapter.call_args.kwargs["num_channels"] == 3
     assert adapter.call_args.kwargs["image_size"] == IMAGE_SIZE
     assert adapter.call_args.kwargs["normalize"] == (

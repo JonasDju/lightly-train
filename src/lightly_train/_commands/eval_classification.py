@@ -140,10 +140,8 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     wrapped_model.eval()
     wrapped_model.to(device)
 
-    dataset_type = eval_cfg.get("data").get("dataset_type")
     normalize_args = ckpt.lightly_train.normalize_args
     adapter = DINOv2Adapter(
-        dataset_type=dataset_type,
         embed_dim=wrapped_model.feature_dim(),
         # The checkpoint stores the resolved normalize args, whose length the transform
         # matched to the resolved num_channels (TransformArgs.resolve_incompatible), so

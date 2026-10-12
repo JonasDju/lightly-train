@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.adapter import EncoderAdapter
+from kneeno.evaluation.dataset import SOURCES
 from torch import Tensor
 
 from lightly_train._transforms.random_resized_crop import (
@@ -34,11 +35,6 @@ from lightly_train._transforms.random_resized_crop import (
 from lightly_train.types import ImageSizeTuple
 
 logger = getLogger(__name__)
-
-
-#: ``eval.data.dataset_type`` values; ``"external"`` volumes are first quantized like the
-#: internal JPEGs.
-DATASET_TYPES = ("internal", "external")
 
 
 class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
@@ -53,7 +49,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
 
     def __init__(
         self,
-        dataset_type: str,
         embed_dim: int,
         image_size: ImageSizeTuple | Sequence[int],
         normalize: tuple[Sequence[float], Sequence[float]] = ((0.5,), (0.5,)),
@@ -62,10 +57,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
     ) -> None:
         """
         Args:
-            dataset_type:
-                Describes the type of eval dataset, either "internal" or "external"
-                (anything else raises a ``ValueError``). Controls the preprocessing of
-                the raw incoming volume.
             embed_dim:
                 Feature dimension of the encoder, i.e. ``wrapped_model.feature_dim()``.
             image_size:
@@ -85,13 +76,6 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 ``random_resized_crop.parse_interpolation``). Defaults match
                 ``DINOTransformArgs``'.
         """
-        # Anything else would silently take the internal path, i.e. treat raw NIfTI
-        # intensities as 0..255.
-        if dataset_type not in DATASET_TYPES:
-            raise ValueError(
-                f"dataset_type must be one of {DATASET_TYPES}, got {dataset_type!r}"
-            )
-        self.dataset_type = dataset_type
         self._embed_dim = embed_dim
         # Config order is (H, W, D); tensors are (D, H, W). This is the one conversion.
         height, width, depth = (
@@ -115,7 +99,9 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
     def embed_dim(self) -> int:
         return self._embed_dim
 
-    def prepare_input(self, volume: Tensor, orientation: str | None = None) -> Tensor:
+    def prepare_input(
+        self, volume: Tensor, orientation: str | None = None, source: str | None = None
+    ) -> Tensor:
         """``(1, D, H, W)`` raw volume -> ``(1, D', H', W')`` normalized float32.
 
         Resize all three axes to the configured training crop size, then normalize -- the
@@ -135,10 +121,17 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
         ``orientation`` is ignored: pretraining feeds the volumes in the orientation they are
         stored in, so evaluation keeps them in the orientation the labeled dataset returns.
 
+        ``source`` is the dataset the volume came from (``kneeno.evaluation.dataset.SOURCES``):
+        an ``"external"`` volume (raw NIfTI intensities) is first quantized like the internal
+        JPEGs. Anything else raises, since it would silently take the internal path, i.e.
+        treat raw NIfTI intensities as 0..255.
+
         Runs in DataLoader worker processes: stays on the CPU and holds nothing
         unpicklable.
         """
-        if self.dataset_type == "external":
+        if source not in SOURCES:
+            raise ValueError(f"source must be one of {SOURCES}, got {source!r}")
+        if source == "external":
             volume = LabeledExternalKneeMRIDataset.to_uint8(volume)
 
         if not torch.is_tensor(volume):
@@ -153,7 +146,9 @@ class DINOv2Adapter(EncoderAdapter):  # type: ignore[misc]  # untyped base class
                 self.resize_interpolation,
                 self.resize_upscale_interpolation,
             )
-            buffer = torch.from_numpy(np.ascontiguousarray(resized.transpose(0, 3, 1, 2))) # back to (C, D, H, W)
+            buffer = torch.from_numpy(
+                np.ascontiguousarray(resized.transpose(0, 3, 1, 2))
+            )  # back to (C, D, H, W)
 
         # Normalize last, as ViewTransform does.
         return (buffer - self.mean) / self.std

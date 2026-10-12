@@ -153,10 +153,8 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     wrapped_model.eval()
     wrapped_model.to(device)
 
-    dataset_type = eval_cfg.get("data").get("dataset_type")
     normalize_args = ckpt.lightly_train.normalize_args
     adapter = DINOv2Adapter(
-        dataset_type=dataset_type,
         embed_dim=wrapped_model.feature_dim(),
         image_size=run_config.image_size,
         normalize=(normalize_args.mean, normalize_args.std),

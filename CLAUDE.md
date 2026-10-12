@@ -582,7 +582,11 @@ available here and is enabled in the config.
   native) is what matches this repo — `RandomResizedCrop3D` always emits a fixed
   configured size during training, so the encoder never saw a variable depth.
   `forward_features` flattens the wrapper's `(B, C, pD, pH, pW)` features to KneeNo's
-  `(B, P, C)`.
+  `(B, P, C)`. External (raw NIfTI) volumes are first quantized with
+  `LabeledExternalKneeMRIDataset.to_uint8`, decided per volume by the `source` argument KneeNo passes
+  (`"internal"` / `"external"`, from the dataset's `(volumes, labels, source)` items; anything else raises).
+  The adapter has no `dataset_type` argument (removed 2026-10-12), so `eval.data.dataset_type: mixed`
+  (train/val on internal, test on every external exam) works without changes here.
 - `src/lightly_train/_callbacks/kneeno_eval.py` — `KneeNoEval(Callback)` +
   `KneeNoEvalArgs`. **Off by default**: enabled only by `callbacks={"kneeno_eval":
   {"config": <eval dict>}}` (the `config` dict is required and deep-merged over KneeNo's
@@ -753,10 +757,8 @@ check).
   why they need neither data nor `SimpleITK`; a real run needs `SimpleITK` in this venv
   (`uv pip install -e ../KneeNo` pulls it in — it was missing here and has been installed with
   `uv pip install simpleitk`; like `kneeno`, a plain `uv sync` removes it again).
-- **`eval.data.dataset_type: external`** (`LabeledExternalKneeMRIDataset`, NIfTI) returns volumes
-  unscaled in the file's own dtype (e.g. int16 in the thousands), but `DINOv2Adapter` assumes the
-  internal 0..255 range. Not usable until the adapter (or a model-side dataset) normalizes it; the
-  shipped config uses `internal`.
+- **`eval.data.dataset_type: external` / `mixed`** need the external NIfTI data, which the cluster scripts don't
+  extract (`prepare_data.py --external-tar` would have to be added); the shipped configs use `internal`.
 - **`eval.data.data_root`/`label_meta` in the cluster run config are cluster paths** copied
   from vjepa2's config (`/dev/shm/kneeno_data/internal`, `.../BigKneeTar/metadata_labeled.json`), so they do not resolve on a dev box. The callback logs a warning
   and disables itself rather than failing the run; pass a run config whose `eval:` block

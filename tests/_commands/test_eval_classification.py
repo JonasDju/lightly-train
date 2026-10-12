@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import torch
 import yaml
+from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.config import ALL_TASKS
 from omegaconf import OmegaConf
 from pytest_mock import MockerFixture
@@ -41,12 +42,12 @@ VOLUME_TASKS = ["knn", "linear", "linear_pool", "attentive_pool"]
 
 
 class _FakeLabeledDataset(
-    torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor]]
+    torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor, str]]
 ):
     """Stands in for the labeled KneeNo datasets, which need data on the cluster.
 
     ``raw=True`` mimics LabeledExternalKneeMRIDataset: int16 volumes far outside 0..255 instead of
-    the internal dataset's uint8 ones.
+    the internal dataset's uint8 ones, and the source ``"external"``.
     """
 
     num_classes = 4
@@ -59,7 +60,9 @@ class _FakeLabeledDataset(
     def __len__(self) -> int:
         return 12
 
-    def __getitem__(self, index: int) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    def __getitem__(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, str]:
         gen = torch.Generator().manual_seed(index)
         # Mixed native depths: DINOv2Adapter resizes depth, so they batch without resampling.
         volumes = tuple(
@@ -73,7 +76,7 @@ class _FakeLabeledDataset(
             for s in range(len(self.sequences))
         )
         label = (torch.rand(self.num_classes, generator=gen) > 0.5).float()
-        return volumes, label
+        return volumes, label, "external" if self.raw else "internal"
 
 
 @pytest.fixture
@@ -359,11 +362,14 @@ def test_eval_classification__dataset_type_selects_dataset_and_preprocessing(
         "lightly_train._commands.eval_classification.DINOv2Adapter",
         wraps=DINOv2Adapter,
     )
+    to_uint8 = mocker.spy(LabeledExternalKneeMRIDataset, "to_uint8")
     eval_classification.eval_classification(
         eval_config=_write_config(tmp_path, run_config), accelerator="cpu"
     )
     dataset.assert_called_once()
-    assert adapter.call_args.kwargs["dataset_type"] == dataset_type
+    # The adapter learns each volume's source from the dataset's items: only external
+    # volumes are quantized (num_workers is 0, so the spy sees every call).
+    assert to_uint8.called == (dataset_type == "external")
     assert adapter.call_args.kwargs["image_size"] == IMAGE_SIZE
     metrics = json.loads((_out_dir(tmp_path) / "results.json").read_text())
     assert metrics and all(math.isfinite(v) for v in metrics.values())

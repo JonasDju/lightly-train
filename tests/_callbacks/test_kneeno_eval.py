@@ -67,16 +67,16 @@ class _FakeLabeledDataset(
 
 
 def _config(**overrides: Any) -> dict[str, Any]:
-    attentive = {"epochs": 1, "batch_size": 4, "num_heads": 2}
+    attentive = {"max_epochs": 1, "batch_size": 4, "num_heads": 2}
     config: dict[str, Any] = {
         # series_depth: the fake dataset's depth, i.e. the slice count the slice tasks
         # see (the dataset itself is mocked, so it is not resampled).
         "data": {"dataset_type": "internal", "num_workers": 0, "series_depth": 5},
         "knn": {"batch_size": 4},
-        "linear": {"epochs": 1, "batch_size": 4},
-        "linear_pool": {"epochs": 1, "batch_size": 4},
+        "linear": {"max_epochs": 1, "batch_size": 4},
+        "linear_pool": {"max_epochs": 1, "batch_size": 4},
         "attentive_pool": attentive,
-        "linear_slice_cls": {"epochs": 1, "batch_size": 4},
+        "linear_slice_cls": {"max_epochs": 1, "batch_size": 4},
         "attentive_slice_cls": attentive,
         "attentive_slice_pool": attentive,
         "freq": {

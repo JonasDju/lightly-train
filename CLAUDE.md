@@ -86,7 +86,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - **Config trap:** disabling a task with a nonzero default frequency needs an explicit `freq: {<task>: null}`.
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
-  `evaluate(..., log_every_head_epoch=True)`, so the whole head fine-tuning curve is logged.
+  `evaluate(..., epoch=0)` once: each task logs its test metrics (KneeNo's train/val/test protocol, heads
+  early-stopped on val; `eval.verbose` logs the per-head-epoch val metrics).
   - **Arguments (2026-10-08):** only `eval_config`, `accelerator` and `overwrite`. Everything else is in the
     eval config file: exactly the top-level keys `checkpoint`, `image_size` (`[H, W]`, required: the checkpoint
     doesn't record it) and `eval`. It's validated by `EvalRunConfig` (`extra="forbid"`, so a leftover `transform:`
@@ -165,7 +166,7 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     in the eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
     `eval_per_label/`, `results.json`, `params.yaml`).
   - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
-    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `split.test_fraction: 0.1`,
+    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `split` (`0.8/0.1/0.1` train/val/test),
     `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, and the head settings of
     the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
     `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults), and also that

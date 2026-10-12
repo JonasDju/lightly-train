@@ -8,9 +8,9 @@
 """Standalone post-pretraining KneeNo classification evaluation.
 
 Loads a frozen encoder from a LightlyTrain pretraining checkpoint and hands it to
-``kneeno.evaluation.ClassificationEvaluator``, with ``log_every_head_epoch=True`` so the
-*whole* head fine-tuning curve is produced -- unlike the in-training callback
-(``_callbacks/kneeno_eval.py``), which logs one point per pretraining epoch.
+``kneeno.evaluation.ClassificationEvaluator``, which logs each task's test metrics once
+(heads early-stopped on the val split), the same protocol as the in-training callback
+(``_callbacks/kneeno_eval.py``).
 
 The counterpart of ``vjepa2/app/vjepa_2_1/eval_classification.py``, but much shorter: a
 LightlyTrain checkpoint stores the model objects themselves, so there is no architecture
@@ -155,11 +155,7 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
 
     evaluator = ClassificationEvaluator(config=eval_cfg, adapter=adapter, device=device)
     try:
-        # log_every_head_epoch=True: the point of the standalone run is the head
-        # fine-tuning curve itself, not one summary point per pretraining epoch.
-        metrics = evaluator.evaluate(
-            wrapped_model, tasks=tasks, epoch=0, log_every_head_epoch=True
-        )
+        metrics = evaluator.evaluate(wrapped_model, tasks=tasks, epoch=0)
     finally:
         # No-op unless the config sets logging.tensorboard_dir, but flushing a writer
         # that does exist matters if the process exits right after.

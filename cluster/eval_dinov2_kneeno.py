@@ -7,7 +7,7 @@ config (``--config``): a YAML with exactly
     image_size:  [H, W], the pretraining run's transform.image_size
     eval:        KneeNo's evaluation config (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
 
-Every task with a non-null ``eval.freq`` runs once, on ``eval.encoder``, logging the whole head fine-tuning curve.
+Every task with a non-null ``eval.freq`` runs once, on ``eval.encoder``, logging its test metrics.
 Environment variables are expanded in every string value; ``cluster/configs/eval-MI-vitb14-2d.yaml`` locates the
 pretraining run through ``${PRETRAIN_JOB_ID}``. Next to ``eval.logging.per_label_dir`` the command writes the
 final metrics (``results.json``) and the expanded config (``params.yaml``); it refuses to start if earlier results

@@ -143,10 +143,7 @@ class KneeNoEval(Callback):
         # dist.broadcast_object_list(). Guarding this call would leave rank 0 waiting at
         # a barrier the other ranks never reach, deadlocking the run.
         metrics = evaluator.evaluate(
-            self._resolve_encoder(pl_module),
-            tasks=due,
-            epoch=epoch,
-            log_every_head_epoch=False,
+            self._resolve_encoder(pl_module), tasks=due, epoch=epoch
         )
         logger.info(f"[epoch {epoch + 1}] eval ({due}): {metrics}")
 

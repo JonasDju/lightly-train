@@ -315,7 +315,7 @@ def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     raw, config = _load_eval_run_config(path)
     eval_config = load_eval_config(config.eval)
     assert "1234" in str(config.checkpoint)
-    # Standalone, KneeNo's own SummaryWriter logs the head curves, and per_label_dir
+    # Standalone, KneeNo's own SummaryWriter logs the test metrics, and per_label_dir
     # decides where results.json and params.yaml go.
     assert eval_config["logging"]["tensorboard_dir"] is not None
     assert eval_config["logging"]["per_label_dir"] is not None

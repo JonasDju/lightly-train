@@ -138,10 +138,10 @@ transform:
 # over that callback's defaults or null to switch it off; a callback left out keeps its default. kneeno_eval is
 # not allowed here: the eval block below configures it. Keep model_checkpoint's dirpath and save_last at their
 # defaults, resuming needs <out>/checkpoints/last.ckpt. E.g. a checkpoint every 50 epochs, besides last.ckpt:
-# callbacks:
-model_checkpoint:
-  every_n_epochs: 50
-  save_top_k: -1  # the default 1 keeps only the newest periodic checkpoint
+callbacks:
+  model_checkpoint:
+    every_n_epochs: 50
+    save_top_k: -1  # the default 1 keeps only the newest periodic checkpoint
 
 # KneeNo classification evaluation, run on the frozen encoder every eval.freq.<task>
 # epochs -- see KneeNo/kneeno/evaluation/config.py for every key and its default.

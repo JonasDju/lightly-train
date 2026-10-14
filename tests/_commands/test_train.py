@@ -490,9 +490,9 @@ def test_pretrain__kneeno_eval_without_dataset(
     )
     eval_config = {
         "data": {
-            "data_root": str(tmp_path / "missing"),
-            "label_meta": str(tmp_path / "missing.json"),
-            "dataset_type": "internal",
+            "data_root": {"internal": str(tmp_path / "missing")},
+            "label_meta": {"internal": str(tmp_path / "missing.json")},
+            "test_sets": ["internal"],
             "num_workers": 0,
         },
         "logging": {"tensorboard_dir": None, "per_label_dir": None},

@@ -8,9 +8,9 @@
 """Standalone post-pretraining KneeNo classification evaluation.
 
 Loads a frozen encoder from a LightlyTrain pretraining checkpoint and hands it to
-``kneeno.evaluation.ClassificationEvaluator``, which logs each task's test metrics once
-(heads early-stopped on the val split), the same protocol as the in-training callback
-(``_callbacks/kneeno_eval.py``).
+``kneeno.evaluation.ClassificationEvaluator``, which logs each task's metrics once per test
+set (``eval.data.test_sets``; heads early-stopped on the val split), the same protocol as the
+in-training callback (``_callbacks/kneeno_eval.py``), which tests on ``internal`` only.
 
 The counterpart of ``vjepa2/app/vjepa_2_1/eval_classification.py``, but much shorter: a
 LightlyTrain checkpoint stores the model objects themselves, so there is no architecture

@@ -40,10 +40,11 @@ fi
 cd "$REPO_DIR"
 PYTHON="$REPO_DIR/.venv/bin/python"
 
-# --- Data -> node-local scratch ($TMP/kneeno_data/internal, prepare_data.py's default): the labeled eval dataset;
-# skipped if already populated
+# --- Data -> node-local scratch ($TMP/kneeno_data/{internal,external}, prepare_data.py's default): the labeled
+# eval datasets (internal: train part + "internal" test set; external: "external" test set); each skipped if
+# already populated
 srun "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --internal-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
-     --pool-size 16
+     --external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar --pool-size 16
 
 # --- Evaluation -------------------------------------------------------------------------------------------
 srun "$PYTHON" cluster/eval_dinov2_kneeno.py --config "$CONFIG"

@@ -62,8 +62,9 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `n_channels` does for the official checkpoints. `normalize` must have 1 or `num_channels` values (checked).
   - `prepare_input`: external volumes go through `LabeledExternalKneeMRIDataset.to_uint8` first, decided per
     volume by the `source` argument KneeNo passes (`"internal"` / `"external"`, from the dataset's
-    `(volumes, labels, source)` items; anything else raises), so `eval.data.dataset_type: mixed` (train/val on
-    internal, test on every external exam) works without changes here. The volume is
+    `(volumes, labels, source)` items; anything else raises), so an evaluation with both test sets
+    (`eval.data.test_sets: [internal, external]`: internal train/val, scored on internal and external exams) works
+    without changes here. The volume is
     repeated to `num_channels`, then every slice goes through lightly-train's `EmbeddingTransform` (resize to
     `image_size`, no crop; normalize with `max_pixel_value=255`). Output `(C, D, H, W)`, depth kept, so
     `eval.data.series_depth` must be `> 0` (KneeNo raises a clear error for mixed depths otherwise).
@@ -89,12 +90,15 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - **Config trap:** disabling a task with a nonzero default frequency needs an explicit `freq: {<task>: null}`.
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
-  `evaluate(..., epoch=0)` once: each task logs its test metrics (KneeNo's train/val/test protocol, heads
-  early-stopped on val; `eval.verbose` logs the per-head-epoch val metrics), and each trained head also its best
-  epoch's `val_auroc`. The callback re-logs that as `eval/<task>/val_auroc`: compare pretraining epochs by it,
-  not by the test curves. `cluster/configs/eval-MI-*.yaml` sets `eval.data.abort_on_io_error: true` (an exam
-  that fails to load raises), `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the in-training
-  eval must not kill the run).
+  `evaluate(..., epoch=0)` once: each task logs its metrics once per test set (KneeNo's global-split protocol
+  since 2026-10-14: heads train on the internal `train` split, early-stopped on val; `eval.verbose` logs the
+  per-head-epoch val metrics), keys `{test_set}/{task}/{metric}`, and each trained head also its best epoch's
+  `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only (`eval.data.test_sets:
+  [internal]`), so the callback logs `eval/internal/<task>/...`: compare pretraining epochs by those -- but see
+  "Comparability" below: this run still pretrains on the `val` exams. `cluster/configs/eval-MI-*.yaml` tests on
+  `[internal, external]` (heads trained once, scored on both) and sets `eval.data.abort_on_io_error: true` (an
+  exam that fails to load raises); `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the
+  in-training eval must not kill the run).
   - **Arguments (2026-10-08):** only `eval_config`, `accelerator` and `overwrite`. Everything else is in the
     eval config file: exactly the top-level keys `checkpoint`, `image_size` (`[H, W]`, required: the checkpoint
     doesn't record it) and `eval`. It's validated by `EvalRunConfig` (`extra="forbid"`, so a leftover `transform:`
@@ -163,28 +167,35 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   `--export=NONE`, so a `PRETRAIN_JOB_ID=<id> sbatch ...` prefix never reaches the job (the script then stops at its
   check).
   - The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no
-    process group and no `--pg-timeout-minutes`). It extracts the internal data to the job's node-local
-    `$TMP/kneeno_data` (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
-    `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-2d.yaml`). Env
-    vars: `PRETRAIN_JOB_ID` (required) and `TMP`, both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+    process group and no `--pg-timeout-minutes`). It extracts the internal and the external data to the job's
+    node-local `$TMP/kneeno_data` (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
+    `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-2d.yaml`). The
+    external data comes from a hard-coded `--external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar`; the eval config's
+    `label_meta.external` is `/hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json`. Env vars: `PRETRAIN_JOB_ID` (required) and `TMP`,
+    both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
   - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
     `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here).
   - The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which
     in the eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
     `eval_per_label/`, `results.json`, `params.yaml`).
   - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
-    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `split` (`0.8/0.1/0.1` train/val/test),
-    `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, and the head settings of
-    the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
-    `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults), and also that
-    `checkpoint` and `image_size` match the pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).
+    lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `data.test_sets`
+    (`[internal, external]`, with the external paths in `data_root` / `label_meta`), `data.subset: 1.0` (all
+    exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`), and the head
+    settings of the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
+    `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal
+    `label_meta` must be the same), and also that `checkpoint` and `image_size` match the pretraining config
+    (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
+    `abort_on_io_error` difference and failed.
   - Both configs spell out every attentive head's `depth`, `num_heads`, `lr`, `warmup_epochs`, `weight_decay` at
     KneeNo's defaults.
 
 **Comparability with `3d_dinov2`:**
 - Both read `/dev/shm/kneeno_data/internal`, but the 3D run selects series through `data_meta`
-  (`metadata_unlabeled.json`, plus KneeNo's length filter). The 2D run takes **every** JPEG in the folder, so the
-  two training sets can differ.
+  (`metadata_unlabeled.json`: only the global splits `train` + `unlabeled`, plus KneeNo's length filter). The 2D
+  run takes **every** JPEG in the folder, so the two training sets differ: **the 2D run still pretrains on the
+  internal `val` exams**, i.e. on the `internal` test set, so its `internal/*` numbers are not clean yet (to fix
+  next). Its `external/*` numbers are.
 - 2D defaults vs. the 3D config: ImageNet normalisation vs `0.5/0.5`; colour jitter/solarize vs MRI-specific
   intensity augmentations; 224² crops of single slices vs `224×224×16` volumes. These are all intended stock
   behaviour, but worth stating in the thesis.

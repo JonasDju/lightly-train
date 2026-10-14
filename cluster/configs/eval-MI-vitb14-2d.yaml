@@ -21,9 +21,10 @@ image_size:
 
 # KneeNo classification evaluation -- see KneeNo/kneeno/evaluation/config.py for every key and its default.
 # Identical to pretrain-MI-vitb14-2d.yaml's eval block except:
-#   * split: 0.8 / 0.1 / 0.1 (train / val / test).
-#   * data: subset 1.0 (all labeled exams, not a subsample), data_root on the job's node-local $TMP (where
-#     submit_eval_dinov2_kneeno.sh extracts it; /dev/shm is for pretraining only), 31 workers.
+#   * data: test_sets [internal, external] (the heads are trained once and scored on both; the in-training eval
+#     never tests on external), subset 1.0 (all internal "train" exams, not a subsample), data_root on the job's
+#     node-local $TMP (where submit_eval_dinov2_kneeno.sh extracts both datasets; /dev/shm is for pretraining
+#     only) and label_meta with the external dataset's paths too, 31 workers, abort_on_io_error true.
 #   * logging.tensorboard_dir is set: there are no lightly-train loggers here to re-log the metrics, so KneeNo's
 #     own SummaryWriter writes the test metrics.
 #   * freq only selects the tasks: every task with a non-null value (> 0) runs once; the value itself is ignored.
@@ -36,28 +37,29 @@ eval:
   cache_features: true  # linear / linear_pool / linear_slice_cls / attentive_slice_cls train on features extracted
                         # once instead of re-encoding every head epoch; k-NN always uses the shared pass.
                         # attentive_pool / attentive_slice_pool never cache.
-  split:  # fractions of the labeled exams, each > 0, summing to 1
-    train_fraction: 0.8
-    val_fraction: 0.1  # heads are scored on val every head epoch (early stopping)
-    test_fraction: 0.1  # scored once with each head's best val epoch; the reported numbers
+  split:  # the internal global "train" split (pretrained on) is cut into train and val; the test sets are used whole
+    val_fraction: 0.2  # heads are scored on val every head epoch (early stopping)
   training:
     early_stop_on: auroc  # val metric that picks each head's best epoch
     early_stop_patience: 5  # head epochs without a val improvement before stopping; 0 = never stop early
   verbose: true  # log each task's start and every head epoch's val metrics
   data:
-    data_root: $TMP/kneeno_data/internal
-    label_meta: /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar/metadata_labeled.json
-    dataset_type: internal  # internal | external | mixed (mixed: data_root and label_meta as {internal: ..., external: ...})
+    # internal: global "train" (the heads' train/val) + "val" (the "internal" test set); external: global "test"
+    data_root: {internal: $TMP/kneeno_data/internal, external: $TMP/kneeno_data/external}
+    label_meta:
+      internal: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_labeled.json
+      external: /hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json
+    test_sets: [internal, external]  # heads are trained once and scored on both
     series_depth: 24  # slices per volume the encoder sees one by one; also the slice count of the slice tasks
     resample_mode: nearest
     num_workers: 31
-    subset: 1.0  # seeded subsample of the labeled EXAMS: float in (0, 1] = fraction, int > 1 = count, 1.0 = all
-    abort_on_io_error: true  # a broken exam is retried (5 s apart) and then raises; never replaced by an exam of another split
+    subset: 1.0  # seeded subsample of the internal "train" EXAMS (test sets always whole): float in (0, 1] = fraction, int > 1 = count, 1.0 = all
+    abort_on_io_error: true  # a broken exam is retried (5 s apart) and then raises; never replaced by another exam
     multiprocessing_context: fork  # eval DataLoader worker start method; null -> inherit. Workers must never touch CUDA
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
-    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/internal/post-training/tb
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/internal/post-training/eval_per_label
+    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/post-training/tb
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/post-training/eval_per_label
     tag_prefix: eval
   freq:
     knn: 1

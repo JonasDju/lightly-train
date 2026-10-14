@@ -17,6 +17,7 @@ import torch
 import yaml
 from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.config import ALL_TASKS
+from kneeno.evaluation.dataset import KneeNoEvalDataset, LabeledInternalKneeMRIDataset
 from omegaconf import OmegaConf
 from pytest_mock import MockerFixture
 
@@ -44,21 +45,35 @@ VOLUME_TASKS = ["knn", "linear", "linear_pool", "attentive_pool"]
 class _FakeLabeledDataset(
     torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor, str]]
 ):
-    """Stands in for the labeled KneeNo datasets, which need data on the cluster.
+    """Stands in for one labeled KneeNo dataset (one global split of it), which needs data
+    on the cluster.
 
     ``raw=True`` mimics LabeledExternalKneeMRIDataset: int16 volumes far outside 0..255 instead of
-    the internal dataset's uint8 ones, and the source ``"external"``.
+    the internal dataset's uint8 ones, and the source ``"external"``. ``samples`` holds
+    ``(case_id, depths, labels)`` like a real one's, which ``KneeNoEvalDataset`` reads (case ids
+    ``<prefix>0``, ...: distinct prefixes keep its parts' case ids apart).
     """
 
     num_classes = 4
+    label_name_map = {i: f"label_{i}" for i in range(num_classes)}
     # One item is an exam: one volume per sequence, in this order.
-    sequences = ("sag", "st1", "cor", "tra")
+    sequences = LabeledInternalKneeMRIDataset.SEQUENCES
+    orientations = LabeledInternalKneeMRIDataset.orientations.fget(
+        LabeledInternalKneeMRIDataset
+    )
 
-    def __init__(self, raw: bool = False) -> None:
+    def __init__(self, n: int = 12, raw: bool = False, prefix: str = "c") -> None:
         self.raw = raw
+        self.samples = [
+            (f"{prefix}{i}", None, self._labels(f"{prefix}{i}")) for i in range(n)
+        ]
+
+    def _labels(self, case_id: str) -> list[int]:
+        gen = torch.Generator().manual_seed(sum(map(ord, case_id)))
+        return (torch.rand(self.num_classes, generator=gen) > 0.5).int().tolist()
 
     def __len__(self) -> int:
-        return 12
+        return len(self.samples)
 
     def __getitem__(
         self, index: int
@@ -75,8 +90,18 @@ class _FakeLabeledDataset(
             )
             for s in range(len(self.sequences))
         )
-        label = (torch.rand(self.num_classes, generator=gen) > 0.5).float()
+        label = torch.tensor(self.samples[index][2], dtype=torch.float32)
         return volumes, label, "external" if self.raw else "internal"
+
+
+def _fake_eval_dataset(test_sets: tuple[str, ...] = ("internal",)) -> KneeNoEvalDataset:
+    """What ``KneeNoEvalDataset.from_config`` would build, from fakes: a 12-exam internal
+    train part and a 6-exam test set per name (``external`` with raw volumes)."""
+    tests = {
+        name: _FakeLabeledDataset(n=6, raw=name == "external", prefix=name[0])
+        for name in test_sets
+    }
+    return KneeNoEvalDataset(_FakeLabeledDataset(prefix="t"), tests)
 
 
 @pytest.fixture
@@ -108,7 +133,7 @@ def checkpoint_path(tmp_path: Path) -> Path:
 def _eval_block(tmp_path: Path) -> dict[str, Any]:
     out_dir = tmp_path / "eval" / "post-training"
     return {
-        "data": {"dataset_type": "internal", "num_workers": 0},
+        "data": {"test_sets": ["internal", "external"], "num_workers": 0},
         "logging": {
             "tensorboard_dir": str(out_dir / "tb"),
             "per_label_dir": str(out_dir / "eval_per_label"),
@@ -152,8 +177,10 @@ def run_config(tmp_path: Path, checkpoint_path: Path) -> dict[str, Any]:
 @pytest.fixture
 def fake_dataset(mocker: MockerFixture) -> None:
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
-        return_value=_FakeLabeledDataset(),
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
+        side_effect=lambda data_cfg, seed: _fake_eval_dataset(
+            tuple(data_cfg["test_sets"])
+        ),
     )
 
 
@@ -166,7 +193,16 @@ def test_eval_classification(
     eval_classification.eval_classification(eval_config=config_path, accelerator="cpu")
     out_dir = _out_dir(tmp_path)
     metrics = json.loads((out_dir / "results.json").read_text())
-    assert {key.split("/")[0] for key in metrics} == {"knn", "linear"}
+    # Every test set's metrics, plus the trained head's best val metric.
+    assert {key.rsplit("/", 1)[0] for key in metrics} == {
+        "internal/knn/k5",
+        "internal/knn/k20",
+        "external/knn/k5",
+        "external/knn/k20",
+        "internal/linear",
+        "external/linear",
+        "evaluation_val/linear",
+    }
     assert all(isinstance(value, float) for value in metrics.values())
     assert yaml.safe_load((out_dir / "params.yaml").read_text()) == run_config
     assert any((out_dir / "eval_per_label").iterdir())
@@ -180,7 +216,7 @@ def test_eval_classification__all_tasks(
     config_path = _write_config(tmp_path, run_config)
     eval_classification.eval_classification(eval_config=config_path, accelerator="cpu")
     metrics = json.loads((_out_dir(tmp_path) / "results.json").read_text())
-    assert {key.split("/")[0] for key in metrics} == set(VOLUME_TASKS)
+    assert {key.split("/")[1] for key in metrics} == set(VOLUME_TASKS)
     assert all(math.isfinite(value) for value in metrics.values())
 
 
@@ -194,8 +230,8 @@ def test_eval_classification__missing_freq_keeps_default(
         "kneeno.evaluation.ClassificationEvaluator.evaluate", return_value={}
     )
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
-        return_value=_FakeLabeledDataset(),
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
+        return_value=_fake_eval_dataset(),
     )
     eval_classification.eval_classification(eval_config=config_path, accelerator="cpu")
     tasks = evaluate.call_args.kwargs["tasks"]
@@ -338,25 +374,18 @@ def test_eval_classification__no_eval_block(
         )
 
 
-@pytest.mark.parametrize(
-    "dataset_type, dataset_class",
-    [
-        ("internal", "LabeledInternalKneeMRIDataset"),
-        ("external", "LabeledExternalKneeMRIDataset"),
-    ],
-)
-def test_eval_classification__dataset_type_selects_dataset_and_preprocessing(
+@pytest.mark.parametrize("test_sets", [("internal",), ("internal", "external")])
+def test_eval_classification__test_sets_select_dataset_and_preprocessing(
     tmp_path: Path,
     run_config: dict[str, Any],
     mocker: MockerFixture,
-    dataset_type: str,
-    dataset_class: str,
+    test_sets: tuple[str, ...],
 ) -> None:
     run_config = _only(run_config, ["knn"])
-    run_config["eval"]["data"]["dataset_type"] = dataset_type
+    run_config["eval"]["data"]["test_sets"] = list(test_sets)
     dataset = mocker.patch(
-        f"kneeno.evaluation.classification.{dataset_class}",
-        return_value=_FakeLabeledDataset(raw=dataset_type == "external"),
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
+        return_value=_fake_eval_dataset(test_sets),
     )
     adapter = mocker.patch(
         "lightly_train._commands.eval_classification.DINOv2Adapter",
@@ -367,12 +396,14 @@ def test_eval_classification__dataset_type_selects_dataset_and_preprocessing(
         eval_config=_write_config(tmp_path, run_config), accelerator="cpu"
     )
     dataset.assert_called_once()
+    assert dataset.call_args.args[0]["test_sets"] == list(test_sets)
     # The adapter learns each volume's source from the dataset's items: only external
     # volumes are quantized (num_workers is 0, so the spy sees every call).
-    assert to_uint8.called == (dataset_type == "external")
+    assert to_uint8.called == ("external" in test_sets)
     assert adapter.call_args.kwargs["image_size"] == IMAGE_SIZE
     metrics = json.loads((_out_dir(tmp_path) / "results.json").read_text())
-    assert metrics and all(math.isfinite(v) for v in metrics.values())
+    assert {key.split("/")[0] for key in metrics} == set(test_sets)
+    assert all(math.isfinite(v) for v in metrics.values())
 
 
 @pytest.mark.parametrize(

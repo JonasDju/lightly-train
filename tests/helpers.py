@@ -1122,7 +1122,8 @@ def create_mi_dataset(
 ) -> tuple[Path, Path]:
     """Create a dataset in the KneeNo layout.
 
-    Layout: root/data/<case_id>/<series_name>/<NNN>.jpeg and root/meta.json.
+    Layout: root/data/<case_id>/<series_name>/<NNN>.jpeg and root/meta.json, every case in the
+    global split "train" (KneeNo pretrains on "train" and "unlabeled").
 
     Args:
         identical: If True, all series of the same depth contain identical slices.
@@ -1147,7 +1148,7 @@ def create_mi_dataset(
                 Image.fromarray(slice_np).save(series_dir / f"{i:03d}.jpeg")
             metadata[case_id][series_name] = {"dimensions": [height, width, depth]}
     data_meta = root / "meta.json"
-    data_meta.write_text(json.dumps(metadata))
+    data_meta.write_text(json.dumps({"train": metadata}))
     return data_root, data_meta
 
 

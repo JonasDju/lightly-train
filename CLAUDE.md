@@ -545,7 +545,7 @@ what catches both dataset picklability issues and the RNG-reseeding gotcha above
 **`tests/helpers.py` additions for this fork:** `dummy_dinov2_vit_model(patch_size=(2,2,2), ...)`
 (3D `_vit_test`), `create_mi_dataset(root, n_cases, depths, height, width, identical=...)`
 (writes a KneeNo-layout dataset — JPEG slices + metadata JSON with
-`"dimensions": [H, W, depth]`, KneeNo's current schema — the `identical=True`
+`"dimensions": [H, W, depth]`, every case in the global split `"train"`, KneeNo's current schema — the `identical=True`
 option makes all series bit-identical, used to prove RNG reseeding actually changes
 output across workers), `get_method_dinov2()` (now 1-channel), and
 `MI_DINOV2_TRANSFORM_ARGS` (small transform sizes for fast end-to-end tests), and
@@ -585,8 +585,9 @@ available here and is enabled in the config.
   `(B, P, C)`. External (raw NIfTI) volumes are first quantized with
   `LabeledExternalKneeMRIDataset.to_uint8`, decided per volume by the `source` argument KneeNo passes
   (`"internal"` / `"external"`, from the dataset's `(volumes, labels, source)` items; anything else raises).
-  The adapter has no `dataset_type` argument (removed 2026-10-12), so `eval.data.dataset_type: mixed`
-  (train/val on internal, test on every external exam) works without changes here.
+  The adapter has no `dataset_type` argument (removed 2026-10-12), so an evaluation with both test sets
+  (`eval.data.test_sets: [internal, external]`: internal train/val, scored on internal and external exams)
+  works without changes here.
 - `src/lightly_train/_callbacks/kneeno_eval.py` — `KneeNoEval(Callback)` +
   `KneeNoEvalArgs`. **Off by default**: enabled only by `callbacks={"kneeno_eval":
   {"config": <eval dict>}}` (the `config` dict is required and deep-merged over KneeNo's
@@ -601,12 +602,14 @@ available here and is enabled in the config.
   spells out an `attentive_pool` block (off in training) matching the eval config's.
 - `src/lightly_train/_commands/eval_classification.py` — the standalone
   `lightly-train eval_classification` command (same interface as on `2d_dinov2` since
-  2026-10-11). One `evaluate(..., epoch=0)` call: each task logs its test metrics once (KneeNo's
-  train/val/test protocol, heads early-stopped on val; `eval.verbose` logs the val metrics per head epoch),
-  and each trained head also its best epoch's `val_auroc`. The callback re-logs that as `eval/<task>/val_auroc`:
-  compare pretraining epochs by it, not by the test curves. `cluster/configs/eval-MI-*.yaml` sets
-  `eval.data.abort_on_io_error: true` (an exam that fails to load raises), `pretrain-MI-*.yaml` sets `false`
-  (it is replaced by a random one; the in-training eval must not kill the run).
+  2026-10-11). One `evaluate(..., epoch=0)` call: each task logs its metrics once per test set (KneeNo's
+  global-split protocol since 2026-10-14: heads train on the internal `train` split, early-stopped on val;
+  `eval.verbose` logs the val metrics per head epoch), keys `{test_set}/{task}/{metric}`, and each trained head
+  also its best epoch's `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only
+  (`eval.data.test_sets: [internal]`, exams never pretrained on), so the callback logs `eval/internal/<task>/...`:
+  compare pretraining epochs by those. `cluster/configs/eval-MI-*.yaml` tests on `[internal, external]` (heads
+  trained once, scored on both), and sets `eval.data.abort_on_io_error: true` (an exam that fails to load raises);
+  `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the in-training eval must not kill the run).
   Far shorter than vjepa2's script: a LightlyTrain checkpoint stores the model objects, so
   there is no architecture to rebuild.
   - **Arguments:** only `eval_config`, `accelerator` and `overwrite`. Everything else is in
@@ -637,7 +640,7 @@ barrier the other ranks never reach, deadlocking the run. Do not "optimize" this
 
 **Metrics go through lightly-train's loggers, not KneeNo's.** The config sets
 `logging.tensorboard_dir: null`, disabling KneeNo's own `SummaryWriter`, and the callback
-re-logs the returned `{"{task}/{metric}": float}` dict via `pl_module.log_dict` under an
+re-logs the returned `{"{test_set}/{task}/{metric}": float}` dict via `pl_module.log_dict` under an
 `eval/` prefix — so eval scalars land in the same TensorBoard/JSONL run as the training
 curves, and no unpicklable `SummaryWriter` is ever held by a callback (see the
 `collate_fn` picklability gotcha in `MA/CLAUDE.md`).
@@ -648,8 +651,9 @@ task needs an explicit `freq: {<task>: null}` — omitting the key leaves the de
 ## Running on the cluster
 
 `cluster/submit_pretrain_dinov2_kneeno.sh` (sbatch, 1 GPU) extracts the internal dataset to
-`/dev/shm/kneeno_data/internal` with `KneeNo/data/prepare_data.py --internal-tar-dir` (pretraining and the
-`dataset_type: internal` eval both read it; the external NIfTI dataset is not extracted), then runs
+`/dev/shm/kneeno_data/internal` with `KneeNo/data/prepare_data.py --internal-tar-dir` (pretraining, on the global
+splits `train` + `unlabeled`, and the in-training eval, `test_sets: [internal]`, both read it; the external NIfTI
+dataset is not extracted), then runs
 `cluster/pretrain_dinov2_kneeno.py --config <run config>`, which calls `lightly_train.pretrain(method="dinov2", ...)`.
 **Fully config-driven:** the script's only arguments are `--config` and `--pg-timeout-minutes` (multi-GPU
 process-group timeout — deliberately kept as a flag: an infrastructure knob, no effect on training).
@@ -735,10 +739,12 @@ cluster/submit_eval_dinov2_kneeno.sh`. **Pass env vars with `--export`**: RWTH's
 `--export=NONE`, so a `PRETRAIN_JOB_ID=<id> sbatch ...` prefix never reaches the job (the script then stops at its
 check).
 - The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no process
-  group and no `--pg-timeout-minutes`). It extracts the internal data to the job's node-local `$TMP/kneeno_data`
-  (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
-  `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-24f.yaml`). Env
-  vars: `PRETRAIN_JOB_ID` (required) and `TMP`, both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+  group and no `--pg-timeout-minutes`). It extracts the internal and the external data to the job's node-local
+  `$TMP/kneeno_data` (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
+  `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-24f.yaml`). The
+  external data comes from a hard-coded `--external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar`; the eval config's
+  `label_meta.external` is `/hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json`. Env vars: `PRETRAIN_JOB_ID` (required) and `TMP`,
+  both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
 - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
   `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here; verified
   end to end on CPU with a tiny model, a JPEG fixture and 2 spawn workers).
@@ -747,22 +753,25 @@ check).
   `eval_per_label/`, `results.json`, `params.yaml`).
 - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
   loggers here), `freq` (the four volume tasks `1`, i.e. on, the slice tasks `null`; every key listed),
-  `split` (`0.8/0.1/0.1` train/val/test), `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`,
-  and the head settings of tasks the pretraining run doesn't run (`attentive_pool`). `tests/test_cluster_configs.py`
-  pins that (after merging both over KneeNo's defaults), and that `checkpoint`, `image_size` and the two resize keys
-  match the pretraining config (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`).
+  `data.test_sets` (`[internal, external]`, with the external paths in `data_root` / `label_meta`),
+  `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error`
+  (`true`), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`).
+  `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal `label_meta`
+  must be the same), and that `checkpoint`, `image_size` and the two resize keys match the pretraining config
+  (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
+  `abort_on_io_error` difference and failed.
 
 ## Open risks / known follow-ups (not yet done, not blocking)
 
-- **Eval now uses the real labeled dataset** (`KneeNo/kneeno/evaluation/dataset.py::LabeledInternalKneeMRIDataset`,
-  exam-level: one sample = the four sequence volumes of one exam, and every `eval.*.batch_size` /
-  `eval.data.subset` counts exams; see `MA/CLAUDE.md`). The callback tests still inject a fake
-  dataset (exposing `sequences` and returning a tuple of four volumes per item), which is
-  why they need neither data nor `SimpleITK`; a real run needs `SimpleITK` in this venv
+- **Eval now uses the real labeled datasets** (`KneeNo/kneeno/evaluation/dataset.py::KneeNoEvalDataset`, built
+  from `eval.data`; exam-level: one sample = the four sequence volumes of one exam, and every `eval.*.batch_size` /
+  `eval.data.subset` counts exams; see `MA/CLAUDE.md`). The callback and command tests still inject fakes
+  (`_FakeLabeledDataset` parts wrapped in a `KneeNoEvalDataset`, patched in for `KneeNoEvalDataset.from_config`),
+  which is why they need neither data nor `SimpleITK`; a real run needs `SimpleITK` in this venv
   (`uv pip install -e ../KneeNo` pulls it in — it was missing here and has been installed with
   `uv pip install simpleitk`; like `kneeno`, a plain `uv sync` removes it again).
-- **`eval.data.dataset_type: external` / `mixed`** need the external NIfTI data, which the cluster scripts don't
-  extract (`prepare_data.py --external-tar` would have to be added); the shipped configs use `internal`.
+- **The `external` test set** needs the external NIfTI data: only `submit_eval_dinov2_kneeno.sh` extracts it (from
+  the hard-coded tar above). The pretraining config tests on `internal` only, on purpose.
 - **`eval.data.data_root`/`label_meta` in the cluster run config are cluster paths** copied
   from vjepa2's config (`/dev/shm/kneeno_data/internal`, `.../BigKneeTar/metadata_labeled.json`), so they do not resolve on a dev box. The callback logs a warning
   and disables itself rather than failing the run; pass a run config whose `eval:` block

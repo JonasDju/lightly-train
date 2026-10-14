@@ -140,12 +140,12 @@ def test_load_run_config__expands_env_vars(
     config = {
         "model": MODEL,
         "data": {**DATA, "out": "/runs/${RUN}", "data_root": "$TMP/unlabeled"},
-        "eval": {"data": {"data_root": "$TMP/labeled"}},
+        "eval": {"data": {"data_root": {"internal": "$TMP/labeled"}}},
     }
     loaded = load_run_config(_write(tmp_path, config))
     assert loaded["data"]["out"] == "/runs/vitb14"
     assert loaded["data"]["data_root"] == "/scratch/unlabeled"
-    assert loaded["eval"]["data"]["data_root"] == "/scratch/labeled"
+    assert loaded["eval"]["data"]["data_root"] == {"internal": "/scratch/labeled"}
 
 
 def test_load_run_config__unknown_key(tmp_path: Path) -> None:
@@ -344,24 +344,39 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
     in_training = {task for task, freq in run_eval["freq"].items() if freq}
 
     def without_differences(block: dict[str, Any]) -> dict[str, Any]:
-        # Where it logs, which tasks run, the test split, and the data setup of a
-        # standalone job: all exams, extracted to $TMP instead of /dev/shm, more workers.
+        # Where it logs, which tasks run, and the data setup of a standalone job: all
+        # exams, the external test set too (its paths included), extracted to $TMP
+        # instead of /dev/shm, more workers, and a broken exam raises instead of being
+        # replaced (the in-training eval must not kill the run).
         block = {
             k: v
             for k, v in block.items()
-            if k not in ("logging", "freq", "split")
+            if k not in ("logging", "freq")
             and not (k in ALL_TASKS and k not in in_training)
         }
         block["data"] = {
             k: v
             for k, v in block["data"].items()
-            if k not in ("subset", "data_root", "num_workers")
+            if k
+            not in (
+                "subset",
+                "data_root",
+                "label_meta",
+                "test_sets",
+                "num_workers",
+                "abort_on_io_error",
+            )
         }
         return block
 
     assert without_differences(load_eval_config(eval_config["eval"])) == (
         without_differences(run_eval)
     )
+    # The same internal data; only the standalone eval tests on the external dataset too.
+    eval_data, run_data = eval_config["eval"]["data"], run["eval"]["data"]
+    assert eval_data["label_meta"]["internal"] == run_data["label_meta"]["internal"]
+    assert run_data["test_sets"] == ["internal"]
+    assert eval_data["test_sets"] == ["internal", "external"]
 
 
 def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

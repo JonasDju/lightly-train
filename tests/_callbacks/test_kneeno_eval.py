@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import torch
 from kneeno import LabeledExternalKneeMRIDataset
+from kneeno.evaluation.dataset import KneeNoEvalDataset, LabeledInternalKneeMRIDataset
 from pydantic import ValidationError
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
@@ -31,22 +32,35 @@ IMAGE_SIZE = (16, 8, 4)  # (H, W, D), non-cubic to catch an axis-order swap.
 class _FakeLabeledDataset(
     torch.utils.data.Dataset[tuple[tuple[torch.Tensor, ...], torch.Tensor, str]]
 ):
-    """Stands in for the labeled KneeNo datasets, which need data on the cluster.
+    """Stands in for one labeled KneeNo dataset (one global split of it), which needs data
+    on the cluster.
 
     ``raw=True`` mimics LabeledExternalKneeMRIDataset: int16 volumes far outside 0..255 instead of
-    the internal dataset's uint8 ones, and the source ``"external"``.
+    the internal dataset's uint8 ones, and the source ``"external"``. ``samples`` holds
+    ``(case_id, depths, labels)`` like a real one's, which ``KneeNoEvalDataset`` reads (case ids
+    ``<prefix>0``, ...: distinct prefixes keep its parts' case ids apart).
     """
 
     num_classes = 4
+    label_name_map = {i: f"label_{i}" for i in range(num_classes)}
     # One item is an exam: one volume per sequence, in this order.
-    sequences = ("sag", "st1", "cor", "tra")
+    sequences = LabeledInternalKneeMRIDataset.SEQUENCES
+    orientations = LabeledInternalKneeMRIDataset.orientations.fget(
+        LabeledInternalKneeMRIDataset
+    )
 
-    def __init__(self, n: int = 16, raw: bool = False) -> None:
-        self.n = n
+    def __init__(self, n: int = 16, raw: bool = False, prefix: str = "c") -> None:
         self.raw = raw
+        self.samples = [
+            (f"{prefix}{i}", None, self._labels(f"{prefix}{i}")) for i in range(n)
+        ]
+
+    def _labels(self, case_id: str) -> list[int]:
+        gen = torch.Generator().manual_seed(sum(map(ord, case_id)))
+        return (torch.rand(self.num_classes, generator=gen) > 0.5).int().tolist()
 
     def __len__(self) -> int:
-        return self.n
+        return len(self.samples)
 
     def __getitem__(
         self, index: int
@@ -63,13 +77,23 @@ class _FakeLabeledDataset(
             )
             for s in range(len(self.sequences))
         )
-        label = (torch.rand(self.num_classes, generator=gen) > 0.5).float()
+        label = torch.tensor(self.samples[index][2], dtype=torch.float32)
         return volumes, label, "external" if self.raw else "internal"
+
+
+def _fake_eval_dataset(test_sets: tuple[str, ...] = ("internal",)) -> KneeNoEvalDataset:
+    """What ``KneeNoEvalDataset.from_config`` would build, from fakes: a 16-exam internal
+    train part and an 8-exam test set per name (``external`` with raw volumes)."""
+    tests = {
+        name: _FakeLabeledDataset(n=8, raw=name == "external", prefix=name[0])
+        for name in test_sets
+    }
+    return KneeNoEvalDataset(_FakeLabeledDataset(prefix="t"), tests)
 
 
 def _config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "data": {"dataset_type": "internal", "num_workers": 0},
+        "data": {"test_sets": ["internal"], "num_workers": 0},
         "knn": {"batch_size": 4},
         "linear": {"max_epochs": 1, "batch_size": 4},
         "linear_pool": {"max_epochs": 1, "batch_size": 4},
@@ -115,8 +139,8 @@ def _fake_module(mocker: MockerFixture) -> Any:
 def _install_dataset(callback: KneeNoEval, mocker: MockerFixture) -> None:
     """Inject a synthetic labeled dataset instead of the cluster one."""
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
-        return_value=_FakeLabeledDataset(),
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
+        return_value=_fake_eval_dataset(),
     )
 
 
@@ -147,26 +171,20 @@ def test_on_train_epoch_end__logs_metrics(mocker: MockerFixture) -> None:
     module.log_dict.assert_called_once()
     logged = module.log_dict.call_args.args[0]
     assert logged, "expected metrics to be logged"
-    assert all(key.startswith("eval/knn/") for key in logged), logged
+    assert all(key.startswith("eval/internal/knn/") for key in logged), logged
     assert all(isinstance(value, float) for value in logged.values())
     # Nothing to reduce: every rank already holds the same broadcast result.
     assert module.log_dict.call_args.kwargs["sync_dist"] is False
 
 
-@pytest.mark.parametrize(
-    "dataset_type, dataset_class",
-    [
-        ("internal", "LabeledInternalKneeMRIDataset"),
-        ("external", "LabeledExternalKneeMRIDataset"),
-    ],
-)
-def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
-    mocker: MockerFixture, dataset_type: str, dataset_class: str
+@pytest.mark.parametrize("test_sets", [("internal",), ("internal", "external")])
+def test_on_train_epoch_end__test_sets_select_dataset_and_preprocessing(
+    mocker: MockerFixture, test_sets: tuple[str, ...]
 ) -> None:
-    callback = _callback(data={"dataset_type": dataset_type, "num_workers": 0})
+    callback = _callback(data={"test_sets": list(test_sets), "num_workers": 0})
     dataset = mocker.patch(
-        f"kneeno.evaluation.classification.{dataset_class}",
-        return_value=_FakeLabeledDataset(raw=dataset_type == "external"),
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
+        return_value=_fake_eval_dataset(test_sets),
     )
     adapter = mocker.patch(
         "lightly_train._callbacks.kneeno_eval.DINOv2Adapter", wraps=DINOv2Adapter
@@ -177,13 +195,16 @@ def test_on_train_epoch_end__dataset_type_selects_dataset_and_preprocessing(
     callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
 
     dataset.assert_called_once()
+    assert dataset.call_args.args[0]["test_sets"] == list(test_sets)
     # The adapter learns each volume's source from the dataset's items: only external
     # volumes are quantized (num_workers is 0, so the spy sees every call).
-    assert to_uint8.called == (dataset_type == "external")
+    assert to_uint8.called == ("external" in test_sets)
     assert adapter.call_args.kwargs["resize_interpolation"] == "cubic"
     assert adapter.call_args.kwargs["resize_upscale_interpolation"] == "linear"
     module.log_dict.assert_called_once()
-    assert all(math.isfinite(v) for v in module.log_dict.call_args.args[0].values())
+    logged = module.log_dict.call_args.args[0]
+    assert {key.split("/")[1] for key in logged} == set(test_sets)
+    assert all(math.isfinite(v) for v in logged.values())
 
 
 def test_on_train_epoch_end__skips_when_no_task_is_due(mocker: MockerFixture) -> None:
@@ -207,7 +228,7 @@ def test_on_train_epoch_end__disables_itself_when_dataset_is_missing(
     """Evaluation is on by default, so a run without the labeled dataset must not die."""
     callback = _callback()
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
         side_effect=FileNotFoundError("no labels here"),
     )
     module = _fake_module(mocker)
@@ -253,14 +274,14 @@ def test_on_train_end__flushes_kneeno_tensorboard_writer(
 
     events = EventAccumulator(str(tb_dir))
     events.Reload()
-    assert any(tag.startswith("eval/knn/") for tag in events.Tags()["scalars"])
+    assert any(tag.startswith("eval/internal/knn/") for tag in events.Tags()["scalars"])
 
 
 def test_on_train_end__without_evaluator_is_a_noop(mocker: MockerFixture) -> None:
     """No task was ever due: training ends without building (and loading) the evaluator."""
     callback = _callback()
     build = mocker.patch(
-        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset"
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config"
     )
 
     callback.on_train_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))
@@ -272,7 +293,7 @@ def test_on_train_end__without_evaluator_is_a_noop(mocker: MockerFixture) -> Non
 def test_on_train_end__after_evaluation_disabled_itself(mocker: MockerFixture) -> None:
     callback = _callback()
     mocker.patch(
-        "kneeno.evaluation.classification.LabeledInternalKneeMRIDataset",
+        "kneeno.evaluation.classification.KneeNoEvalDataset.from_config",
         side_effect=FileNotFoundError("no labels here"),
     )
     callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), _fake_module(mocker))

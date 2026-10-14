@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ load_run_config = run_config.load_run_config
 
 
 MODEL = "dinov2/_vittest14"
-DATA = {"out": "/out", "data": "/data"}
+DATA = {"out": "/out", "data_root": "/data", "data_meta": "/meta.json"}
 
 
 def _write(tmp_path: Path, config: dict[str, Any]) -> Path:
@@ -97,7 +98,12 @@ def test_run_config__train_valid(path: Path) -> None:
     # by pretrain's own config, which would otherwise only fail on the cluster.
     config = load_run_config(path)
     FunctionTrainConfig.model_validate(
-        {**config["data"], **config.get("train", {}), "model": config["model"]}
+        {
+            "out": config["data"]["out"],
+            "data": [config["data"]["data_root"]],
+            **config.get("train", {}),
+            "model": config["model"],
+        }
     )
 
 
@@ -132,12 +138,16 @@ def test_load_run_config__expands_env_vars(
     monkeypatch.setenv("RUN", "vitb14")
     config = {
         "model": MODEL,
-        "data": {"out": "/runs/${RUN}", "data": "$TMP/internal"},
+        "data": {
+            "out": "/runs/${RUN}",
+            "data_root": "$TMP/internal",
+            "data_meta": "/m",
+        },
         "eval": {"data": {"data_root": {"internal": "$TMP/labeled"}}},
     }
     loaded = load_run_config(_write(tmp_path, config))
     assert loaded["data"]["out"] == "/runs/vitb14"
-    assert loaded["data"]["data"] == "/scratch/internal"
+    assert loaded["data"]["data_root"] == "/scratch/internal"
     assert loaded["eval"]["data"]["data_root"] == {"internal": "/scratch/labeled"}
 
 
@@ -171,7 +181,8 @@ def test_load_run_config__data_key_required(tmp_path: Path, key: str) -> None:
 
 
 def test_load_run_config__unknown_data_key(tmp_path: Path) -> None:
-    path = _write(tmp_path, {"model": MODEL, "data": {**DATA, "data_root": "/data"}})
+    # The image folder of the stock pretrain argument is data_root + data_meta here.
+    path = _write(tmp_path, {"model": MODEL, "data": {**DATA, "data": "/data"}})
     with pytest.raises(ValueError, match="unknown keys"):
         load_run_config(path)
 
@@ -216,10 +227,31 @@ def test_load_run_config__callbacks_kneeno_eval(tmp_path: Path) -> None:
         load_run_config(path)
 
 
+# Case id -> global split of the fake metadata _data_block writes.
+SPLITS = {"c3": "train", "c1": "train", "c2": "unlabeled", "c0": "val"}
+
+
+def _data_block(tmp_path: Path, splits: dict[str, str] = SPLITS) -> dict[str, str]:
+    """A data block whose data_root has a folder for every case of ``splits``, one
+    folder in no split (``c9``), and whose data_meta groups the cases by ``splits``."""
+    root = tmp_path / "internal"
+    metadata: dict[str, dict[str, Any]] = {}
+    for case_id, split in splits.items():
+        (root / case_id / "sag").mkdir(parents=True, exist_ok=True)
+        metadata.setdefault(split, {})[case_id] = {"sag": {"dimensions": [8, 8, 3]}}
+    (root / "c9").mkdir(exist_ok=True)
+    meta = tmp_path / "meta.json"
+    meta.write_text(json.dumps(metadata))
+    return {"out": "/out", "data_root": str(root), "data_meta": str(meta)}
+
+
 def _run_main(
     monkeypatch: pytest.MonkeyPatch, config: dict[str, Any], tmp_path: Path
 ) -> dict[str, Any]:
-    """Runs cluster/pretrain_dinov2_kneeno.py's main() and returns pretrain's kwargs."""
+    """Runs cluster/pretrain_dinov2_kneeno.py's main() and returns pretrain's kwargs.
+
+    ``config["data"]`` is replaced by ``_data_block``'s, unless the config has one
+    with real files."""
     # Restores the env var the script sets at import time.
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
     # The script imports run_config by name, as if run from cluster/.
@@ -233,6 +265,8 @@ def _run_main(
 
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(lightly_train, "pretrain", lambda **kw: calls.append(kw))
+    if config["data"] == DATA:
+        config = {**config, "data": _data_block(tmp_path)}
     monkeypatch.setenv("SLURM_NNODES", "2")
     monkeypatch.delenv("SLURM_NTASKS", raising=False)
     path = _write(tmp_path, config)
@@ -251,7 +285,8 @@ def test_main__passes_train_block(
     kwargs = _run_main(
         monkeypatch, {"model": MODEL, "data": DATA, "train": train}, tmp_path
     )
-    assert {k: kwargs[k] for k in DATA} == DATA
+    assert kwargs["out"] == "/out"
+    assert "data_root" not in kwargs and "data_meta" not in kwargs
     assert {k: kwargs[k] for k in train} == train
     assert kwargs["model"] == MODEL
     assert kwargs["num_nodes"] == 2
@@ -299,6 +334,26 @@ def test_main__every_train_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         monkeypatch, {"model": MODEL, "data": DATA, "train": train}, tmp_path
     )
     assert set(run_config.TRAIN_KEYS) <= set(kwargs)
+
+
+def test_main__pretrains_only_on_train_and_unlabeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The val case c0 is the eval's internal test set, and c9 is in no split.
+    kwargs = _run_main(monkeypatch, {"model": MODEL, "data": DATA}, tmp_path)
+    root = tmp_path / "internal"
+    assert kwargs["data"] == [str(root / "c1"), str(root / "c2"), str(root / "c3")]
+    out = capsys.readouterr().out
+    assert "Pretraining on 3 exams" in out
+    assert "2 exam folders there are held out" in out
+
+
+def test_main__no_exam_to_pretrain_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _data_block(tmp_path, splits={"c0": "val"})
+    with pytest.raises(ValueError, match="no exams to pretrain on"):
+        _run_main(monkeypatch, {"model": MODEL, "data": data}, tmp_path)
 
 
 def _pretrain_config_of(eval_path: Path) -> Path:

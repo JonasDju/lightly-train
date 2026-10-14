@@ -6,18 +6,24 @@ image-folder dataset over the slices. Everything about the experiment comes from
 vjepa2's ``configs/``: a YAML with
 
     model:      -> lightly_train.pretrain(model=...), e.g. dinov2/vitb14-notpretrained
-    data:       -> lightly_train.pretrain(out=, data=)          (data: the image folder, searched recursively)
+    data:       -> lightly_train.pretrain(out=, data=)          (see below)
     train:      -> lightly_train.pretrain(epochs=, batch_size=, num_workers=, trainer_args=, ...) (optional)
     method:     -> lightly_train.pretrain(method_args=...)      (DINOv2Args)
     transform:  -> lightly_train.pretrain(transform_args=...)   (DINOv2ViTTransformArgs)
     callbacks:  -> lightly_train.pretrain(callbacks=...)        (CallbackArgs, all but kneeno_eval)
     eval:       -> the KneeNo eval callback's config            (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
 
-``model`` and ``data`` (with both keys) are required. A missing ``train``/``method``/``transform`` block, or a
+``model`` and ``data`` (with all its keys: ``out``, ``data_root``, ``data_meta``) are required. A missing ``train``/``method``/``transform`` block, or a
 missing key within one, falls back to lightly-train's default; a missing ``eval`` block means no evaluation at
 all. Environment variables (``$VAR``, ``${VAR}``, leading ``~``) are expanded in every string value with
 KneeNo's ``expand_env_vars`` (loading and validation: ``run_config.load_run_config``).
 ``cluster/configs/pretrain-MI-vitb14-2d.yaml`` lists every train/method/transform default explicitly.
+
+``data.data_root`` holds the JPEG slices of every internal exam (``<case>/<series>/<NNN>.jpeg``), including the
+global ``val`` exams the evaluation tests on. So pretrain's ``data`` is not that folder but the list of the case
+folders in it that pretraining may see: those of the global splits ``train`` + ``unlabeled`` of ``data.data_meta``,
+as KneeNo's ``pretraining_cases`` (the same rule as the 3D run's dataset) returns them. lightly-train searches each
+recursively, so every slice is one sample, and raises if one of them does not exist.
 lightly-train copies the file into ``data.out`` as ``params-pretrain.yaml`` (``params-pretrain-1.yaml``, ...
 on each resume), so that copy is the complete record of the run's settings. The only command-line option
 besides ``--config`` is the multi-GPU process-group timeout, which does not affect training.
@@ -75,6 +81,7 @@ import argparse  # noqa: E402
 from datetime import timedelta  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+from kneeno import load_metadata, pretraining_cases  # noqa: E402
 from pytorch_lightning.strategies import DDPStrategy  # noqa: E402
 
 # cluster/run_config.py: running this script puts its folder first on sys.path.
@@ -86,6 +93,23 @@ import lightly_train  # noqa: E402
 def num_ranks() -> int:
     """Total number of training processes (one per GPU) in the SLURM job; 1 outside SLURM."""
     return int(os.environ.get("SLURM_NTASKS", "1"))
+
+
+def pretraining_dirs(data_root: Path, data_meta: Path) -> list[str]:
+    """The case folders under ``data_root`` that pretraining may see, sorted by case id.
+
+    Strings, not paths: lightly-train logs its arguments as JSON, which fails on a list of paths.
+    """
+    cases = sorted(pretraining_cases(load_metadata(data_meta)))
+    if not cases:
+        raise ValueError(f"The metadata '{data_meta}' has no exams to pretrain on.")
+    held_out = len({path.name for path in data_root.iterdir()} - set(cases))
+    print(
+        f"Pretraining on {len(cases):,} exams in '{data_root}'; {held_out:,} exam folders there are held out "
+        "(not in a pretraining split of the metadata).",
+        flush=True,
+    )
+    return [str(data_root / case) for case in cases]
 
 
 def build_strategy(n_ranks: int, timeout_minutes: int) -> str | DDPStrategy:
@@ -121,8 +145,10 @@ def main() -> None:
     if "eval" in config:
         callbacks["kneeno_eval"] = {"config": config["eval"]}
 
+    data = config["data"]
     lightly_train.pretrain(
-        **config["data"],
+        out=data["out"],
+        data=pretraining_dirs(Path(data["data_root"]), Path(data["data_meta"])),
         **config.get("train", {}),
         model=config["model"],
         method="dinov2",

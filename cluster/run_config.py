@@ -15,10 +15,11 @@ from kneeno import expand_env_vars
 
 RUN_CONFIG_KEYS = ("model", "data", "train", "method", "transform", "callbacks", "eval")
 BLOCKS = ("data", "train", "method", "transform", "callbacks", "eval")  # the keys whose value is a mapping
-# Named exactly like lightly_train.pretrain's arguments, which they are passed to as-is: the output directory and
-# the image folder lightly-train searches for images itself (the JPEG slices of the unlabeled KneeNo dataset).
-DATA_KEYS = ("out", "data")
-# The optional train block: the other lightly_train.pretrain arguments a run may set, also passed as-is. Everything
+# All required. out is passed to lightly_train.pretrain as-is (the output directory). The script turns data_root (the
+# folder of the internal KneeNo dataset's JPEG slices, <case>/<series>/<NNN>.jpeg) and data_meta (its unlabeled
+# metadata) into pretrain's data: the list of the case folders pretraining may see (named as in branch 3d_dinov2).
+DATA_KEYS = ("out", "data_root", "data_meta")
+# The optional train block: the other lightly_train.pretrain arguments a run may set, passed as-is. Everything
 # the script derives itself (strategy, num_nodes, resume_interrupted, params_file) is deliberately absent, and so is
 # callbacks, which has its own top-level block.
 TRAIN_KEYS = (

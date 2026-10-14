@@ -1,7 +1,8 @@
 # Vanilla 2D DINOv2 pretraining on the JPEG slices of the unlabeled KneeNo dataset -- run config for
-# cluster/pretrain_dinov2_kneeno.py (--config), the only source of the run's settings. The script passes model and
-# the data and train blocks' keys to lightly_train.pretrain directly and the other blocks as method_args,
-# transform_args, callbacks and the KneeNo eval callback's config; lightly-train copies this file into data.out as
+# cluster/pretrain_dinov2_kneeno.py (--config), the only source of the run's settings. The script passes model,
+# data.out and the train block's keys to lightly_train.pretrain directly, the case folders it selects with
+# data.data_root and data.data_meta as pretrain's data, and the other blocks as method_args, transform_args,
+# callbacks and the KneeNo eval callback's config; lightly-train copies this file into data.out as
 # params-pretrain.yaml (params-pretrain-1.yaml, ... on each resume). Env vars ($VAR, ${VAR}, leading ~) are
 # expanded everywhere.
 #
@@ -15,12 +16,15 @@
 # Required: any dinov2/<name>, e.g. dinov2/vits14-notpretrained.
 model: dinov2/vitb14-notpretrained
 
-# Required block, both keys required.
+# Required block, all keys required.
 data:
   out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.2d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
-  # lightly-train searches this folder recursively for images: every <case>/<series>/<NNN>.jpeg slice is one sample.
-  # Extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py).
-  data: /dev/shm/kneeno_data/internal
+  # Every internal exam, the eval's val exams included. Extracted by submit_pretrain_dinov2_kneeno.sh
+  # (KneeNo/data/prepare_data.py).
+  data_root: /dev/shm/kneeno_data/internal
+  # Only the case folders of its global splits train + unlabeled are pretrained on (KneeNo's pretraining_cases);
+  # lightly-train searches them recursively for images: every <case>/<series>/<NNN>.jpeg slice is one sample.
+  data_meta: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_unlabeled.json
 
 train:
   epochs: auto  # auto -> DINOv2's default of 125k steps, converted to epochs
@@ -172,8 +176,7 @@ eval:
     early_stop_patience: 5  # head epochs without a val improvement before stopping; 0 = never stop early
   verbose: true  # log each task's start and every head epoch's val metrics
   data:
-    # internal: global "train" (the heads' train/val) + "val" (the "internal" test set). NOTE: this 2D run still
-    # pretrains on every JPEG under data.data, val exams included, so its internal numbers are not yet clean.
+    # internal: global "train" (the heads' train/val) + "val" (the "internal" test set, not pretrained on).
     data_root: {internal: /dev/shm/kneeno_data/internal}
     label_meta: {internal: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_labeled.json}
     test_sets: [internal]  # in-training: never external (that is for the final numbers, not for picking checkpoints)

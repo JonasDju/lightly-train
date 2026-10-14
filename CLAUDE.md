@@ -94,8 +94,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   since 2026-10-14: heads train on the internal `train` split, early-stopped on val; `eval.verbose` logs the
   per-head-epoch val metrics), keys `{test_set}/{task}/{metric}`, and each trained head also its best epoch's
   `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only (`eval.data.test_sets:
-  [internal]`), so the callback logs `eval/internal/<task>/...`: compare pretraining epochs by those -- but see
-  "Comparability" below: this run still pretrains on the `val` exams. `cluster/configs/eval-MI-*.yaml` tests on
+  [internal]`), so the callback logs `eval/internal/<task>/...`: compare pretraining epochs by those (the run
+  doesn't pretrain on those exams; see "Run config"). `cluster/configs/eval-MI-*.yaml` tests on
   `[internal, external]` (heads trained once, scored on both) and sets `eval.data.abort_on_io_error: true` (an
   exam that fails to load raises); `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the
   in-training eval must not kill the run).
@@ -142,8 +142,15 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   Env vars: `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES`.
 - **Run config:**
   - `model:` (string);
-  - `data:` with exactly `out` and `data`, the image folder lightly-train searches recursively. Every
-    `<case>/<series>/<NNN>.jpeg` slice is one sample.
+  - `data:` with exactly `out`, `data_root` and `data_meta` (all required; names as on `3d_dinov2`). `data_root`
+    (`/dev/shm/kneeno_data/internal`) holds every internal exam, the global `val` ones (the `internal` test set)
+    included, so it is not passed to lightly-train as one folder (it was until 2026-10-14). The launcher's
+    `pretraining_dirs` passes `pretrain(data=[...])`: the sorted list of `data_root/<case_id>` for the cases KneeNo's
+    `pretraining_cases` returns for `data_meta` (`internal_unlabeled.json`: global splits `train` + `unlabeled`,
+    the same rule as the 3D dataset). That is a stock input type, so lightly-train's code is untouched: it searches
+    each folder recursively (every `<case>/<series>/<NNN>.jpeg` slice is one sample) and raises on a missing one.
+    The launcher prints the number of exams used and of exam folders held out. The list holds strings, not
+    `Path`s: lightly-train logs its arguments with `json.dumps`, which fails on a list of `Path`s.
   - optional `train:` (allowlist `run_config.TRAIN_KEYS`), `method:` (`DINOv2Args`), `transform:`
     (`DINOv2ViTTransformArgs`) and `eval:` (eval callback config; a missing block means no eval).
   - optional `callbacks:` (-> `pretrain(callbacks=)`, lightly-train's own callbacks by name), e.g.
@@ -191,11 +198,11 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     KneeNo's defaults.
 
 **Comparability with `3d_dinov2`:**
-- Both read `/dev/shm/kneeno_data/internal`, but the 3D run selects series through `data_meta`
-  (`metadata_unlabeled.json`: only the global splits `train` + `unlabeled`, plus KneeNo's length filter). The 2D
-  run takes **every** JPEG in the folder, so the two training sets differ: **the 2D run still pretrains on the
-  internal `val` exams**, i.e. on the `internal` test set, so its `internal/*` numbers are not clean yet (to fix
-  next). Its `external/*` numbers are.
+- Both pretrain on the same exams: the global splits `train` + `unlabeled` of the same `data_meta`, selected by
+  KneeNo's `pretraining_cases` (since 2026-10-14; before, the 2D run took every JPEG in the folder, the `val`
+  exams included, so the `internal/*` numbers of older 2D checkpoints are not clean, only their `external/*` ones).
+  Remaining difference: the 3D run reads only the series listed in the metadata that pass KneeNo's length filter
+  (`min_series_len` 2); the 2D run takes every series folder of an allowed case.
 - 2D defaults vs. the 3D config: ImageNet normalisation vs `0.5/0.5`; colour jitter/solarize vs MRI-specific
   intensity augmentations; 224² crops of single slices vs `224×224×16` volumes. These are all intended stock
   behaviour, but worth stating in the thesis.

@@ -82,6 +82,7 @@ from datetime import timedelta  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from kneeno import load_metadata, pretraining_cases  # noqa: E402
+from kneeno.dataset import split_hash  # noqa: E402
 from pytorch_lightning.strategies import DDPStrategy  # noqa: E402
 
 # cluster/run_config.py: running this script puts its folder first on sys.path.
@@ -98,7 +99,9 @@ def num_ranks() -> int:
 def pretraining_dirs(data_root: Path, data_meta: Path) -> list[str]:
     """The case folders under ``data_root`` that pretraining may see, sorted by case id.
 
-    Strings, not paths: lightly-train logs its arguments as JSON, which fails on a list of paths.
+    Strings, not paths: lightly-train logs its arguments as JSON, which fails on a list of paths. Prints the
+    exams' ``split_hash`` itself: KneeNo logs it too, but this runs before lightly-train gives the "kneeno" logger
+    a handler, so that line is dropped.
     """
     cases = sorted(pretraining_cases(load_metadata(data_meta)))
     if not cases:
@@ -106,7 +109,7 @@ def pretraining_dirs(data_root: Path, data_meta: Path) -> list[str]:
     held_out = len({path.name for path in data_root.iterdir()} - set(cases))
     print(
         f"Pretraining on {len(cases):,} exams in '{data_root}'; {held_out:,} exam folders there are held out "
-        "(not in a pretraining split of the metadata).",
+        f"(not in a pretraining split of the metadata); sha256 of the sorted case ids: {split_hash(cases)}.",
         flush=True,
     )
     return [str(data_root / case) for case in cases]

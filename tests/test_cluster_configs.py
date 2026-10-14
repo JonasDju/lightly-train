@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 import yaml
+from kneeno.dataset import split_hash
 from kneeno.evaluation import load_eval_config
 from kneeno.evaluation.config import ALL_TASKS
 
@@ -346,6 +347,7 @@ def test_main__pretrains_only_on_train_and_unlabeled(
     out = capsys.readouterr().out
     assert "Pretraining on 3 exams" in out
     assert "2 exam folders there are held out" in out
+    assert f"sha256 of the sorted case ids: {split_hash(['c1', 'c2', 'c3'])}." in out
 
 
 def test_main__no_exam_to_pretrain_on(

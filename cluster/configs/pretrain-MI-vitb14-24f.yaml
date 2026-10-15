@@ -167,6 +167,7 @@ eval:
   training:
     early_stop_on: auroc  # val metric that picks each head's best epoch
     early_stop_patience: 5  # head epochs without a val improvement before stopping; 0 = never stop early
+    loss: BCE
   verbose: true  # log each task's start and every head epoch's val metrics
   data:
     # internal: global "train" (the heads' train/val) + "val" (the "internal" test set, never pretrained on)
@@ -188,7 +189,6 @@ eval:
     knn: 5
     linear: 5
     linear_pool: 5
-    attentive_pool: null  # Takes too long (~2h on 12k exams) -> only run once training is finished
   knn:
     k: [5, 20, 50, 100]
     metric: cosine
@@ -197,21 +197,18 @@ eval:
     center: true  # subtract each sequence's mean feature before the per-sequence L2 normalisation
     batch_size: 32  # exams -> 128 volumes per encoder forward
   linear:
-    batchnorm: true  # non-affine BatchNorm1d (z-score) in front of the linear layer
-    max_epochs: 20
-    batch_size: 32  # exams
-    lr: 0.001
+    pooling: avg
+    batchnorm: true
+    max_epochs: 30
+    batch_size: 64
+    lr: 0.0015
+    warmup_epochs: 5
+    weight_decay: 0.0
   linear_pool:
     pooling: avg
-    batchnorm: true  # non-affine BatchNorm1d (z-score) in front of the linear layer
-    max_epochs: 20
-    batch_size: 32  # exams
-    lr: 0.001
-  attentive_pool:  # off above (freq null)
-    depth: 1
-    num_heads: 12
-    max_epochs: 20
-    batch_size: 16  # exams
-    lr: 0.0005
+    batchnorm: true
+    max_epochs: 30
+    batch_size: 64
+    lr: 0.0015
     warmup_epochs: 5
-    weight_decay: 0.001
+    weight_decay: 0.0

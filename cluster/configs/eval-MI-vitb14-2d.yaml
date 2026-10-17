@@ -27,8 +27,10 @@ image_size:
 #     only) and label_meta with the external dataset's paths too, 31 workers, abort_on_io_error true.
 #   * logging.tensorboard_dir is set: there are no lightly-train loggers here to re-log the metrics, so KneeNo's
 #     own SummaryWriter writes the test metrics.
+#   * the heads train longer (max_epochs 50, warmup_epochs 10 instead of 30 / 5): they are trained once here, not
+#     every few pretraining epochs.
 #   * freq only selects the tasks: every task with a non-null value (> 0) runs once; the value itself is ignored.
-#     Every task is listed explicitly, because a missing key keeps KneeNo's default frequency (deep merge).
+#     A task left out keeps KneeNo's default, null (off).
 #   * attentive_pool has a block of its own: the pretraining run never runs it, so it has none there.
 eval:
   seed: 239
@@ -142,6 +144,6 @@ eval:
     max_epochs: 50
     batch_size: 16
     grad_accum_steps: 1  # memory only: the head trains on micro-batches of batch_size / grad_accum_steps exams
-    lr: 0.005
+    lr: 0.0005
     warmup_epochs: 10
     weight_decay: 0.001

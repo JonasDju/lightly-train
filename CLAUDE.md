@@ -87,7 +87,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   rank 0, then hits `dist.barrier()` + `dist.broadcast_object_list()`. A rank guard deadlocks multi-GPU runs.
 - **Metrics go through lightly-train's loggers.** `logging.tensorboard_dir: null` disables KneeNo's
   `SummaryWriter`, and the callback re-logs the metrics via `pl_module.log_dict` under `eval/`.
-- **Config trap:** disabling a task with a nonzero default frequency needs an explicit `freq: {<task>: null}`.
+- **Config deep-merge:** a task left out of `freq` keeps KneeNo's default, which is null (off) for every task since
+  KneeNo `77839f0`.
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
   `evaluate(..., epoch=0)` once: each task logs its metrics once per test set (KneeNo's global-split protocol
@@ -188,14 +189,15 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
     lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `data.test_sets`
     (`[internal, external]`, with the external paths in `data_root` / `label_meta`), `data.subset: 1.0` (all
-    exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`), and the head
+    exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`), the heads'
+    `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few epochs), and the head
     settings of the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
     `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal
     `label_meta` must be the same), and also that `checkpoint` and `image_size` match the pretraining config
     (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
     `abort_on_io_error` difference and failed.
-  - Both configs spell out every attentive head's `depth`, `num_heads`, `lr`, `warmup_epochs`, `weight_decay` at
-    KneeNo's defaults.
+  - Both configs spell out every key of each attentive head (`q2l`, `patch_sa_depth`, `qa_depth`, `num_heads`,
+    `mlp_ratio`, `qkv_bias`, `complete_block` and the training settings).
 
 **Comparability with `3d_dinov2`:**
 - Both pretrain on the same exams: the global splits `train` + `unlabeled` of the same `data_meta`, selected by

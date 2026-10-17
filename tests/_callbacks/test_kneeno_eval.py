@@ -94,7 +94,7 @@ def _fake_eval_dataset(test_sets: tuple[str, ...] = ("internal",)) -> KneeNoEval
 def _config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
         "data": {"test_sets": ["internal"], "num_workers": 0},
-        "knn": {"batch_size": 4},
+        "extraction_batch_size": 4,
         "linear": {"max_epochs": 1, "batch_size": 4},
         "linear_pool": {"max_epochs": 1, "batch_size": 4},
         "attentive_pool": {"max_epochs": 1, "batch_size": 4, "num_heads": 2},

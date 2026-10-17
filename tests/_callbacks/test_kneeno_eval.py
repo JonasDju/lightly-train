@@ -99,7 +99,7 @@ def _config(**overrides: Any) -> dict[str, Any]:
         # series_depth: the fake dataset's depth, i.e. the slice count the slice tasks
         # see (the dataset itself is mocked, so it is not resampled).
         "data": {"test_sets": ["internal"], "num_workers": 0, "series_depth": 5},
-        "knn": {"batch_size": 4},
+        "extraction_batch_size": 4,
         "linear": {"max_epochs": 1, "batch_size": 4},
         "linear_pool": {"max_epochs": 1, "batch_size": 4},
         "attentive_pool": attentive,

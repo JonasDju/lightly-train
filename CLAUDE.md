@@ -645,8 +645,8 @@ re-logs the returned `{"{test_set}/{task}/{metric}": float}` dict via `pl_module
 curves, and no unpicklable `SummaryWriter` is ever held by a callback (see the
 `collate_fn` picklability gotcha in `MA/CLAUDE.md`).
 
-**Config trap:** `load_eval_config` deep-merges over `DEFAULT_EVAL_CONFIG`, so disabling a
-task needs an explicit `freq: {<task>: null}` — omitting the key leaves the default on.
+**Config deep-merge:** `load_eval_config` deep-merges over `DEFAULT_EVAL_CONFIG`, so a task
+left out of `freq` keeps the default, which is null (off) for every task since KneeNo `77839f0`.
 
 ## Running on the cluster
 
@@ -752,10 +752,11 @@ check).
   eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
   `eval_per_label/`, `results.json`, `params.yaml`).
 - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
-  loggers here), `freq` (the four volume tasks `1`, i.e. on, the slice tasks `null`; every key listed),
+  loggers here), `freq` (the four volume tasks `1`, i.e. on; the slice tasks left out, i.e. off),
   `data.test_sets` (`[internal, external]`, with the external paths in `data_root` / `label_meta`),
   `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error`
-  (`true`), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`).
+  (`true`), the heads' `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few
+  epochs), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`).
   `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal `label_meta`
   must be the same), and that `checkpoint`, `image_size` and the two resize keys match the pretraining config
   (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate

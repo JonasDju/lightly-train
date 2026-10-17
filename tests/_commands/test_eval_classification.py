@@ -141,6 +141,8 @@ def _eval_block(tmp_path: Path) -> dict[str, Any]:
         # Every task explicit: a missing key keeps KneeNo's default frequency.
         "freq": {task: 1 if task in VOLUME_TASKS else None for task in ALL_TASKS},
         "extraction_batch_size": 4,
+        # Pinned rather than KneeNo's default, which the expected metric keys depend on.
+        "knn": {"k": [5, 20]},
         "linear": {"max_epochs": 1, "batch_size": 4},
         "linear_pool": {"max_epochs": 1, "batch_size": 4},
         "attentive_pool": {"max_epochs": 1, "batch_size": 4, "num_heads": 2},
@@ -223,8 +225,9 @@ def test_eval_classification__all_tasks(
 def test_eval_classification__missing_freq_keeps_default(
     tmp_path: Path, run_config: dict[str, Any], mocker: MockerFixture
 ) -> None:
-    # The deep-merge trap: a task left out of freq keeps KneeNo's default frequency.
-    run_config["eval"]["freq"] = {"knn": None}
+    # A task left out of freq keeps KneeNo's default frequency (deep merge), which is
+    # null for every task: only the listed tasks run.
+    run_config["eval"]["freq"] = {"linear": 1, "attentive_pool": 1}
     config_path = _write_config(tmp_path, run_config)
     evaluate = mocker.patch(
         "kneeno.evaluation.ClassificationEvaluator.evaluate", return_value={}
@@ -235,7 +238,7 @@ def test_eval_classification__missing_freq_keeps_default(
     )
     eval_classification.eval_classification(eval_config=config_path, accelerator="cpu")
     tasks = evaluate.call_args.kwargs["tasks"]
-    assert tasks == ["linear", "linear_pool", "attentive_pool"]
+    assert tasks == ["linear", "attentive_pool"]
 
 
 @pytest.mark.parametrize("off", [None, 0])

@@ -319,8 +319,8 @@ def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     # decides where results.json and params.yaml go.
     assert eval_config["logging"]["tensorboard_dir"] is not None
     assert eval_config["logging"]["per_label_dir"] is not None
-    # Every task explicit: a missing key would keep KneeNo's default frequency.
-    assert set(raw["eval"]["freq"]) == set(ALL_TASKS)
+    # Only known tasks; a task left out keeps KneeNo's default frequency, null (off).
+    assert set(raw["eval"]["freq"]) <= set(ALL_TASKS)
 
 
 @pytest.mark.parametrize("path", EVAL_CONFIGS, ids=lambda p: p.name)
@@ -347,13 +347,21 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
         # Where it logs, which tasks run, and the data setup of a standalone job: all
         # exams, the external test set too (its paths included), extracted to $TMP
         # instead of /dev/shm, more workers, and a broken exam raises instead of being
-        # replaced (the in-training eval must not kill the run).
+        # replaced (the in-training eval must not kill the run). The standalone heads
+        # also train longer (max_epochs, warmup_epochs): they are trained once, not
+        # every few pretraining epochs.
         block = {
             k: v
             for k, v in block.items()
             if k not in ("logging", "freq")
             and not (k in ALL_TASKS and k not in in_training)
         }
+        for task in in_training:
+            block[task] = {
+                k: v
+                for k, v in block[task].items()
+                if k not in ("max_epochs", "warmup_epochs")
+            }
         block["data"] = {
             k: v
             for k, v in block["data"].items()

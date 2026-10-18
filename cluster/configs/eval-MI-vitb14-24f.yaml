@@ -1,7 +1,8 @@
 # Standalone KneeNo classification evaluation of a finished 3D DINOv2 pretraining run -- config for
 # cluster/eval_dinov2_kneeno.py (--config), i.e. `lightly-train eval_classification eval_config=...`. Top-level keys:
-# checkpoint, image_size, resize_interpolation, resize_upscale_interpolation, eval; anything else is an error. Env
-# vars ($VAR, ${VAR}, leading ~) are expanded everywhere; an unset one is an error.
+# weights, image_size, resize_interpolation, resize_upscale_interpolation, eval, and for an exported model also
+# model, model_args (optional) and normalize; anything else is an error. Env vars ($VAR, ${VAR}, leading ~) are
+# expanded everywhere; an unset one is an error.
 #
 # ${PRETRAIN_JOB_ID} is the SLURM job ID of the pretraining run (pretrain-MI-vitb14-24f.yaml's data.out is named
 # after it). Not ${SLURM_JOB_ID}: in the eval job that is the eval job's own ID. Submit with (RWTH's sbatch does not
@@ -12,10 +13,21 @@
 # CSVs (eval.logging.per_label_dir), and in the parent of per_label_dir the final metrics (results.json) and this
 # config with env vars expanded (params.yaml). The command refuses to start if any of them already exist.
 
-checkpoint: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/checkpoints/last.ckpt
+# A LightlyTrain checkpoint or an exported model (the state dict of the bare ViT, e.g. <data.out>/exported_models/
+# exported_last.pt); the command tells them apart by their content.
+weights: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/checkpoints/last.ckpt
+# For an exported model only: it holds the weights only, so these describe the model. A checkpoint records them, and
+# setting them with one is an error. Uncomment when weights points to an exported model; the values are
+# pretrain-MI-vitb14-24f.yaml's (model, train.model_args (not set there), transform.normalize). An exported 3D model
+# must have 1 input channel and normalize exactly one mean and one std value.
+# model: dinov2/vitb14-notpretrained
+# model_args: null
+# normalize:
+#   mean: [0.5]
+#   std: [0.5]
 # Must equal the pretraining run's transform.image_size / resize_interpolation / resize_upscale_interpolation:
-# every volume is resized to image_size that way, and the checkpoint records none of them. A left-out resize key
-# falls back to DINOv2ViTTransformArgs' default, with a warning.
+# every volume is resized to image_size that way, and neither a checkpoint nor an exported model records them. A
+# left-out resize key falls back to DINOv2ViTTransformArgs' default, with a warning.
 image_size:
 - 224
 - 224

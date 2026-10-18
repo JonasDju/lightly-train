@@ -611,25 +611,56 @@ available here and is enabled in the config.
   trained once, scored on both), and sets `eval.data.abort_on_io_error: true` (an exam that fails to load raises);
   `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the in-training eval must not kill the run).
   Far shorter than vjepa2's script: a LightlyTrain checkpoint stores the model objects, so
-  there is no architecture to rebuild.
+  there is no architecture to rebuild (an exported model is built from its name, below).
   - **Arguments:** only `eval_config`, `accelerator` and `overwrite`. Everything else is in
     the eval config file, validated by `EvalRunConfig` (`extra="forbid"`, so a leftover
-    `transform:` or `out:` is an error; a `params-pretrain.yaml` is no longer accepted):
-    `checkpoint`, `image_size` (`[H, W, D]`, required: the checkpoint doesn't record it),
+    `transform:` or `out:` is an error; a `params-pretrain.yaml` is no longer accepted; the
+    old `checkpoint:` key raises with a pointer to `weights`):
+    `weights`, `image_size` (`[H, W, D]`, required: neither file records it),
     optional `resize_interpolation` / `resize_upscale_interpolation` (validated like the
     transform args; a missing key falls back to `DINOv2ViTTransformArgs`' default **with a
     warning**, detected via `model_fields_set` because `null` is a valid upscale value) and
-    `eval`. Env vars are expanded in the whole file; **an unset one is an error**
-    (`expand_env_vars` leaves it as it is).
+    `eval`, plus `model`, `model_args` and `normalize` for an exported model (below). Env vars
+    are expanded in the whole file; **an unset one is an error** (`expand_env_vars` leaves it
+    as it is).
+  - **`weights`: checkpoint or exported model (since 2026-10-18, as on `2d_dinov2`),
+    detected by content** (`_load_encoder`, one `torch.load(weights_only=False)`: a
+    checkpoint holds pickled modules).
+    - A LightlyTrain checkpoint (a dict with `state_dict` and `lightly_train`) records the
+      model and its normalize args, so `model` / `model_args` / `normalize` are **rejected**
+      with one, even as null. The shipped eval config points to `last.ckpt` and has them
+      commented out, with the values of this branch's export (`dinov2/vitb14-notpretrained`,
+      `model_args: null`, `mean: [0.5]`, `std: [0.5]`).
+    - An exported model is the state dict of the bare `DinoVisionTransformer`: `pretrain`'s
+      `exported_models/exported_last.pt` (rewritten after every epoch by lightly-train's
+      default-on `ModelExport` callback, and once more at the end) or `lightly-train export`
+      with the default `part`/`format`. It holds the weights only, so `model` and `normalize`
+      (`mean` and `std`, no defaults) are required and `model_args` is optional. The model is
+      built with `package_helpers.get_wrapped_model(..., load_weights=False)` and the input
+      channels of `patch_embed.proj.weight`, loaded `strict=True` (a mismatch raises, naming
+      `model`/`model_args`), then `make_teacher()`. **The model must have 1 input channel
+      and `normalize` exactly one `mean` and one `std`**: 3D pretraining can't produce
+      anything else (grayscale volumes; `ViewTransform`'s `NormalizeIntensity(channel_wise)`
+      raises if normalize has more values than the volume has channels, and
+      `TransformArgs.resolve_auto`/`resolve_incompatible` make `num_channels` and the value
+      count agree), while `DINOv2Adapter` would silently broadcast the volume to one channel
+      per value. So the in-training eval never sees more than one value, and the check covers
+      the only other way in. Other contents (a `torch_model` export, an `embedding_model`
+      state dict) raise.
+    - An export is always the EMA teacher (`DINOv2.__init__` makes the given embedding model
+      the teacher, and both `pretrain` and `export` take that `wrapped_model`), so
+      `eval.encoder: online` needs a checkpoint.
   - **Tasks** are those whose `eval.freq` is set (null or `<= 0` is off, `tasks_due`'s
     semantics), computed on the merged config, so a missing key keeps KneeNo's default; no
     task is an error. Slice tasks, if enabled, are dropped by KneeNo with a warning (this
     adapter has no slice tokens). The **encoder** is `eval.encoder` (`target` | `online`).
   - **Outputs:** `results.json` (final metrics) and `params.yaml` (the config file with env
-    vars expanded, written *before* evaluating) in the parent of `eval.logging.per_label_dir`;
-    without a `per_label_dir`, a warning, `results.json` next to the checkpoint and no
-    `params.yaml`. Existing results (`results.json`, `params.yaml`, `per_label_dir`,
-    `tensorboard_dir`) make it refuse before the checkpoint is loaded; `overwrite=True` runs
+    vars expanded, written after loading the weights but *before* evaluating, so a config the
+    weights reject leaves no `params.yaml` that would make the corrected rerun refuse) in the
+    parent of `eval.logging.per_label_dir`; without a `per_label_dir`, a warning,
+    `results.json` next to the weights file and no `params.yaml`. Existing results
+    (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse before
+    the weights are loaded; `overwrite=True` runs
     anyway (per-label CSVs are appended to, TB gets a second event file).
 
 **`evaluate()` is called on every rank, deliberately and with no rank guard.**
@@ -758,7 +789,8 @@ check).
   (`true`), the heads' `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few
   epochs), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`).
   `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal `label_meta`
-  must be the same), and that `checkpoint`, `image_size` and the two resize keys match the pretraining config
+  must be the same), that it sets none of the exported-model keys, and that `weights`, `image_size` and the two
+  resize keys match the pretraining config
   (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
   `abort_on_io_error` difference and failed.
 

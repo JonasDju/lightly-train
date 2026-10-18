@@ -23,7 +23,10 @@ from kneeno.evaluation.config import ALL_TASKS
 
 import lightly_train
 from lightly_train._callbacks.callback_args import CallbackArgs
-from lightly_train._commands.eval_classification import _load_eval_run_config
+from lightly_train._commands.eval_classification import (
+    _EXPORTED_MODEL_KEYS,
+    _load_eval_run_config,
+)
 from lightly_train._commands.train import FunctionTrainConfig
 from lightly_train._methods.dinov2.dinov2 import DINOv2Args
 from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
@@ -314,7 +317,10 @@ def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("TMP", "/tmp/job")
     raw, config = _load_eval_run_config(path)
     eval_config = load_eval_config(config.eval)
-    assert "1234" in str(config.checkpoint)
+    assert "1234" in str(config.weights)
+    # The shipped configs evaluate a checkpoint, which records the model itself: the
+    # exported-model keys would be rejected (they are in the file, commented out).
+    assert config.model_fields_set.isdisjoint(_EXPORTED_MODEL_KEYS)
     # Standalone, KneeNo's own SummaryWriter logs the test metrics, and per_label_dir
     # decides where results.json and params.yaml go.
     assert eval_config["logging"]["tensorboard_dir"] is not None
@@ -332,10 +338,10 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
     run = yaml.safe_load(_pretrain_config_of(path).read_text())
 
     out = run["data"]["out"].replace("${SLURM_JOB_ID}", "${PRETRAIN_JOB_ID}")
-    assert eval_config["checkpoint"] == f"{out}/checkpoints/last.ckpt"
+    assert eval_config["weights"] == f"{out}/checkpoints/last.ckpt"
     for key in ("tensorboard_dir", "per_label_dir"):
         assert eval_config["eval"]["logging"][key].startswith(f"{out}/eval/")
-    # The checkpoint records neither the crop size nor how volumes are resized to it.
+    # Neither file records the crop size or how volumes are resized to it.
     for key in ("image_size", "resize_interpolation", "resize_upscale_interpolation"):
         assert eval_config[key] == run["transform"][key], key
 

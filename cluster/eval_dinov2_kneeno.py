@@ -3,10 +3,13 @@
 Calls ``lightly_train.eval_classification`` (``src/lightly_train/_commands/eval_classification.py``) with an eval
 config (``--config``): a YAML with
 
-    checkpoint:  the LightlyTrain checkpoint to evaluate, e.g. <pretraining data.out>/checkpoints/last.ckpt
+    weights:     a LightlyTrain checkpoint, e.g. <pretraining data.out>/checkpoints/last.ckpt, or an exported model,
+                 e.g. <pretraining data.out>/exported_models/exported_last.pt (told apart by content)
     image_size:  [H, W, D], the pretraining run's transform.image_size
     resize_*:    resize_interpolation / resize_upscale_interpolation, as in its transform block (optional)
     eval:        KneeNo's evaluation config (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
+
+and, for an exported model only, ``model``, ``model_args`` (optional) and ``normalize``.
 
 Every task with a non-null ``eval.freq`` runs once, on ``eval.encoder``, logging its test metrics.
 Environment variables are expanded in every string value; ``cluster/configs/eval-MI-vitb14-24f.yaml`` locates the

@@ -384,21 +384,33 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
 
     Options:
         eval_config (str, required):
-            Path to a YAML file with exactly these top-level keys (environment
-            variables are expanded in every value):
-              checkpoint: the LightlyTrain checkpoint to evaluate, e.g.
-                `out/my_experiment/checkpoints/last.ckpt`.
+            Path to a YAML file with these top-level keys (environment variables are
+            expanded in every value):
+              weights: the model to evaluate, its format detected from its content:
+                a LightlyTrain checkpoint, e.g.
+                `out/my_experiment/checkpoints/last.ckpt`, or an exported model (the
+                state dict of the bare DINOv2 ViT), e.g.
+                `out/my_experiment/exported_models/exported_last.pt` or the official
+                DINOv2 weights.
               image_size: [H, W], the crop size the model was pretrained with; every
-                slice is resized to it. The checkpoint does not record it.
+                slice is resized to it. Neither file records it.
               eval: KneeNo's evaluation config. The tasks are those with a non-null
                 `freq` (['knn', 'linear', 'linear_pool', 'attentive_pool',
                 'linear_slice_cls', 'attentive_slice_cls', 'attentive_slice_pool'];
                 the slice tasks need `data.series_depth > 0`), the encoder is
-                `encoder` ('target', the EMA teacher, or 'online', the student).
+                `encoder` ('target', the EMA teacher, or 'online', the student, which
+                only a checkpoint holds).
+            For an exported model only (a checkpoint records them, so they are an
+            error with one):
+              model: the model name the weights belong to, e.g.
+                `dinov2/vitb14-notpretrained`.
+              model_args: optional, the pretraining run's `model_args`.
+              normalize: `mean` and `std`, the pretraining run's
+                `transform.normalize`.
             The final metrics are written to `results.json` and the config, with
             environment variables expanded, to `params.yaml`, both in the parent of
             `eval.logging.per_label_dir`. Without a `per_label_dir`, `results.json`
-            goes next to the checkpoint and no `params.yaml` is written.
+            goes next to the weights file and no `params.yaml` is written.
         accelerator (str):
             Hardware accelerator. Can be one of ['cpu', 'gpu', 'tpu', 'ipu', 'hpu',
             'mps', 'auto']. Default: {_eval_classification_cfg.accelerator}
@@ -411,7 +423,7 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
         -v, --verbose  Run the command in verbose mode for detailed output.
 
     Examples:
-    # Evaluate the checkpoint named in an eval config
+    # Evaluate the model named in an eval config
     lightly-train eval_classification eval_config=cluster/configs/eval-MI-vitb14-2d.yaml
 """
 

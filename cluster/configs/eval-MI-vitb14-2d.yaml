@@ -1,7 +1,7 @@
 # Standalone KneeNo classification evaluation of a finished 2D DINOv2 pretraining run -- config for
-# cluster/eval_dinov2_kneeno.py (--config), i.e. `lightly-train eval_classification eval_config=...`. Exactly three
-# top-level keys: checkpoint, image_size, eval. Env vars ($VAR, ${VAR}, leading ~) are expanded everywhere; an
-# unset one is an error.
+# cluster/eval_dinov2_kneeno.py (--config), i.e. `lightly-train eval_classification eval_config=...`. Top-level keys:
+# weights, image_size, eval, and for an exported model also model, model_args (optional) and normalize. Env vars
+# ($VAR, ${VAR}, leading ~) are expanded everywhere; an unset one is an error.
 #
 # ${PRETRAIN_JOB_ID} is the SLURM job ID of the pretraining run (pretrain-MI-vitb14-2d.yaml's data.out is named
 # after it). Not ${SLURM_JOB_ID}: in the eval job that is the eval job's own ID. Submit with (RWTH's sbatch does not
@@ -12,9 +12,20 @@
 # CSVs (eval.logging.per_label_dir), and in the parent of per_label_dir the final metrics (results.json) and this
 # config with env vars expanded (params.yaml). The command refuses to start if any of them already exist.
 
-checkpoint: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/checkpoints/last.ckpt
-# Must equal the pretraining run's transform.image_size: every slice is resized to it, and the checkpoint does not
-# record it.
+# A LightlyTrain checkpoint or an exported model (the state dict of the bare ViT, e.g. <data.out>/exported_models/
+# exported_last.pt or the official DINOv2 weights); the command tells them apart by their content.
+weights: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/checkpoints/last.ckpt
+# For an exported model only: it holds the weights only, so these describe the model. A checkpoint records them, and
+# setting them with one is an error. Uncomment when weights points to an exported model; the values are
+# pretrain-MI-vitb14-2d.yaml's (model, train.model_args, transform.normalize). The official DINOv2 ViT-B/14 weights
+# are model dinov2/vitb14, with the same ImageNet normalize.
+# model: dinov2/vitb14-notpretrained
+# model_args: null
+# normalize:
+#   mean: [0.485, 0.456, 0.406]
+#   std: [0.229, 0.224, 0.225]
+# Must equal the pretraining run's transform.image_size: every slice is resized to it, and neither a checkpoint nor
+# an exported model records it.
 image_size:
 - 224
 - 224

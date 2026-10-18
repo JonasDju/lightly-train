@@ -90,37 +90,57 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 - **Config deep-merge:** a task left out of `freq` keeps KneeNo's default, which is null (off) for every task since
   KneeNo `77839f0`.
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
-  command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint and runs
-  `evaluate(..., epoch=0)` once: each task logs its metrics once per test set (KneeNo's global-split protocol
-  since 2026-10-14: heads train on the internal `train` split, early-stopped on val; `eval.verbose` logs the
-  per-head-epoch val metrics), keys `{test_set}/{task}/{metric}`, and each trained head also its best epoch's
-  `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only (`eval.data.test_sets:
-  [internal]`), so the callback logs `eval/internal/<task>/...`: compare pretraining epochs by those (the run
-  doesn't pretrain on those exams; see "Run config"). `cluster/configs/eval-MI-*.yaml` tests on
+  command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint or an exported
+  model and runs `evaluate(..., epoch=0)` once: each task logs its metrics once per test set (KneeNo's
+  global-split protocol since 2026-10-14: heads train on the internal `train` split, early-stopped on val;
+  `eval.verbose` logs the per-head-epoch val metrics), keys `{test_set}/{task}/{metric}`, and each trained head
+  also its best epoch's `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only
+  (`eval.data.test_sets: [internal]`), so the callback logs `eval/internal/<task>/...`: compare pretraining epochs
+  by those (the run doesn't pretrain on those exams; see "Run config"). `cluster/configs/eval-MI-*.yaml` tests on
   `[internal, external]` (heads trained once, scored on both) and sets `eval.data.abort_on_io_error: true` (an
   exam that fails to load raises); `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the
   in-training eval must not kill the run).
   - **Arguments (2026-10-08):** only `eval_config`, `accelerator` and `overwrite`. Everything else is in the
-    eval config file: exactly the top-level keys `checkpoint`, `image_size` (`[H, W]`, required: the checkpoint
-    doesn't record it) and `eval`. It's validated by `EvalRunConfig` (`extra="forbid"`, so a leftover `transform:`
-    or `out:` is an error), and env vars are expanded in the whole file. **An unset env var is an error**:
+    eval config file: the top-level keys `weights`, `image_size` (`[H, W]`, required: neither file records it) and
+    `eval`, plus `model`, `model_args` and `normalize` for an exported model (below). It's validated by
+    `EvalRunConfig` (`extra="forbid"`, so a leftover `transform:` or `out:` is an error; the old `checkpoint:` key
+    raises with a pointer to `weights`), and env vars are expanded in the whole file. **An unset env var is an
+    error**:
     `expand_env_vars` leaves it as it is, which would point to a nonexistent checkpoint or create a literal
     `${...}` directory. A `params-pretrain.yaml` is no longer accepted.
+  - **`weights`: checkpoint or exported model (since 2026-10-18), detected by content** (`_load_encoder`, one
+    `torch.load(weights_only=False)`: a checkpoint holds pickled modules).
+    - A LightlyTrain checkpoint (a dict with `state_dict` and `lightly_train`) records the model and its
+      normalize args, so `model` / `model_args` / `normalize` are **rejected** with one, even as null. The shipped
+      eval config therefore points to `last.ckpt` and has them commented out, with the values of this branch's
+      export (`dinov2/vitb14-notpretrained`, `model_args: null`, ImageNet).
+    - An exported model is the state dict of the bare `DinoVisionTransformer`: `pretrain`'s
+      `exported_models/exported_last.pt`, `lightly-train export` with the default `part`/`format`, or Meta's
+      official weights (`dinov2/vitb14` = `dinov2_vitb14_reg4_pretrain.pth`; MLP FFN, 518² pos_embed, vs. our
+      `vitb14-notpretrained`: SwiGLU, 224²). It holds the weights only, so `model` and `normalize` (`mean` and
+      `std`, no defaults) are required and `model_args` is optional. The model is built with
+      `package_helpers.get_wrapped_model(..., load_weights=False)` (no download, compute nodes are offline),
+      loaded `strict=True` (a mismatch raises, naming `model`/`model_args`), then `make_teacher()`. Input channels
+      come from `patch_embed.proj.weight.shape[1]`. Other contents (a `torch_model` export, an `embedding_model`
+      state dict) raise.
+    - An export is always the EMA teacher (`DINOv2.__init__` makes the given embedding model the teacher, and
+      both `pretrain` and `export` take that `wrapped_model`), so `eval.encoder: online` needs a checkpoint.
   - **Tasks** are those whose `eval.freq` is set, with `tasks_due`'s semantics: null or `<= 0` is off. They are
     computed on the merged config, so a missing key keeps KneeNo's default, and no task at all is an error. The
     **encoder** is `eval.encoder`: `target` (the EMA teacher, which the checkpoint stores) or `online` (the
     student, loaded from the method's `state_dict`).
   - **Outputs:**
     - In the parent of `eval.logging.per_label_dir`: `results.json` (final metrics) and `params.yaml` (the config
-      file with env vars expanded, written *before* evaluating).
-    - Without a `per_label_dir`: a warning, `results.json` next to the checkpoint, and no `params.yaml`.
+      file with env vars expanded, written after loading the weights but *before* evaluating, so a config the
+      weights reject leaves no `params.yaml` that would make the corrected rerun refuse).
+    - Without a `per_label_dir`: a warning, `results.json` next to the weights file, and no `params.yaml`.
     - Existing results (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse, before
-      the checkpoint is loaded. With `overwrite=True` it runs anyway, but the per-label CSVs are appended to and
+      the weights are loaded. With `overwrite=True` it runs anyway, but the per-label CSVs are appended to and
       TB gets a second event file.
-  - **Differs from 3d** in what the adapter needs. `num_channels` is `len(checkpoint normalize_args.mean)`: the
-    checkpoint stores the resolved normalize args, whose length the transform matched to the resolved
-    `num_channels`, `auto` included. `image_size` is `(H, W)`. 3d also reads the top-level
-    `resize_interpolation`/`resize_upscale_interpolation`.
+  - **Differs from 3d** in what the adapter needs. `num_channels` is `len(checkpoint normalize_args.mean)` for a
+    checkpoint (it stores the resolved normalize args, whose length the transform matched to the resolved
+    `num_channels`, `auto` included) and the patch embedding's input channels for an exported model.
+    `image_size` is `(H, W)`. 3d also reads the top-level `resize_interpolation`/`resize_upscale_interpolation`.
 
 ## Run bookkeeping (copied from `3d_dinov2`; doesn't change training)
 
@@ -193,7 +213,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few epochs), and the head
     settings of the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
     `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal
-    `label_meta` must be the same), and also that `checkpoint` and `image_size` match the pretraining config
+    `label_meta` must be the same), that it sets none of the exported-model keys, and that `weights` and
+    `image_size` match the pretraining config
     (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
     `abort_on_io_error` difference and failed.
   - Both configs spell out every key of each attentive head (`q2l`, `patch_sa_depth`, `qa_depth`, `num_heads`,
@@ -228,7 +249,10 @@ No GPU here: CPU, `dinov2/_vittest14`. This branch has the **stock test suite wi
 - `tests/_commands/test_eval_classification.py` runs the command end to end on a real DINOv2 checkpoint and the same
   kind of fake dataset (task selection from `freq`, all seven tasks, `target`/`online`, `num_channels` from the
   checkpoint, output locations, `params.yaml` expansion, refusal on existing results, unset env vars, invalid
-  config files). `tests/test_cluster_configs.py` covers the shipped eval config and the eval launcher.
+  config files). It also exports that checkpoint with the real `lightly_train.export` and pins identical metrics
+  from the export, the exported-model keys (required / rejected with a checkpoint), `num_channels` from the
+  weights, a wrong `model`/`model_args`, `online` with an export, and the unsupported export formats.
+  `tests/test_cluster_configs.py` covers the shipped eval config and the eval launcher.
 - `tests/_methods/dinov2/test_dinov2_loss.py::TestDINOLoss::test_sinkhorn_knopp_teacher` (stock) is flaky in a
   full run: unseeded `torch.randn` and an `allclose` at default tolerance, so it depends on the global RNG state the
   earlier tests leave behind. It passes on its own.

@@ -786,7 +786,7 @@ check).
   loggers here), `freq` (the four volume tasks `1`, i.e. on; the slice tasks left out, i.e. off),
   `data.test_sets` (`[internal, external]`, with the external paths in `data_root` / `label_meta`),
   `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error`
-  (`true`), the heads' `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few
+  (`true`), `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model), the heads' `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few
   epochs), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`).
   `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal `label_meta`
   must be the same), that it sets none of the exported-model keys, and that `weights`, `image_size` and the two

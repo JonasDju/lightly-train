@@ -209,7 +209,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
     lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `data.test_sets`
     (`[internal, external]`, with the external paths in `data_root` / `label_meta`), `data.subset: 1.0` (all
-    exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`), the heads'
+    exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`),
+    `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model), the heads'
     `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few epochs), and the head
     settings of the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
     `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal

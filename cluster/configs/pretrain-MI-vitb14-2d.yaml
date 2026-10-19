@@ -166,6 +166,9 @@ eval:
   seed: 239
   encoder: target  # target (EMA teacher) | online (student)
   amp_dtype: bfloat16  # frozen-encoder forward under autocast (CUDA only); null -> float32. Heads still train in float32.
+  # Off for the in-training evaluation: it gets the training loop's encoder, which that loop compiles or not
+  # on purpose (see KneeNo's README).
+  compile_encoder: false
   cache_features: true  # linear / linear_pool / linear_slice_cls / attentive_slice_cls train on features extracted
                         # once per evaluation instead of re-encoding every head epoch; k-NN always uses the shared
                         # pass. attentive_pool / attentive_slice_pool never cache.
@@ -174,7 +177,7 @@ eval:
     val_fraction: 0.2  # heads are scored on val every head epoch (early stopping)
   training:
     early_stop_on: auroc  # val metric that picks each head's best epoch
-    early_stop_patience: 5  # head epochs without a val improvement before stopping; 0 = never stop early
+    early_stop_patience_global: 0  # head epochs without a val improvement before stopping; 0 = never stop early; overridable per task
     loss: BCE
   verbose: true  # log each task's start and every head epoch's val metrics
   data:
@@ -194,12 +197,12 @@ eval:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
     per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.2d.vitb.224px/eval/in-training/eval_per_label
     tag_prefix: eval
-  freq:
-    knn: 10
-    linear: 10
-    linear_pool: 10
-    linear_slice_cls: 10  # trains on the cached slice cls tokens -> cheap
-    attentive_slice_cls: 10  # trains on the cached slice cls tokens -> cheap
+  freq:  # One 2D epoch takes > 1h, so running these tasks very frequently does not add much overhead
+    knn: 1
+    linear: 1
+    linear_pool: 1
+    linear_slice_cls: 1  # trains on the cached slice cls tokens -> cheap
+    attentive_slice_cls: 1  # trains on the cached slice cls tokens -> cheap
   knn:
     k: [5, 20, 50, 100]
     metric: cosine

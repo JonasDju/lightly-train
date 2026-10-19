@@ -410,11 +410,12 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
         # instead of /dev/shm, more workers, and a broken exam raises instead of being
         # replaced (the in-training eval must not kill the run). The standalone heads
         # also train longer (max_epochs, warmup_epochs): they are trained once, not
-        # every few pretraining epochs.
+        # every few pretraining epochs. Only the standalone eval compiles the encoder
+        # (compile_encoder): the in-training eval gets the training loop's model.
         block = {
             k: v
             for k, v in block.items()
-            if k not in ("logging", "freq")
+            if k not in ("logging", "freq", "compile_encoder")
             and not (k in ALL_TASKS and k not in in_training)
         }
         for task in in_training:

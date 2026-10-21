@@ -11,6 +11,17 @@ own image-folder dataset over the JPEG slices, its own 2D transforms, its own de
 if they don't alter training: evaluation wiring, run bookkeeping, cluster tooling. Anything that changes what
 the model sees or how it learns needs a deliberate decision, and a note in this file.
 
+**Deliberate deviation: attention uses `SDPAttention` (2026-10-21).** Every `dinov2_vit_src` builder
+(`vit_small/base/large/giant2/so400m`, `_vit_test`) builds its blocks with `SDPAttention`
+(`layers/attention.py`, ported verbatim from `3d_dinov2`) instead of stock `MemEffAttention`, in training and
+evaluation alike. Stock needs xFormers, which isn't installed (an optional extra). Without it `MemEffAttention`
+falls back to `Attention`, which materializes the full `(B, heads, N, N)` score matrix (plus a float32 softmax
+copy under autocast). At 518² (1374 tokens) the official-weights eval only fit `extraction_batch_size: 4`, at
+~48 GB. `SDPAttention` computes the same thing through `F.scaled_dot_product_attention`, with the same parameters
+and state-dict keys. Results differ by float rounding only, older checkpoints and exports load unchanged, and a
+resumed pretraining run just switches kernels. `tests/_models/dinov2_vit/test_attention.py` pins equality with
+`Attention` and that every builder uses it.
+
 **Current status (2026-10-08):** the KneeNo in-training eval is wired in, with a slice-wise adapter that hands
 KneeNo the per-slice tokens, so KneeNo's 2D-only slice tasks run too (see below). `cluster/` holds SLURM scripts,
 launchers and configs for pretraining and for the standalone evaluation. Pretraining and the standalone eval run
@@ -242,6 +253,8 @@ No GPU here: CPU, `dinov2/_vittest14`. This branch has the **stock test suite wi
   tests/test__cli.py tests/test__logging.py tests/_models/dinov2_vit tests/_methods/dinov2
 ```
 
+- `tests/_models/dinov2_vit/test_attention.py` pins `SDPAttention` against `Attention` and that every builder uses
+  it (see "Deliberate deviation" at the top).
 - `tests/_data/test_kneeno_adapter.py` pins `prepare_input` (per-slice normalization and order, layout, the
   external rescale, equality with `EmbeddingTransform`) and `forward_features` (equality with encoding each
   slice by hand, DDP unwrap), plus the `prepare_input` → `collate` → `forward_features` path.

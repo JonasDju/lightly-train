@@ -229,7 +229,7 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `image_size` match the pretraining config
     (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
     `abort_on_io_error` difference and failed.
-  - Both configs spell out every key of each attentive head (`q2l`, `patch_sa_depth`, `qa_depth`, `num_heads`,
+  - Both configs spell out every key of each attentive head (`q2l`, `encoder_layers`, `decoder_layers`, `num_heads`,
     `mlp_ratio`, `qkv_bias`, `complete_block` and the training settings).
 
 **Comparability with `3d_dinov2`:**

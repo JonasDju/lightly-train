@@ -604,8 +604,10 @@ available here and is enabled in the config.
   `lightly-train eval_classification` command (same interface as on `2d_dinov2` since
   2026-10-11). One `evaluate(..., epoch=0)` call: each task logs its metrics once per test set (KneeNo's
   global-split protocol since 2026-10-14: heads train on the internal `train` split, early-stopped on val;
-  `eval.verbose` logs the val metrics per head epoch), keys `{test_set}/{task}/{metric}`, and each trained head
-  also its best epoch's `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only
+  `eval.verbose` logs the val metrics per head epoch), keys `{test_set}/{task}/{metric}`, each trained head also
+  its best epoch's `evaluation_val/{task}/val_auroc` and chosen `evaluation_val/{task}/lr`, and k-NN each k's
+  `evaluation_val/knn/k{k}/val_auroc` and chosen `.../temperature` (KneeNo's lr / temperature sweep, 2026-10-23).
+  The pretraining config tests on `internal` only
   (`eval.data.test_sets: [internal]`, exams never pretrained on), so the callback logs `eval/internal/<task>/...`:
   compare pretraining epochs by those. `cluster/configs/eval-MI-*.yaml` tests on `[internal, external]` (heads
   trained once, scored on both), and sets `eval.data.abort_on_io_error: true` (an exam that fails to load raises);
@@ -786,8 +788,14 @@ check).
   loggers here), `freq` (the four volume tasks `1`, i.e. on; the slice tasks left out, i.e. off),
   `data.test_sets` (`[internal, external]`, with the external paths in `data_root` / `label_meta`),
   `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error`
-  (`true`), `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model), the heads' `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few
-  epochs), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`).
+  (`true`), `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model),
+  `compile_attentive_heads` (`true` / `false` in training), the heads' `max_epochs` / `warmup_epochs` (50 / 10
+  instead of 30 / 5: trained once, not every few epochs), the swept `lr` of the linear tasks (`[0.0001, ...,
+  0.02]`, 8 values; one value in training) and `knn.temperature` (`[0.01, ..., 1.0]`, 8 values; `0.07` in
+  training), and the head settings of tasks the pretraining run doesn't run (`attentive_pool`: `lr: 0.0005`,
+  batch 64 as 4 micro-batches of 16, `max_epochs: 15`, `warmup_epochs: 3`, `early_stop_patience: 5`).
+- Both configs set `encoder_amp_dtype: bfloat16` (`amp_dtype` before), `head_amp_dtype: null` and
+  `training.monitor_metric` (`early_stop_on` before), since 2026-10-23.
   `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal `label_meta`
   must be the same), that it sets none of the exported-model keys, and that `weights`, `image_size` and the two
   resize keys match the pretraining config

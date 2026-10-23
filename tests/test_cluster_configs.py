@@ -35,6 +35,8 @@ from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 CLUSTER_DIR = Path(__file__).parents[1] / "cluster"
 RUN_CONFIGS = sorted((CLUSTER_DIR / "configs").glob("pretrain-*.yaml"))
 EVAL_CONFIGS = sorted((CLUSTER_DIR / "configs").glob("eval-*.yaml"))
+#: The tasks whose lr only the standalone eval sweeps.
+LINEAR_TASKS = ("linear", "linear_pool", "linear_slice_cls")
 
 
 # cluster/ is not a package, so load run_config.py from its path.
@@ -356,18 +358,22 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
         # replaced (the in-training eval must not kill the run). The standalone heads
         # also train longer (max_epochs, warmup_epochs): they are trained once, not
         # every few pretraining epochs. Only the standalone eval compiles the encoder
-        # (compile_encoder): the in-training eval gets the training loop's model.
+        # (compile_encoder: the in-training eval gets the training loop's model) and
+        # the attentive heads (compile_attentive_heads), and sweeps the linear heads'
+        # lr and k-NN's temperature.
         block = {
             k: v
             for k, v in block.items()
-            if k not in ("logging", "freq", "compile_encoder")
+            if k
+            not in ("logging", "freq", "compile_encoder", "compile_attentive_heads")
             and not (k in ALL_TASKS and k not in in_training)
         }
         for task in in_training:
+            swept = {"lr"} if task in LINEAR_TASKS else set()
             block[task] = {
                 k: v
                 for k, v in block[task].items()
-                if k not in ("max_epochs", "warmup_epochs")
+                if k not in {"max_epochs", "warmup_epochs", "temperature", *swept}
             }
         block["data"] = {
             k: v

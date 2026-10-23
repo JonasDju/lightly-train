@@ -180,7 +180,11 @@ def test_on_train_epoch_end__logs_metrics(mocker: MockerFixture) -> None:
     module.log_dict.assert_called_once()
     logged = module.log_dict.call_args.args[0]
     assert logged, "expected metrics to be logged"
-    assert all(key.startswith("eval/internal/knn/") for key in logged), logged
+    # The test metrics, plus each k's val metric and the temperature it picked there.
+    assert all(
+        key.startswith(("eval/internal/knn/", "eval/evaluation_val/knn/"))
+        for key in logged
+    ), logged
     assert all(isinstance(value, float) for value in logged.values())
     # Nothing to reduce: every rank already holds the same broadcast result.
     assert module.log_dict.call_args.kwargs["sync_dist"] is False
@@ -219,7 +223,8 @@ def test_on_train_epoch_end__test_sets_select_dataset_and_preprocessing(
     )
     module.log_dict.assert_called_once()
     logged = module.log_dict.call_args.args[0]
-    assert {key.split("/")[1] for key in logged} == set(test_sets)
+    # Every test set, plus the val metrics (evaluation_val/...), which never test.
+    assert {key.split("/")[1] for key in logged} == {*test_sets, "evaluation_val"}
     assert all(math.isfinite(v) for v in logged.values())
 
 

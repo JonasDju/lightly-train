@@ -104,10 +104,12 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint or an exported
   model and runs `evaluate(..., epoch=0)` once: each task logs its metrics once per test set (KneeNo's
   global-split protocol since 2026-10-14: heads train on the internal `train` split, early-stopped on val;
-  `eval.verbose` logs the per-head-epoch val metrics), keys `{test_set}/{task}/{metric}`, and each trained head
-  also its best epoch's `evaluation_val/{task}/val_auroc`. The pretraining config tests on `internal` only
-  (`eval.data.test_sets: [internal]`), so the callback logs `eval/internal/<task>/...`: compare pretraining epochs
-  by those (the run doesn't pretrain on those exams; see "Run config"). `cluster/configs/eval-MI-*.yaml` tests on
+  `eval.verbose` logs the per-head-epoch val metrics), keys `{test_set}/{task}/{metric}`, each trained head
+  also its best epoch's `evaluation_val/{task}/val_auroc` and chosen `evaluation_val/{task}/lr`, and k-NN each k's
+  `evaluation_val/knn/k{k}/val_auroc` and chosen `.../temperature` (KneeNo's lr / temperature sweep, 2026-10-23).
+  The pretraining config tests on `internal` only (`eval.data.test_sets: [internal]`), so the callback logs
+  `eval/internal/<task>/...`: compare pretraining epochs by those (the run doesn't pretrain on those exams; see
+  "Run config"). `cluster/configs/eval-MI-*.yaml` tests on
   `[internal, external]` (heads trained once, scored on both) and sets `eval.data.abort_on_io_error: true` (an
   exam that fails to load raises); `pretrain-MI-*.yaml` sets `false` (it is replaced by a random one; the
   in-training eval must not kill the run).
@@ -221,16 +223,22 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `data.test_sets`
     (`[internal, external]`, with the external paths in `data_root` / `label_meta`), `data.subset: 1.0` (all
     exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`),
-    `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model), the heads'
-    `max_epochs` / `warmup_epochs` (50 / 10 instead of 30 / 5: trained once, not every few epochs), and the head
-    settings of the tasks the pretraining run doesn't run (`attentive_pool`, `attentive_slice_pool`).
+    `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model),
+    `compile_attentive_heads` (`true` / `false` in training), the heads' `max_epochs` / `warmup_epochs` (50 / 10
+    instead of 30 / 5: trained once, not every few epochs), the swept `lr` of the linear tasks (`[0.0001, ...,
+    0.02]`, 8 values; one value in training) and `knn.temperature` (`[0.01, ..., 1.0]`, 8 values; `0.07` in
+    training), and the head settings of the tasks the pretraining run doesn't run (`attentive_pool`,
+    `attentive_slice_pool`: batch 64 as 4 micro-batches of 16, `max_epochs: 15`, `warmup_epochs: 3`,
+    `early_stop_patience: 5`).
     `tests/test_cluster_configs.py` pins that (after merging both over KneeNo's defaults; the internal
     `label_meta` must be the same), that it sets none of the exported-model keys, and that `weights` and
     `image_size` match the pretraining config
     (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
     `abort_on_io_error` difference and failed.
   - Both configs spell out every key of each attentive head (`q2l`, `encoder_layers`, `decoder_layers`, `num_heads`,
-    `mlp_ratio`, `qkv_bias`, `complete_block` and the training settings).
+    `mlp_ratio`, `qkv_bias`, `complete_block` and the training settings). Every attentive task has `lr: 0.0005`
+    (since 2026-10-23). Both set `encoder_amp_dtype: bfloat16` (`amp_dtype` before) and `head_amp_dtype: null`, and
+    `training.monitor_metric` (`early_stop_on` before).
 
 **Comparability with `3d_dinov2`:**
 - Both pretrain on the same exams: the global splits `train` + `unlabeled` of the same `data_meta`, selected by

@@ -225,7 +225,8 @@ def test_eval_classification(
     eval_classification.eval_classification(eval_config=config_path, accelerator="cpu")
     out_dir = _out_dir(tmp_path)
     metrics = json.loads((out_dir / "results.json").read_text())
-    # Every test set's metrics, plus the trained head's best val metric.
+    # Every test set's metrics, plus the trained head's best val metric and lr, and
+    # each k's val metric and temperature.
     assert {key.rsplit("/", 1)[0] for key in metrics} == {
         "internal/knn/k5",
         "internal/knn/k20",
@@ -234,6 +235,8 @@ def test_eval_classification(
         "internal/linear",
         "external/linear",
         "evaluation_val/linear",
+        "evaluation_val/knn/k5",
+        "evaluation_val/knn/k20",
     }
     assert all(isinstance(value, float) for value in metrics.values())
     assert yaml.safe_load((out_dir / "params.yaml").read_text()) == run_config
@@ -439,7 +442,8 @@ def test_eval_classification__test_sets_select_dataset_and_preprocessing(
     # The checkpoint's (resolved) normalize args have one value per input channel.
     assert adapter.call_args.kwargs["num_channels"] == len(NormalizeArgs().mean) == 3
     metrics = json.loads((_out_dir(tmp_path) / "results.json").read_text())
-    assert {key.split("/")[0] for key in metrics} == set(test_sets)
+    # Every test set, plus the val metrics (evaluation_val/...), which never test.
+    assert {key.split("/")[0] for key in metrics} == {*test_sets, "evaluation_val"}
     assert all(math.isfinite(v) for v in metrics.values())
 
 

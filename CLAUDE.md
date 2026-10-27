@@ -697,7 +697,8 @@ arguments — `epochs`, `batch_size`, `num_workers`, `precision`, `trainer_args`
 `run_config.TRAIN_KEYS`, unknown keys rejected, also passed as-is), `method:` (-> `method_args`),
 `transform:` (-> `transform_args`), `callbacks:` (-> `callbacks`, lightly-train's own callbacks by name, e.g.
 `model_checkpoint: {every_n_epochs: 50, save_top_k: -1}` for a checkpoint every 50 epochs besides `last.ckpt`;
-`save_top_k` must be `-1`, the default `1` keeps only the newest) and `eval:` (-> the eval callback's `config`; the
+`save_top_k` must be `-1`, the default `1` keeps only the newest; `last.ckpt` is written after every epoch whatever
+`every_n_epochs` is, see below) and `eval:` (-> the eval callback's `config`; the
 script merges it into `callbacks` as `kneeno_eval`, and `callbacks.kneeno_eval` is rejected), loaded and validated by
 `cluster/run_config.py::load_run_config` (the script imports it as `from run_config import ...`; running the script puts
 `cluster/` first on `sys.path`). **`model` and `data` with
@@ -726,7 +727,13 @@ init is `dinov2/vitb14-notpretrained` (reg4, `swiglufused` FFN); `*-2dinit` load
 every shipped config's model. Submit
 from the repo root; the submit script takes `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES` env vars
 (`OUT_DIR`/`MODEL` are gone — they live in the config).
-Rerunning with the same `data.out` auto-resumes from `checkpoints/last.ckpt`. The `#SBATCH` resource
+Rerunning with the same `data.out` auto-resumes from `checkpoints/last.ckpt`.
+**`last.ckpt` is written after every epoch, whatever `every_n_epochs` is** (since 2026-10-27,
+`_callbacks/checkpoint.py::ModelCheckpoint.on_train_epoch_end`, same as on `2d_dinov2`). Stock Lightning writes it
+only together with a periodic checkpoint and at a normal end of training: a 2D run with `every_n_epochs: 50`, killed
+by the 24 h time limit at epoch 14, left no `checkpoints/` folder to resume from. The override uses Lightning's
+private `_should_skip_saving_checkpoint` / `_save_last_checkpoint`; `tests/_callbacks/test_checkpoint.py` pins the
+behaviour (recheck it after a Lightning upgrade). A timeout still loses up to one epoch. The `#SBATCH` resource
 lines are **guesses** (no earlier cluster script for this repo existed) — verify them on the first
 submit. The eval callback only *warns* when its labeled data is missing, so grep the job log for
 "Disabling KneeNo evaluation".

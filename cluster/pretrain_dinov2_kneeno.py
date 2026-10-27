@@ -43,7 +43,7 @@ null to switch it off (a callback left out keeps its default). E.g. to keep a ch
         save_top_k: -1    # the default 1 keeps only the newest periodic checkpoint
 
 Resuming needs ``<out>/checkpoints/last.ckpt``, so leave ``model_checkpoint``'s ``dirpath`` and ``save_last`` at
-their defaults. The eval callback stays in its own ``eval`` block; ``callbacks.kneeno_eval`` is an error.
+their defaults. It is written after every epoch, whatever ``every_n_epochs`` is. The eval callback stays in its own ``eval`` block; ``callbacks.kneeno_eval`` is an error.
 
 Submit through ``submit_pretrain_dinov2_kneeno.sh``; that also prepares the node-local data first. Run by hand:
 

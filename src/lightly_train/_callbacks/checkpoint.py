@@ -86,6 +86,14 @@ class ModelCheckpoint(_ModelCheckpoint):
         self._normalize_args = normalize_args
         self._license_info = license_info
 
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        super().on_train_epoch_end(trainer, pl_module)
+        # Lightning writes last.ckpt only together with a periodic checkpoint, so with
+        # e.g. every_n_epochs=50 a job killed before epoch 50 leaves nothing to resume
+        # from. Write it after every epoch instead, unless it was just written.
+        if self.save_last and not self._should_skip_saving_checkpoint(trainer):
+            self._save_last_checkpoint(trainer, self._monitor_candidates(trainer))
+
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: LightningModule, checkpoint: dict[str, Any]
     ) -> None:

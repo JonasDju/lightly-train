@@ -191,6 +191,12 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `model_checkpoint: {every_n_epochs: 50, save_top_k: -1}` for a checkpoint every 50 epochs besides `last.ckpt`.
     `save_top_k` must be `-1`: the default `1` keeps only the newest. The script merges `eval:` into it as
     `kneeno_eval`; `callbacks.kneeno_eval` is rejected.
+  - **`last.ckpt` is written after every epoch, whatever `every_n_epochs` is** (since 2026-10-27,
+    `_callbacks/checkpoint.py::ModelCheckpoint.on_train_epoch_end`). Stock Lightning writes it only together
+    with a periodic checkpoint and at a normal end of training: a 2D run with `every_n_epochs: 50`, killed by
+    the 24 h time limit at epoch 14, left no `checkpoints/` folder to resume from. The override uses Lightning's
+    private `_should_skip_saving_checkpoint` / `_save_last_checkpoint`; `tests/_callbacks/test_checkpoint.py`
+    pins the behaviour (recheck it after a Lightning upgrade). A timeout still loses up to one epoch.
   - Loaded by `cluster/run_config.py::load_run_config`, which expands env vars and rejects unknown keys.
 - **The shipped config lists every train/method/transform key at its stock default.** Unlike `3d_dinov2`, that
   includes `num_channels: auto` (3 channels: the grayscale JPEGs are loaded as RGB). `tests/test_cluster_configs.py`

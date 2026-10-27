@@ -141,7 +141,9 @@ transform:
 # lightly-train's own callbacks (CallbackArgs in src/lightly_train/_callbacks/callback_args.py), each a mapping
 # over that callback's defaults or null to switch it off; a callback left out keeps its default. kneeno_eval is
 # not allowed here: the eval block below configures it. Keep model_checkpoint's dirpath and save_last at their
-# defaults, resuming needs <out>/checkpoints/last.ckpt. E.g. a checkpoint every 50 epochs, besides last.ckpt:
+# defaults, resuming needs <out>/checkpoints/last.ckpt. It is written after every epoch, whatever every_n_epochs
+# is (our ModelCheckpoint; stock Lightning only writes it with a periodic checkpoint). E.g. a checkpoint every 50
+# epochs, besides last.ckpt:
 callbacks:
   model_checkpoint:
     every_n_epochs: 50

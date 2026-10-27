@@ -430,7 +430,11 @@ def get_method(
 
 
 def get_epochs(
-    method: str, epochs: int | Literal["auto"], dataset_size: int, batch_size: int
+    method: str,
+    epochs: int | Literal["auto"],
+    dataset_size: int,
+    batch_size: int,
+    grad_accum_steps: int,
 ) -> int:
     method_args_cls = method_helpers.get_method_cls(method).method_args_cls()
 
@@ -452,9 +456,13 @@ def get_epochs(
     elif method_args_cls.default_steps is not None:
         logger.debug(f"Using default steps {method_args_cls.default_steps}.")
         # Calculate epochs from steps.
-        _epochs = math.ceil(method_args_cls.default_steps * batch_size / dataset_size)
+        _epochs = math.ceil(
+            method_args_cls.default_steps
+            * (batch_size * grad_accum_steps)
+            / dataset_size
+        )
         logger.debug(
-            f"Calculated epochs {epochs} from steps {method_args_cls.default_steps}."
+            f"Calculated epochs {_epochs} from steps {method_args_cls.default_steps}."
         )
         return _epochs
     else:

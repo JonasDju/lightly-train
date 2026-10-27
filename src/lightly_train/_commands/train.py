@@ -399,6 +399,7 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             epochs=config.epochs,
             dataset_size=dataset_size,
             batch_size=config.batch_size,
+            grad_accum_steps=config.gradient_accumulation_steps,
         )
         scaling_info = train_helpers.get_scaling_info(
             dataset_size=dataset_size,
@@ -451,7 +452,9 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
                 transform_instance.transform_args, "resize_interpolation", "area"
             ),
             resize_upscale_interpolation=getattr(
-                transform_instance.transform_args, "resize_upscale_interpolation", "linear"
+                transform_instance.transform_args,
+                "resize_upscale_interpolation",
+                "linear",
             ),
         )
         config.accelerator = common_helpers.get_accelerator(

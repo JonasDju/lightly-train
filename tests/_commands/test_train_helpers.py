@@ -489,15 +489,17 @@ def test_get_method() -> None:
 
 # Test for SimCLR and DINOv2 methods.
 @pytest.mark.parametrize(
-    "method,passed_epochs,dataset_size,passed_batch_size,expected_epochs",
+    "method,passed_epochs,dataset_size,passed_batch_size,grad_accum_steps,expected_epochs",
     [
-        ("simclr", 10, 32, 100_000, 10),
-        ("simclr", "auto", 256, 100_000, 100),
+        ("simclr", 10, 32, 100_000, 1, 10),
+        ("simclr", "auto", 256, 100_000, 1, 100),
+        ("simclr", "auto", 256, 100_000, 4, 100),
         (
             "dinov2",
             "auto",
             1_000_000,
             32,
+            1,
             4,  # 125_000 * 32 / 1_000_000 = 4
         ),
         (
@@ -505,9 +507,19 @@ def test_get_method() -> None:
             "auto",
             10_000,
             1024,
+            1,
             12800,  # 125_000 * 1024 / 10_000 = 12800
         ),
-        ("dinov2", 10, 1, 100_000, 10),
+        (
+            "dinov2",
+            "auto",
+            1_000_000,
+            32,
+            4,
+            16,  # 125_000 * (32 * 4) / 1_000_000 = 16
+        ),
+        ("dinov2", 10, 1, 100_000, 1, 10),
+        ("dinov2", 10, 1, 100_000, 4, 10),
     ],
 )
 def test_get_epochs(
@@ -515,6 +527,7 @@ def test_get_epochs(
     passed_epochs: int | Literal["auto"],
     dataset_size: int,
     passed_batch_size: int,
+    grad_accum_steps: int,
     expected_epochs: int,
 ) -> None:
     epochs = train_helpers.get_epochs(
@@ -522,6 +535,7 @@ def test_get_epochs(
         epochs=passed_epochs,
         batch_size=passed_batch_size,
         dataset_size=dataset_size,
+        grad_accum_steps=grad_accum_steps,
     )
     assert epochs == expected_epochs
 

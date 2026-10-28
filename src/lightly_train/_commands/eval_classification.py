@@ -62,8 +62,7 @@ from typing import Any
 import torch
 import yaml
 from kneeno import expand_env_vars
-from kneeno.evaluation import ClassificationEvaluator, load_eval_config
-from kneeno.evaluation.config import ALL_TASKS
+from kneeno.evaluation import ClassificationEvaluator, enabled_tasks, load_eval_config
 from omegaconf import DictConfig
 from pydantic import Field, ValidationError
 from torch import Tensor
@@ -137,7 +136,11 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     raw_config, run_config = _load_eval_run_config(Path(config.eval_config))
     _warn_on_default_resize_args(run_config=run_config, path=Path(config.eval_config))
     eval_cfg = load_eval_config(run_config.eval)
-    tasks = _enabled_tasks(eval_cfg["freq"])
+    tasks = enabled_tasks(eval_cfg["freq"])
+    if not tasks:
+        raise ValueError(
+            f"No task is enabled: every task in eval.freq is null or <= 0 ({eval_cfg['freq']})."
+        )
     encoder_choice = eval_cfg.get("encoder", "target")
     if encoder_choice not in ("target", "online"):
         raise ValueError(
@@ -303,22 +306,6 @@ def _find_env_vars(obj: Any) -> list[str]:
     if isinstance(obj, str):
         return [match.group(0) for match in _ENV_VAR_PATTERN.finditer(obj)]
     return []
-
-
-def _enabled_tasks(freq: dict[str, Any]) -> list[str]:
-    """The tasks whose frequency is set, with ``kneeno.tasks_due``'s semantics: a missing
-    key keeps KneeNo's default (``freq`` is the merged config), null or ``<= 0`` is off.
-    The value itself does not matter here, there is only one evaluation."""
-    tasks = []
-    for task in ALL_TASKS:
-        task_freq = freq.get(task)
-        if task_freq is not None and task_freq > 0:
-            tasks.append(task)
-    if not tasks:
-        raise ValueError(
-            f"No task is enabled: every task in eval.freq is null or <= 0 ({freq})."
-        )
-    return tasks
 
 
 def _get_output_paths(

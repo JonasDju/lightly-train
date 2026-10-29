@@ -45,24 +45,27 @@ class ConsoleFormatter(logging.Formatter):
     * CRITICAL  Red
     The reset code is appended to each message to ensure that the color does not leak.
 
-    The formatter does not print timestamps or log levels so as to not clutter the console.
+    By default, the formatter does not print timestamps or log levels so as to not clutter the console.
+    Pass a different ``log_entry_structure`` (e.g. ``TIMESTAMPED_LOG_ENTRY_STRUCTURE``) to add them.
     """
 
     reset = "\x1b[0m"
     log_entry_structure = "%(message)s"
 
-    FORMATS = {
-        logging.DEBUG: "\033[1;34m[debug] " + log_entry_structure + reset,
-        logging.INFO: "" + log_entry_structure + reset,
-        logging.WARNING: "\033[93m" + log_entry_structure + reset,
-        logging.ERROR: "\033[91m" + log_entry_structure + reset,
-        logging.CRITICAL: "\033[91m" + log_entry_structure + reset,
+    PREFIXES = {
+        logging.DEBUG: "\033[1;34m[debug] ",
+        logging.INFO: "",
+        logging.WARNING: "\033[93m",
+        logging.ERROR: "\033[91m",
+        logging.CRITICAL: "\033[91m",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, log_entry_structure: str | None = None) -> None:
+        if log_entry_structure is not None:
+            self.log_entry_structure = log_entry_structure
         self.formatters = {
-            level: logging.Formatter(level_format)
-            for level, level_format in ConsoleFormatter.FORMATS.items()
+            level: logging.Formatter(prefix + self.log_entry_structure + self.reset)
+            for level, prefix in ConsoleFormatter.PREFIXES.items()
         }
         self.default_formatter = logging.Formatter(fmt=self.log_entry_structure)
 
@@ -72,13 +75,23 @@ class ConsoleFormatter(logging.Formatter):
         return formatter.format(new_record)
 
 
+# Timestamp, level and logger name before each message, as in curia's eval script. For long unattended runs
+# (e.g. `eval_classification`) whose console output is the job log.
+TIMESTAMPED_LOG_ENTRY_STRUCTURE = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
 @rank_zero_only  # type: ignore[misc]
-def set_up_console_logging() -> None:
-    """Sets up console logging and ensures a single handler per console logger."""
+def set_up_console_logging(log_entry_structure: str | None = None) -> None:
+    """Sets up console logging and ensures a single handler per console logger.
+
+    Args:
+        log_entry_structure:
+            Format string of each console line. Defaults to the message only.
+    """
     level = Env.LIGHTLY_TRAIN_LOG_LEVEL.value
     ch = logging.StreamHandler()
     ch.setLevel(level)
-    ch.setFormatter(ConsoleFormatter())
+    ch.setFormatter(ConsoleFormatter(log_entry_structure))
     _set_console_handler(ch)
 
 

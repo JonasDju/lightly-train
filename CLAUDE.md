@@ -664,6 +664,9 @@ available here and is enabled in the config.
     (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse before
     the weights are loaded; `overwrite=True` runs
     anyway (per-label CSVs are appended to, TB gets a second event file).
+  - **Console log lines** carry a timestamp, level and logger name
+    (`_logging.TIMESTAMPED_LOG_ENTRY_STRUCTURE`, curia's format; since 2026-10-29). Every
+    other command keeps stock lightly-train's message-only console.
 
 **`evaluate()` is called on every rank, deliberately and with no rank guard.**
 `ClassificationEvaluator` does the work on rank 0 and then hits `dist.barrier()` +

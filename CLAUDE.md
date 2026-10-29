@@ -219,7 +219,10 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-2d.yaml`). The
     external data comes from a hard-coded `--external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar`; the eval config's
     `label_meta.external` is `/hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json`. Env vars: `PRETRAIN_JOB_ID` (required) and `TMP`,
-    both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+    both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`; `SPLIT_LEVEL` / `SPLIT_REP` (default `1.0` / `0`,
+    since 2026-10-29): the eval config's `split.level` / `rep` are `${SPLIT_LEVEL}` / `${SPLIT_REP}`, and its output
+    folders end in `level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/`, so one job per (level, rep) doesn't collide:
+    `sbatch --export=ALL,PRETRAIN_JOB_ID=<id>,SPLIT_LEVEL=0.05,SPLIT_REP=3 cluster/submit_eval_dinov2_kneeno.sh`.
   - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
     `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here).
   - The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which
@@ -227,8 +230,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     `eval_per_label/`, `results.json`, `params.yaml`).
   - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no
     lightly-train loggers here), `freq` (every task `1`, i.e. on; every key listed), `data.test_sets`
-    (`[internal, external]`, with the external paths in `data_root` / `label_meta`), `data.subset: 1.0` (all
-    exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`),
+    (`[internal, external]`, with the external paths in `data_root` / `label_meta`), `split.level` / `rep`
+    (`${SPLIT_LEVEL}` / `${SPLIT_REP}`, from the submit script; `0.25` / `0` in training), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error` (`true`),
     `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model),
     `compile_attentive_heads` (`true` / `false` in training), the heads' `max_epochs` / `warmup_epochs` (50 / 10
     instead of 30 / 5: trained once, not every few epochs), the swept `lr` of the linear tasks (`[0.0001, ...,

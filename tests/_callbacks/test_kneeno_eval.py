@@ -7,7 +7,9 @@
 #
 from __future__ import annotations
 
+import functools
 import math
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ import torch
 from kneeno import LabeledExternalKneeMRIDataset
 from kneeno.evaluation.config import ALL_TASKS
 from kneeno.evaluation.dataset import KneeNoEvalDataset, LabeledInternalKneeMRIDataset
+from kneeno.evaluation.splits import write_manifest_for
 from pydantic import ValidationError
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
@@ -93,9 +96,26 @@ def _fake_eval_dataset(test_sets: tuple[str, ...] = ("internal",)) -> KneeNoEval
     return KneeNoEvalDataset(_FakeLabeledDataset(prefix="t"), tests)
 
 
+#: Where ``_split()`` writes its manifest; removed when the test process exits.
+_MANIFEST_DIR = tempfile.TemporaryDirectory(prefix="lightly-kneeno-manifest-")
+
+
+@functools.cache
+def _manifest() -> Path:
+    # Every test set builds the same fake train part, so one manifest serves them all.
+    path = Path(_MANIFEST_DIR.name) / "split_manifest.json"
+    return write_manifest_for(_fake_eval_dataset(), path)
+
+
+def _split() -> dict[str, Any]:
+    """``eval.split``: the one split of the fake dataset's manifest."""
+    return {"manifest": str(_manifest()), "level": 1.0, "rep": 0}
+
+
 def _config(**overrides: Any) -> dict[str, Any]:
     attentive = {"max_epochs": 1, "batch_size": 4, "num_heads": 2}
     config: dict[str, Any] = {
+        "split": _split(),
         # series_depth: the fake dataset's depth, i.e. the slice count the slice tasks
         # see (the dataset itself is mocked, so it is not resampled).
         "data": {"test_sets": ["internal"], "num_workers": 0, "series_depth": 5},

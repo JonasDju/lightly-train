@@ -7,9 +7,10 @@
 #
 import logging
 import os
+import re
 from pathlib import Path
 
-from pytest import LogCaptureFixture
+from pytest import CaptureFixture, LogCaptureFixture
 from pytest_mock import MockerFixture
 from pytorch_lightning.utilities import rank_zero_info
 
@@ -34,6 +35,28 @@ def test_set_up_console_logging__custom_log_level(mocker: MockerFixture) -> None
     logger = logging.getLogger("lightly_train")
     assert len(logger.handlers) == 1
     assert logger.handlers[0].level == logging.WARNING
+
+
+def test_set_up_console_logging__timestamped(capsys: CaptureFixture[str]) -> None:
+    _logging.set_up_console_logging(_logging.TIMESTAMPED_LOG_ENTRY_STRUCTURE)
+    logging.getLogger("kneeno.evaluation.classification").info("info message")
+    logging.getLogger("lightly_train").warning("warning message")
+    err = capsys.readouterr().err
+    assert re.search(
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} INFO "
+        r"kneeno\.evaluation\.classification: info message",
+        err,
+        re.MULTILINE,
+    )
+    assert "WARNING lightly_train: warning message" in err
+
+
+def test_console_formatter__default() -> None:
+    record = logging.LogRecord("lightly_train", logging.INFO, "", 0, "msg", None, None)
+    assert (
+        _logging.ConsoleFormatter().format(record)
+        == "msg" + _logging.ConsoleFormatter.reset
+    )
 
 
 def test__set_console_handler() -> None:

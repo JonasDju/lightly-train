@@ -150,6 +150,8 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     - Existing results (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse, before
       the weights are loaded. With `overwrite=True` it runs anyway, but the per-label CSVs are appended to and
       TB gets a second event file.
+  - **Console log lines** carry a timestamp, level and logger name (`_logging.TIMESTAMPED_LOG_ENTRY_STRUCTURE`, curia's
+    format; since 2026-10-29). Every other command keeps stock lightly-train's message-only console.
   - **Differs from 3d** in what the adapter needs. `num_channels` is `len(checkpoint normalize_args.mean)` for a
     checkpoint (it stores the resolved normalize args, whose length the transform matched to the resolved
     `num_channels`, `auto` included) and the patch embedding's input channels for an exported model.

@@ -27,8 +27,8 @@ weights: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/che
 # Must equal the pretraining run's transform.image_size: every slice is resized to it, and neither a checkpoint nor
 # an exported model records it.
 image_size:
-- 224
-- 224
+- 518
+- 518
 
 # KneeNo classification evaluation -- see KneeNo/kneeno/evaluation/config.py for every key and its default.
 # Identical to pretrain-MI-vitb14-2d.yaml's eval block except:
@@ -37,7 +37,9 @@ image_size:
 #     node-local $TMP (where submit_eval_dinov2_kneeno.sh extracts both datasets; /dev/shm is for pretraining
 #     only) and label_meta with the external dataset's paths too, 31 workers, abort_on_io_error true.
 #   * split.level / rep are ${SPLIT_LEVEL} / ${SPLIT_REP} instead of 0.25 / 0: one run per level and rep to report,
-#     set by submit_eval_dinov2_kneeno.sh (default 1.0 / 0). Each run writes to its own level-<l>.rep-<r> folder.
+#     set by submit_eval_dinov2_kneeno.sh (default 1.0 / 0). Each run writes to its own
+#     type-<config>.level-<l>.rep-<r> folder (CONFIG_FILE_NAME: this file's name without the .yaml, also exported
+#     by the submit script).
 #   * logging.tensorboard_dir is set: there are no lightly-train loggers here to re-log the metrics, so KneeNo's
 #     own SummaryWriter writes the test metrics.
 #   * the heads train longer (max_epochs 50, warmup_epochs 10 instead of 30 / 5): they are trained once here, not
@@ -59,7 +61,7 @@ eval:
   cache_features: true  # linear / linear_pool / linear_slice_cls / attentive_slice_cls train on features extracted
                         # once instead of re-encoding every head epoch; k-NN always uses the shared pass.
                         # attentive_pool / attentive_slice_pool never cache.
-  extraction_batch_size: 32  # exams -> at most 128 volumes, i.e. 128 * series_depth slices, per encoder forward
+  extraction_batch_size: 12  # exams -> at most 128 volumes, i.e. 128 * series_depth slices, per encoder forward
   split:  # train and val: one split of the split manifest (KneeNo data/make_split_manifest.py); the test sets are used whole
     manifest: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_split_manifest.json
     level: ${SPLIT_LEVEL}  # fraction of the internal global "train" split used for train + val; set by the submit script
@@ -78,14 +80,14 @@ eval:
     test_sets: [internal, external]  # heads are trained once and scored on both
     series_depth: 24  # slices per volume the encoder sees one by one; also the slice count of the slice tasks
     resample_mode: nearest
-    num_workers: 31
-    prefetch_factor: 2  # batches each worker loads ahead; worker RAM in flight ~ num_workers * prefetch_factor batches
+    num_workers: 8
+    prefetch_factor: 1  # batches each worker loads ahead; worker RAM in flight ~ num_workers * prefetch_factor batches
     abort_on_io_error: true  # a broken exam is retried (5 s apart) and then raises; never replaced by another exam
     multiprocessing_context: fork  # eval DataLoader worker start method; null -> inherit. Workers must never touch CUDA
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
-    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/post-training/level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/tb
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/post-training/level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/eval_per_label
+    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/post-training/type-${CONFIG_FILE_NAME}.level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/tb
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/post-training/type-${CONFIG_FILE_NAME}.level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/eval_per_label
     tag_prefix: eval
   freq:
     knn: 1
@@ -107,7 +109,7 @@ eval:
     max_epochs: 50
     batch_size: 64
     grad_accum_steps: 1  # must stay 1 with batchnorm: true
-    lr: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
+    lr: [0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
     warmup_epochs: 10
     weight_decay: 0.0
   linear_pool:
@@ -116,7 +118,7 @@ eval:
     max_epochs: 50
     batch_size: 64
     grad_accum_steps: 1  # must stay 1 with batchnorm: true
-    lr: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
+    lr: [0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
     warmup_epochs: 10
     weight_decay: 0.0
   linear_slice_cls:
@@ -124,7 +126,7 @@ eval:
     max_epochs: 50
     batch_size: 64
     grad_accum_steps: 1  # must stay 1 with batchnorm: true
-    lr: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
+    lr: [0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
     warmup_epochs: 10
     weight_decay: 0.0
   attentive_slice_cls:
@@ -138,7 +140,7 @@ eval:
     max_epochs: 50
     batch_size: 64
     grad_accum_steps: 1  # memory only: the head trains on micro-batches of batch_size / grad_accum_steps exams
-    lr: 0.0005
+    lr: 0.00025
     warmup_epochs: 10
     weight_decay: 0.001
   attentive_pool:
@@ -153,9 +155,9 @@ eval:
     early_stop_patience: 5  # overrides training.early_stop_patience_global (re-encoding head, no feature cache)
     batch_size: 64
     grad_accum_steps: 4  # memory only: the head trains on micro-batches of batch_size / grad_accum_steps = 16 exams
-    lr: 0.0005
+    lr: 0.00025
     warmup_epochs: 3
-    weight_decay: 0.001
+    weight_decay: 0.1
   attentive_slice_pool:
     q2l: false
     encoder_layers: 0
@@ -167,6 +169,6 @@ eval:
     early_stop_patience: 5  # overrides training.early_stop_patience_global (re-encoding head, no feature cache)
     batch_size: 64
     grad_accum_steps: 4  # memory only: the head trains on micro-batches of batch_size / grad_accum_steps = 16 exams
-    lr: 0.0005
+    lr: 0.00025
     warmup_epochs: 3
-    weight_decay: 0.001
+    weight_decay: 0.1

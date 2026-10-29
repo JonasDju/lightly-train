@@ -18,7 +18,7 @@ model: dinov2/vitb14-notpretrained
 
 # Required block, all keys required.
 data:
-  out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.2d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
+  out: /hpcwork/va105917/lightly/pretrain_2d/${SLURM_JOB_ID}.2d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
   # Every internal exam, the eval's val exams included. Extracted by submit_pretrain_dinov2_kneeno.sh
   # (KneeNo/data/prepare_data.py).
   data_root: /dev/shm/kneeno_data/internal
@@ -200,7 +200,7 @@ eval:
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.2d.vitb.224px/eval/in-training/eval_per_label
+    per_label_dir: /hpcwork/va105917/lightly/pretrain_2d/${SLURM_JOB_ID}.2d.vitb.224px/eval/in-training/eval_per_label
     tag_prefix: eval
   freq:  # One 2D epoch takes > 1h, so running these tasks very frequently does not add much overhead
     knn: 1

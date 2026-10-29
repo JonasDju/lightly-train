@@ -44,7 +44,9 @@ resize_upscale_interpolation: linear
 #     node-local $TMP (where submit_eval_dinov2_kneeno.sh extracts both datasets; /dev/shm is for pretraining
 #     only) and label_meta with the external dataset's paths too, 31 workers.
 #   * split.level / rep are ${SPLIT_LEVEL} / ${SPLIT_REP} instead of 0.25 / 0: one run per level and rep to report,
-#     set by submit_eval_dinov2_kneeno.sh (default 1.0 / 0). Each run writes to its own level-<l>.rep-<r> folder.
+#     set by submit_eval_dinov2_kneeno.sh (default 1.0 / 0). Each run writes to its own
+#     type-<config>.level-<l>.rep-<r> folder (CONFIG_FILE_NAME: this file's name without the .yaml, also exported
+#     by the submit script).
 #   * logging.tensorboard_dir is set: there are no lightly-train loggers here to re-log the metrics, so KneeNo's
 #     own SummaryWriter writes the test metrics.
 #   * the heads train longer (max_epochs 50, warmup_epochs 10 instead of 30 / 5): they are trained once here, not
@@ -89,8 +91,8 @@ eval:
     multiprocessing_context: fork  # eval DataLoader worker start method; null -> inherit. Workers must never touch CUDA
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
-    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/post-training/level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/tb
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/post-training/level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/eval_per_label
+    tensorboard_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/post-training/type-${CONFIG_FILE_NAME}.level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/tb
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/post-training/type-${CONFIG_FILE_NAME}.level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/eval_per_label
     tag_prefix: eval
   freq:
     knn: 1
@@ -109,7 +111,7 @@ eval:
     max_epochs: 50
     batch_size: 64
     grad_accum_steps: 1  # must stay 1 with batchnorm: true
-    lr: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
+    lr: [0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
     warmup_epochs: 10
     weight_decay: 0.0
   linear_pool:
@@ -118,7 +120,7 @@ eval:
     max_epochs: 50
     batch_size: 64
     grad_accum_steps: 1  # must stay 1 with batchnorm: true
-    lr: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
+    lr: [0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02]  # swept: the best on val is tested
     warmup_epochs: 10
     weight_decay: 0.0
   attentive_pool:
@@ -133,6 +135,6 @@ eval:
     early_stop_patience: 5  # overrides training.early_stop_patience_global (re-encoding head, no feature cache)
     batch_size: 64
     grad_accum_steps: 4  # memory only: the head trains on micro-batches of batch_size / grad_accum_steps = 16 exams
-    lr: 0.0005
+    lr: 0.00025
     warmup_epochs: 3
-    weight_decay: 0.001
+    weight_decay: 0.1

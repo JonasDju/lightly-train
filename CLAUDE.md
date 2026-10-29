@@ -793,11 +793,23 @@ check).
   since 2026-10-29): the eval config's `split.level` / `rep` are `${SPLIT_LEVEL}` / `${SPLIT_REP}`, and its output
   folders end in `level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/`, so one job per (level, rep) doesn't collide:
   `sbatch --export=ALL,PRETRAIN_JOB_ID=<id>,SPLIT_LEVEL=0.05,SPLIT_REP=3 cluster/submit_eval_dinov2_kneeno.sh`.
+  **Config variants** (since 2026-10-29, as in curia): instead of `CONFIG`, `CONFIG_BASE_DIR` (a directory of eval
+  configs) + `CONFIG_FILE_NAME` (a config in it without the `.yaml`, e.g. `query2label`; the script appends it).
+  They must be set together, and not together with `CONFIG` (the script exits otherwise); relative paths are
+  relative to `REPO_DIR`, and every config must be a `.yaml` file. Either way the script exports `CONFIG_FILE_NAME`
+  as the config's file name without the `.yaml`, and the launcher raises unless `${CONFIG_FILE_NAME}.yaml` is its
+  `--config`'s name. The output folders are `type-${CONFIG_FILE_NAME}.level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/`.
+  **Job logs**: `slurm_logs/type-<CONFIG_FILE_NAME>.level-<SPLIT_LEVEL>.rep-<SPLIT_REP>.<job id>.log` in the
+  submit directory. `#SBATCH` can't use env vars, so `--output` is `slurm_logs/%j.log` and the script renames it
+  (`mv -n`) once the config and split are resolved; SLURM keeps writing to the open file (verified with curia's
+  script). Invalid `CONFIG*` vars or a missing `PRETRAIN_JOB_ID` exit before that, so their error stays in
+  `slurm_logs/<job id>.log`. `slurm_logs/` is tracked (its own `.gitignore`) because SLURM doesn't create it.
+  `tests/test_cluster_configs.py` runs the submit script with `srun` and the venv's python stubbed to pin all this.
 - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
   `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here; verified
   end to end on CPU with a tiny model, a JPEG fixture and 2 spawn workers).
 - The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which in the
-  eval job is the eval job's own ID. Its outputs go to `<run>/eval/internal/post-training/` (`tb/`,
+  eval job is the eval job's own ID. Its outputs go to `<run>/eval/post-training/type-<config>.level-<l>.rep-<r>/` (`tb/`,
   `eval_per_label/`, `results.json`, `params.yaml`).
 - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
   loggers here), `freq` (the four volume tasks `1`, i.e. on; the slice tasks left out, i.e. off),

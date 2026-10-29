@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -319,14 +321,15 @@ def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("TMP", "/tmp/job")
     monkeypatch.setenv("SPLIT_LEVEL", "0.05")
     monkeypatch.setenv("SPLIT_REP", "3")
+    monkeypatch.setenv("CONFIG_FILE_NAME", path.stem)
     raw, config = _load_eval_run_config(path)
     eval_config = load_eval_config(config.eval)
     assert "1234" in str(config.weights)
-    # The split comes from the submit script's environment, and each (level, rep) has
-    # its own output folder.
+    # The split comes from the submit script's environment, and each (config, level,
+    # rep) has its own output folder.
     assert (eval_config["split"]["level"], eval_config["split"]["rep"]) == (0.05, 3)
     for key in ("tensorboard_dir", "per_label_dir"):
-        assert "/level-0.05.rep-3/" in eval_config["logging"][key]
+        assert f"/type-{path.stem}.level-0.05.rep-3/" in eval_config["logging"][key]
     # The shipped configs evaluate a checkpoint, which records the model itself: the
     # exported-model keys would be rejected (they are in the file, commented out).
     assert config.model_fields_set.isdisjoint(_EXPORTED_MODEL_KEYS)
@@ -423,8 +426,7 @@ def test_eval_config__matches_pretrain_config(
     assert eval_data["test_sets"] == ["internal", "external"]
 
 
-def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """cluster/eval_dinov2_kneeno.py passes the config on as eval_config."""
+def _load_eval_script(monkeypatch: pytest.MonkeyPatch) -> Any:
     # Restores the env vars the script sets at import time.
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
@@ -434,7 +436,12 @@ def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert spec is not None and spec.loader is not None
     script = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script)
+    return script
 
+
+def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """cluster/eval_dinov2_kneeno.py passes the config on as eval_config."""
+    script = _load_eval_script(monkeypatch)
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         lightly_train, "eval_classification", lambda **kw: calls.append(kw)
@@ -443,3 +450,156 @@ def test_eval_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["eval_dinov2_kneeno.py", "--config", str(path)])
     script.main()
     assert calls == [{"eval_config": str(path)}]
+    # CONFIG_FILE_NAME names the output folders, so it must name the config that runs.
+    monkeypatch.setenv("CONFIG_FILE_NAME", "eval")
+    script.main()
+    assert len(calls) == 2
+    for wrong in ("query2label", "eval.yaml"):  # another config, or the name with .yaml
+        monkeypatch.setenv("CONFIG_FILE_NAME", wrong)
+        with pytest.raises(ValueError, match="does not name the eval config"):
+            script.main()
+    assert len(calls) == 2
+
+
+def _run_submit_eval_script(
+    tmp_path: Path, env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Runs the eval submit script with srun and the venv's python stubbed; returns
+    the launcher calls it made."""
+    repo = tmp_path / "repo"
+    calls = tmp_path / "calls.txt"
+    bin_dir, venv_bin = tmp_path / "bin", repo / ".venv" / "bin"
+    kneeno = tmp_path / "KneeNo" / "data"
+    for directory in (bin_dir, venv_bin, kneeno, repo / "configs"):
+        directory.mkdir(parents=True)
+    (kneeno / "prepare_data.py").touch()
+    (bin_dir / "srun").write_text('#!/bin/bash\nexec "$@"\n')
+    # Every call is recorded with the CONFIG_FILE_NAME it sees.
+    (venv_bin / "python").write_text(
+        f'#!/bin/bash\necho "$* CONFIG_FILE_NAME=$CONFIG_FILE_NAME" >> {calls}\n'
+    )
+    for script in (bin_dir / "srun", venv_bin / "python"):
+        script.chmod(0o755)
+    default = repo / DEFAULT_EVAL_CONFIG
+    default.parent.mkdir(parents=True, exist_ok=True)
+    default.touch()
+    for name in ("query2label.yaml", "query2label.yml"):
+        (repo / "configs" / name).touch()
+    # The log SLURM opened before the script ran (#SBATCH --output, relative to the
+    # submit directory).
+    (repo / "slurm_logs").mkdir()
+    (repo / "slurm_logs" / "123.log").touch()
+    run_env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SLURM_SUBMIT_DIR": str(repo),
+        "SLURM_JOB_ID": "123",
+        "KNEENO_DIR": str(tmp_path / "KneeNo"),
+        "TMP": str(tmp_path / "scratch"),
+        "PRETRAIN_JOB_ID": "4839286",
+        **env,
+    }
+    result = subprocess.run(
+        ["bash", str(CLUSTER_DIR / "submit_eval_dinov2_kneeno.sh")],
+        env=run_env,
+        capture_output=True,
+        text=True,
+    )
+    lines = calls.read_text().splitlines() if calls.exists() else []
+    return result, [line for line in lines if "eval_dinov2_kneeno.py" in line]
+
+
+DEFAULT_EVAL_CONFIG = "cluster/configs/eval-MI-vitb14-24f.yaml"
+
+
+@pytest.mark.parametrize(
+    "env, config, log",
+    [
+        ({}, DEFAULT_EVAL_CONFIG, None),
+        ({"CONFIG": "configs/query2label.yaml"}, "configs/query2label.yaml", None),
+        (
+            {"CONFIG_BASE_DIR": "configs", "CONFIG_FILE_NAME": "query2label"},
+            "configs/query2label.yaml",
+            None,
+        ),
+        (
+            {
+                "CONFIG_BASE_DIR": "{repo}/configs",
+                "CONFIG_FILE_NAME": "query2label",
+                "SPLIT_LEVEL": "0.05",
+                "SPLIT_REP": "3",
+            },
+            "configs/query2label.yaml",
+            "type-query2label.level-0.05.rep-3.123.log",
+        ),
+    ],
+    ids=["default", "config", "base_dir_relative", "base_dir_absolute"],
+)
+def test_submit_eval_script__config(
+    tmp_path: Path, env: dict[str, str], config: str, log: str | None
+) -> None:
+    env = {key: value.format(repo=tmp_path / "repo") for key, value in env.items()}
+    result, launches = _run_submit_eval_script(tmp_path, env)
+    assert result.returncode == 0, result.stderr
+    # The launcher gets the config's path and, either way, its file name without the
+    # .yaml for the output folders.
+    path = tmp_path / "repo" / config
+    assert launches == [
+        f"cluster/eval_dinov2_kneeno.py --config {path} CONFIG_FILE_NAME={path.stem}"
+    ]
+    # The job's log is renamed after the config and the split.
+    log = log or f"type-{path.stem}.level-1.0.rep-0.123.log"
+    assert [p.name for p in (tmp_path / "repo" / "slurm_logs").iterdir()] == [log]
+
+
+@pytest.mark.parametrize(
+    "env, match",
+    [
+        (
+            {"CONFIG": "configs/query2label.yaml", "CONFIG_FILE_NAME": "query2label"},
+            "not both",
+        ),
+        (
+            {"CONFIG": "configs/query2label.yaml", "CONFIG_BASE_DIR": "configs"},
+            "not both",
+        ),
+        ({"CONFIG_BASE_DIR": "configs"}, "must be set together"),
+        ({"CONFIG_FILE_NAME": "query2label"}, "must be set together"),
+        (
+            {"CONFIG_BASE_DIR": ".", "CONFIG_FILE_NAME": "configs/query2label"},
+            "without the .yaml",
+        ),
+        (
+            {"CONFIG_BASE_DIR": "configs", "CONFIG_FILE_NAME": "query2label.yaml"},
+            "without the .yaml",
+        ),
+        ({"CONFIG": "configs/query2label.yml"}, "must be a .yaml file"),
+        (
+            {"CONFIG_BASE_DIR": "configs", "CONFIG_FILE_NAME": "missing"},
+            "Eval config not found",
+        ),
+    ],
+    ids=[
+        "config_and_file_name",
+        "config_and_base_dir",
+        "base_dir_only",
+        "file_name_only",
+        "file_name_path",
+        "file_name_with_yaml",
+        "config_not_yaml",
+        "missing",
+    ],
+)
+def test_submit_eval_script__config_errors(
+    tmp_path: Path, env: dict[str, str], match: str
+) -> None:
+    result, launches = _run_submit_eval_script(tmp_path, env)
+    assert result.returncode != 0
+    assert match in result.stderr
+    assert launches == []
+    logs = [p.name for p in (tmp_path / "repo" / "slurm_logs").iterdir()]
+    # Invalid CONFIG* vars stop the script before the log is renamed; a missing config
+    # file is only found after it.
+    if match != "Eval config not found":
+        assert logs == ["123.log"]
+    else:
+        assert logs == ["type-missing.level-1.0.rep-0.123.log"]

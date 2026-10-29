@@ -3,6 +3,10 @@
 # the eval config locates the run's checkpoint and output folder through it. Pass it with --export: RWTH's sbatch
 # submits with --export=NONE, so a `PRETRAIN_JOB_ID=... sbatch ...` prefix never reaches the job:
 #     sbatch --export=ALL,PRETRAIN_JOB_ID=4839286 cluster/submit_eval_dinov2_kneeno.sh
+# SPLIT_LEVEL / SPLIT_REP (default 1.0 / 0) pick the split manifest's train/val split, one job per (level, rep):
+#     for level in 1.0 0.1 0.01; do for rep in 0 1 2; do
+#         sbatch --export=ALL,PRETRAIN_JOB_ID=4839286,SPLIT_LEVEL=$level,SPLIT_REP=$rep cluster/submit_eval_dinov2_kneeno.sh
+#     done; done
 # The evaluation runs in a single process on one GPU (KneeNo evaluates on rank 0 only, more GPUs would not help).
 # --cpus-per-task feeds the eval loader's eval.data.num_workers (31) workers.
 ##SBATCH --account=truhnlab
@@ -27,6 +31,10 @@ CONFIG="${CONFIG:-cluster/configs/eval-MI-vitb14-24f.yaml}"  # relative to REPO_
 # The job's node-local scratch: the data is extracted there and the eval config's data_root points there.
 : "${TMP:?TMP (the node-local scratch directory of the job) is not set}"
 export PRETRAIN_JOB_ID
+# The split of KneeNo's split manifest the heads train and validate on (the eval config's eval.split.level / rep).
+# Defaults: the whole internal "train" split, rep 0. Each (level, rep) writes to its own output folder.
+export SPLIT_LEVEL="${SPLIT_LEVEL:-1.0}"
+export SPLIT_REP="${SPLIT_REP:-0}"
 
 # Fail here rather than after the data extraction
 [[ "$CONFIG" == /* ]] || CONFIG="$REPO_DIR/$CONFIG"

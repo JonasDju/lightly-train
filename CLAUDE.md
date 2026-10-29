@@ -784,7 +784,10 @@ check).
   `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-24f.yaml`). The
   external data comes from a hard-coded `--external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar`; the eval config's
   `label_meta.external` is `/hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json`. Env vars: `PRETRAIN_JOB_ID` (required) and `TMP`,
-  both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`.
+  both checked up front; `CONFIG`, `REPO_DIR`, `KNEENO_DIR`; `SPLIT_LEVEL` / `SPLIT_REP` (default `1.0` / `0`,
+  since 2026-10-29): the eval config's `split.level` / `rep` are `${SPLIT_LEVEL}` / `${SPLIT_REP}`, and its output
+  folders end in `level-${SPLIT_LEVEL}.rep-${SPLIT_REP}/`, so one job per (level, rep) doesn't collide:
+  `sbatch --export=ALL,PRETRAIN_JOB_ID=<id>,SPLIT_LEVEL=0.05,SPLIT_REP=3 cluster/submit_eval_dinov2_kneeno.sh`.
 - The launcher only sets the same thread/allocator env vars as the pretraining launcher, then calls
   `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here; verified
   end to end on CPU with a tiny model, a JPEG fixture and 2 spawn workers).
@@ -794,7 +797,7 @@ check).
 - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
   loggers here), `freq` (the four volume tasks `1`, i.e. on; the slice tasks left out, i.e. off),
   `data.test_sets` (`[internal, external]`, with the external paths in `data_root` / `label_meta`),
-  `data.subset: 1.0` (all exams), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error`
+  `split.level` / `rep` (`${SPLIT_LEVEL}` / `${SPLIT_REP}`, from the submit script; `0.25` / `0` in training), `data.data_root` (`$TMP/...`), `data.num_workers: 31`, `data.abort_on_io_error`
   (`true`), `compile_encoder` (`true`; `false` in training, where the evaluator gets the training loop's model),
   `compile_attentive_heads` (`true` / `false` in training), the heads' `max_epochs` / `warmup_epochs` (50 / 10
   instead of 30 / 5: trained once, not every few epochs), the swept `lr` of the linear tasks (`[0.0001, ...,
@@ -812,9 +815,10 @@ check).
 ## Open risks / known follow-ups (not yet done, not blocking)
 
 - **Eval now uses the real labeled datasets** (`KneeNo/kneeno/evaluation/dataset.py::KneeNoEvalDataset`, built
-  from `eval.data`; exam-level: one sample = the four sequence volumes of one exam, and every `eval.*.batch_size` /
-  `eval.data.subset` counts exams; see `MA/CLAUDE.md`). The callback and command tests still inject fakes
-  (`_FakeLabeledDataset` parts wrapped in a `KneeNoEvalDataset`, patched in for `KneeNoEvalDataset.from_config`),
+  from `eval.data`; exam-level: one sample = the four sequence volumes of one exam, and every `eval.*.batch_size`
+  counts exams; see `MA/CLAUDE.md`). The callback and command tests still inject fakes
+  (`_FakeLabeledDataset` parts wrapped in a `KneeNoEvalDataset`, patched in for `KneeNoEvalDataset.from_config`,
+  with a split manifest written for them by `kneeno.evaluation.splits.write_manifest_for`),
   which is why they need neither data nor `SimpleITK`; a real run needs `SimpleITK` in this venv
   (`uv pip install -e ../KneeNo` pulls it in — it was missing here and has been installed with
   `uv pip install simpleitk`; like `kneeno`, a plain `uv sync` removes it again).

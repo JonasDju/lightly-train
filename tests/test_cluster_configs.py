@@ -317,9 +317,16 @@ def _pretrain_config_of(eval_path: Path) -> Path:
 def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRETRAIN_JOB_ID", "1234")
     monkeypatch.setenv("TMP", "/tmp/job")
+    monkeypatch.setenv("SPLIT_LEVEL", "0.05")
+    monkeypatch.setenv("SPLIT_REP", "3")
     raw, config = _load_eval_run_config(path)
     eval_config = load_eval_config(config.eval)
     assert "1234" in str(config.weights)
+    # The split comes from the submit script's environment, and each (level, rep) has
+    # its own output folder.
+    assert (eval_config["split"]["level"], eval_config["split"]["rep"]) == (0.05, 3)
+    for key in ("tensorboard_dir", "per_label_dir"):
+        assert "/level-0.05.rep-3/" in eval_config["logging"][key]
     # The shipped configs evaluate a checkpoint, which records the model itself: the
     # exported-model keys would be rejected (they are in the file, commented out).
     assert config.model_fields_set.isdisjoint(_EXPORTED_MODEL_KEYS)
@@ -331,11 +338,27 @@ def test_eval_config__valid(path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert set(raw["eval"]["freq"]) <= set(ALL_TASKS)
 
 
+def test_submit_eval_script__split_defaults() -> None:
+    # SPLIT_LEVEL / SPLIT_REP select the eval config's split; unset, the whole train
+    # split's rep 0.
+    script = (CLUSTER_DIR / "submit_eval_dinov2_kneeno.sh").read_text()
+    assert 'export SPLIT_LEVEL="${SPLIT_LEVEL:-1.0}"' in script
+    assert 'export SPLIT_REP="${SPLIT_REP:-0}"' in script
+    for path in EVAL_CONFIGS:
+        split = yaml.safe_load(path.read_text())["eval"]["split"]
+        assert (split["level"], split["rep"]) == ("${SPLIT_LEVEL}", "${SPLIT_REP}")
+
+
 @pytest.mark.parametrize("path", EVAL_CONFIGS, ids=lambda p: p.name)
-def test_eval_config__matches_pretrain_config(path: Path) -> None:
+def test_eval_config__matches_pretrain_config(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The eval config evaluates its pretraining run as the in-training eval did, apart
     from the deliberate differences below. Compared after merging over KneeNo's
     defaults, so a key spelled out at its default in only one file is no difference."""
+    # The submit script's defaults (load_eval_config expands them).
+    monkeypatch.setenv("SPLIT_LEVEL", "1.0")
+    monkeypatch.setenv("SPLIT_REP", "0")
     eval_config = yaml.safe_load(path.read_text())
     run = yaml.safe_load(_pretrain_config_of(path).read_text())
 
@@ -352,8 +375,8 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
     in_training = {task for task, freq in run_eval["freq"].items() if freq}
 
     def without_differences(block: dict[str, Any]) -> dict[str, Any]:
-        # Where it logs, which tasks run, and the data setup of a standalone job: all
-        # exams, the external test set too (its paths included), extracted to $TMP
+        # Where it logs, which tasks run, and the data setup of a standalone job: the
+        # manifest's split level (one run per level and rep), the external test set too (its paths included), extracted to $TMP
         # instead of /dev/shm, more workers, and a broken exam raises instead of being
         # replaced (the in-training eval must not kill the run). The standalone heads
         # also train longer (max_epochs, warmup_epochs): they are trained once, not
@@ -380,7 +403,6 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
             for k, v in block["data"].items()
             if k
             not in (
-                "subset",
                 "data_root",
                 "label_meta",
                 "test_sets",
@@ -388,6 +410,7 @@ def test_eval_config__matches_pretrain_config(path: Path) -> None:
                 "abort_on_io_error",
             )
         }
+        block["split"] = {k: v for k, v in block["split"].items() if k != "level"}
         return block
 
     assert without_differences(load_eval_config(eval_config["eval"])) == (

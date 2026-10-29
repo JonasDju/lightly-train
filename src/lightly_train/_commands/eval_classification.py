@@ -144,16 +144,9 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
         paths=[params_path, log_cfg["per_label_dir"], log_cfg["tensorboard_dir"]],
         overwrite=config.overwrite,
     )
-    # Loaded before params.yaml is written: a config the weights reject (e.g. the wrong
-    # model) must not leave a params.yaml behind that makes the corrected rerun refuse.
     wrapped_model, num_channels, normalize = _load_encoder(
         weights_path=weights_path, run_config=run_config, encoder_choice=encoder_choice
     )
-    if params_path is not None:
-        # Written before evaluating, so a run that crashes still records its settings.
-        params_path.parent.mkdir(parents=True, exist_ok=True)
-        params_path.write_text(yaml.safe_dump(raw_config, sort_keys=False))
-        logger.info(f"Wrote the evaluation config to '{params_path}'")
     logger.info(f"Evaluating the '{encoder_choice}' encoder on tasks {tasks}.")
 
     device = _get_device(accelerator=config.accelerator)
@@ -171,6 +164,14 @@ def eval_classification_from_config(config: EvalClassificationConfig) -> None:
     )
 
     evaluator = ClassificationEvaluator(config=eval_cfg, adapter=adapter, device=device)
+    # Written after everything that fails fast (the config, the weights, and the dataset
+    # and split the evaluator builds): a config they reject (e.g. the wrong model) must
+    # not leave a params.yaml behind that makes the corrected rerun refuse. But before
+    # evaluating, so a run that crashes still records its settings.
+    if params_path is not None:
+        params_path.parent.mkdir(parents=True, exist_ok=True)
+        params_path.write_text(yaml.safe_dump(raw_config, sort_keys=False))
+        logger.info(f"Wrote the evaluation config to '{params_path}'")
     try:
         metrics = evaluator.evaluate(wrapped_model, tasks=tasks, epoch=0)
     finally:

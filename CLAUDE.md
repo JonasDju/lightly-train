@@ -144,8 +144,9 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     student, loaded from the method's `state_dict`).
   - **Outputs:**
     - In the parent of `eval.logging.per_label_dir`: `results.json` (final metrics) and `params.yaml` (the config
-      file with env vars expanded, written after loading the weights but *before* evaluating, so a config the
-      weights reject leaves no `params.yaml` that would make the corrected rerun refuse).
+      file with env vars expanded, written after loading the weights and building the `ClassificationEvaluator`,
+      which builds the dataset and split, but *before* evaluating, so a config any of them rejects leaves no
+      `params.yaml` that would make the corrected rerun refuse; the evaluator step since 2026-10-29).
     - Without a `per_label_dir`: a warning, `results.json` next to the weights file, and no `params.yaml`.
     - Existing results (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse, before
       the weights are loaded. With `overwrite=True` it runs anyway, but the per-label CSVs are appended to and

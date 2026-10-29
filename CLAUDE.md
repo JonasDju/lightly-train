@@ -657,8 +657,10 @@ available here and is enabled in the config.
     task is an error. Slice tasks, if enabled, are dropped by KneeNo with a warning (this
     adapter has no slice tokens). The **encoder** is `eval.encoder` (`target` | `online`).
   - **Outputs:** `results.json` (final metrics) and `params.yaml` (the config file with env
-    vars expanded, written after loading the weights but *before* evaluating, so a config the
-    weights reject leaves no `params.yaml` that would make the corrected rerun refuse) in the
+    vars expanded, written after loading the weights and building the
+    `ClassificationEvaluator`, which builds the dataset and split, but *before* evaluating, so
+    a config any of them rejects leaves no `params.yaml` that would make the corrected rerun
+    refuse; the evaluator step since 2026-10-29) in the
     parent of `eval.logging.per_label_dir`; without a `per_label_dir`, a warning,
     `results.json` next to the weights file and no `params.yaml`. Existing results
     (`results.json`, `params.yaml`, `per_label_dir`, `tensorboard_dir`) make it refuse before

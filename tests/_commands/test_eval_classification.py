@@ -707,6 +707,19 @@ def test_eval_classification__exported_model_needs_keys(
     assert not _out_dir(tmp_path).exists()
 
 
+def test_eval_classification__split_error_leaves_no_params(
+    tmp_path: Path, run_config: dict[str, Any], fake_dataset: None
+) -> None:
+    # The evaluator builds the dataset and the split; a config they reject leaves
+    # nothing behind that would make the corrected rerun refuse.
+    run_config["eval"]["split"]["rep"] = 99
+    with pytest.raises(ValueError, match="no split with level"):
+        eval_classification.eval_classification(
+            eval_config=_write_config(tmp_path, run_config), accelerator="cpu"
+        )
+    assert not _out_dir(tmp_path).exists()
+
+
 @pytest.mark.parametrize(
     "key, value",
     [

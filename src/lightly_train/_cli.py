@@ -68,7 +68,12 @@ _HELP_MSG = """
     """
 
 _train_cfg = CLITrainConfig(
-    out="", data_root="", data_meta="", series_depth=0, resample_mode="", model=""
+    out="",
+    data_root={"internal": ""},
+    data_meta={"internal": ""},
+    series_depth=0,
+    resample_mode="",
+    model="",
 )
 _PRETRAIN_HELP_MSG = f"""
     Pretrain a model with self-supervised learning or distill from a teacher model.
@@ -90,15 +95,21 @@ _PRETRAIN_HELP_MSG = f"""
     Options:
         out (str, required):
             Output directory to save logs, checkpoints, and other artifacts.
-        data_root (str, required):
-            Root directory of the KneeNo dataset (<case_id>/<series_name>/<NNN>.jpeg).
-        data_meta (str, required):
-            Path to the KneeNo metadata JSON file.
+        data_root (dict, required):
+            Root directories of the KneeNo pretraining data, {{internal: <path>, msk: <path or null>}}:
+            the internal knee data (<case_id>/<series_name>/<NNN>.jpeg) and, optionally, the
+            musculoskeletal data (<case_id>/<series_name>.npz). E.g. data_root.internal=<path>.
+        data_meta (dict, required):
+            The metadata JSON of each, with the same keys. The MSK data is used iff msk is set
+            in both data_root and data_meta.
         series_depth (int, required):
             Resample every series to this many slices. <= 0 keeps each series' native
             depth (the random resized crop brings every view to a fixed size anyway).
         resample_mode (str, required):
             How to resample along depth: 'nearest' or 'interpolate'.
+        msk_subset (float):
+            Seeded subsample of the MSK series only: a fraction in (0, 1] or a count > 1.
+            Default: {_train_cfg.msk_subset}
         model (str, required):
             Model name for pretraining. For example 'torchvision/resnet50'.
             Run `lightly-train list_models` to see all supported models.

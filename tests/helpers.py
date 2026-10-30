@@ -1119,7 +1119,7 @@ def create_mi_dataset(
     height: int = 20,
     width: int = 24,
     identical: bool = False,
-) -> tuple[Path, Path]:
+) -> tuple[dict[str, Path | None], dict[str, Path | None]]:
     """Create a dataset in the KneeNo layout.
 
     Layout: root/data/<case_id>/<series_name>/<NNN>.jpeg and root/meta.json, every case in the
@@ -1129,7 +1129,8 @@ def create_mi_dataset(
         identical: If True, all series of the same depth contain identical slices.
 
     Returns:
-        (data_root, data_meta)
+        (data_root, data_meta), as ``pretrain``/``MIDataset`` take them: the internal data only,
+        ``{"internal": path, "msk": None}``.
     """
     data_root = root / "data"
     metadata: dict[str, dict[str, dict[str, Any]]] = {}
@@ -1149,7 +1150,43 @@ def create_mi_dataset(
             metadata[case_id][series_name] = {"dimensions": [height, width, depth]}
     data_meta = root / "meta.json"
     data_meta.write_text(json.dumps({"train": metadata}))
-    return data_root, data_meta
+    return {"internal": data_root, "msk": None}, {"internal": data_meta, "msk": None}
+
+
+def create_msk_dataset(
+    root: Path,
+    n_cases: int = 2,
+    depths: Sequence[int] = (5, 7),
+    height: int = 20,
+    width: int = 24,
+) -> tuple[Path, Path]:
+    """Create MSK data as KneeNo's ``data/msk/preprocess_msk.py`` writes it.
+
+    Layout: root/msk/<case_id>/<series_name>.npz (``volume``: a ``(D, H, W)`` uint8 array) and
+    root/msk_meta.json, every case in the global split "unlabeled".
+
+    Returns:
+        (msk data_root, msk data_meta), the ``msk`` entries of ``pretrain``'s mappings.
+    """
+    msk_root = root / "msk"
+    metadata: dict[str, dict[str, dict[str, Any]]] = {}
+    rng = np.random.default_rng(1)
+    for case_idx in range(n_cases):
+        case_id = f"msk_case_{case_idx}"
+        metadata[case_id] = {}
+        (msk_root / case_id).mkdir(parents=True, exist_ok=True)
+        for series_idx, depth in enumerate(depths):
+            series_name = f"sag_t{series_idx}"
+            volume = rng.integers(0, 256, size=(depth, height, width), dtype=np.uint8)
+            np.savez_compressed(msk_root / case_id / f"{series_name}.npz", volume=volume)
+            metadata[case_id][series_name] = {
+                "dimensions": [height, width, depth],
+                "data_resolution": [0.5, 0.5, 3.0],
+                "body_part": "shoulder",
+            }
+    msk_meta = root / "msk_meta.json"
+    msk_meta.write_text(json.dumps({"unlabeled": metadata}))
+    return msk_root, msk_meta
 
 
 def dummy_dinov3_vit_model(patch_size: int = 2, **kwargs: Any) -> DINOv3ViTModelWrapper:

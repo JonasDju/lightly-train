@@ -58,8 +58,8 @@ def _pretrain_kwargs(tmp_path: Path, **kwargs: Any) -> dict[str, Any]:
         helpers.create_mi_dataset(tmp_path)
     pretrain_kwargs: dict[str, Any] = dict(
         out=tmp_path / "out",
-        data_root=data_root,
-        data_meta=data_meta,
+        data_root={"internal": data_root, "msk": None},
+        data_meta={"internal": data_meta, "msk": None},
         series_depth=8,
         resample_mode="nearest",
         model="dinov2/_vittest14",
@@ -286,6 +286,23 @@ def test_pretrain__series_depth_not_positive(tmp_path: Path, series_depth: int) 
     assert (out / "checkpoints" / "last.ckpt").exists()
 
 
+def test_pretrain__with_msk(tmp_path: Path) -> None:
+    msk_root, msk_meta = helpers.create_msk_dataset(tmp_path, n_cases=2)
+    kwargs = _pretrain_kwargs(tmp_path)
+    kwargs["data_root"]["msk"] = msk_root
+    kwargs["data_meta"]["msk"] = msk_meta
+    out = tmp_path / "out"
+    train.pretrain(**kwargs)
+    assert (out / "checkpoints" / "last.ckpt").exists()
+
+
+def test_pretrain__single_data_path_is_rejected(tmp_path: Path) -> None:
+    kwargs = _pretrain_kwargs(tmp_path)
+    kwargs["data_meta"] = kwargs["data_meta"]["internal"]
+    with pytest.raises(ConfigValidationError, match="used to be a single path"):
+        train.pretrain(**kwargs)
+
+
 def test_pretrain__resample_mode_invalid(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="resample_mode"):
         train.pretrain(**_pretrain_kwargs(tmp_path, resample_mode="cubic"))
@@ -317,8 +334,8 @@ def test_train_from_dictconfig(tmp_path: Path) -> None:
     config = OmegaConf.create(
         dict(
             out=str(kwargs["out"]),
-            data_root=str(kwargs["data_root"]),
-            data_meta=str(kwargs["data_meta"]),
+            data_root={"internal": str(tmp_path / "data")},
+            data_meta={"internal": str(tmp_path / "meta.json")},
             series_depth=8,
             resample_mode="nearest",
             model="dinov2/_vittest14",
@@ -358,8 +375,8 @@ def test_pretrain__TrainConfig__model_dump(tmp_path: Path) -> None:
     )
     config = TrainConfig(
         out=tmp_path / "out",
-        data_root=tmp_path / "data",
-        data_meta=tmp_path / "meta.json",
+        data_root={"internal": tmp_path / "data"},
+        data_meta={"internal": tmp_path / "meta.json"},
         series_depth=8,
         resample_mode="nearest",
         model="dinov2/_vittest14",
@@ -390,8 +407,8 @@ def test_pretrain__log_resolved_config(
 ) -> None:
     config = TrainConfig(
         out=tmp_path / "out",
-        data_root=tmp_path / "data",
-        data_meta=tmp_path / "meta.json",
+        data_root={"internal": tmp_path / "data"},
+        data_meta={"internal": tmp_path / "meta.json"},
         series_depth=8,
         resample_mode="nearest",
         accelerator=CPUAccelerator(),

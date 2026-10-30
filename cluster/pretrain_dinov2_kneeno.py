@@ -3,7 +3,7 @@
 Everything about the experiment comes from a run config (``--config``), like vjepa2's ``configs/``: a YAML with
 
     model:      -> lightly_train.pretrain(model=...), e.g. dinov2/vitb14-notpretrained (any 3D dinov2/<name>)
-    data:       -> lightly_train.pretrain(out=, data_root=, data_meta=, series_depth=, resample_mode=)
+    data:       -> lightly_train.pretrain(out=, data_root=, data_meta=, series_depth=, resample_mode=, msk_subset=)
     train:      -> lightly_train.pretrain(epochs=, batch_size=, num_workers=, trainer_args=) (optional)
     method:     -> lightly_train.pretrain(method_args=...)      (DINOv2Args)
     transform:  -> lightly_train.pretrain(transform_args=...)   (DINOv2ViTTransformArgs)

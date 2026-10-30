@@ -16,7 +16,7 @@ from kneeno import expand_env_vars
 RUN_CONFIG_KEYS = ("model", "data", "train", "method", "transform", "callbacks", "eval")
 BLOCKS = ("data", "train", "method", "transform", "callbacks", "eval")  # the keys whose value is a mapping
 # Named exactly like lightly_train.pretrain's arguments, which they are passed to as-is.
-DATA_KEYS = ("out", "data_root", "data_meta", "series_depth", "resample_mode")
+DATA_KEYS = ("out", "data_root", "data_meta", "series_depth", "resample_mode", "msk_subset")
 # The optional train block: the other lightly_train.pretrain arguments a run may set, also passed as-is. Everything
 # the script derives itself (strategy, num_nodes, resume_interrupted, params_file) is deliberately absent, and so is
 # callbacks, which has its own top-level block.

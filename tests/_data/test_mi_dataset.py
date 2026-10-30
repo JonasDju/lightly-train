@@ -69,6 +69,44 @@ class TestMIDataset:
         dataset = MIDataset(data_root, data_meta, transform=RecordingTransform())
         assert len(dataset) == 6
 
+    def test_msk_series_follow_the_knee_series(self, tmp_path: Path) -> None:
+        data_root, data_meta = helpers.create_mi_dataset(
+            tmp_path, n_cases=3, depths=(6, 9)
+        )
+        msk_root, msk_meta = helpers.create_msk_dataset(tmp_path, n_cases=2)
+        transform = RecordingTransform()
+        dataset = MIDataset(
+            {**data_root, "msk": msk_root},
+            {**data_meta, "msk": msk_meta},
+            transform=transform,
+        )
+        assert len(dataset) == 6 + 4
+        dataset[6]  # the first MSK series: msk_case_0/sag_t0, depth 5
+        volume = np.load(msk_root / "msk_case_0" / "sag_t0.npz")["volume"]
+        np.testing.assert_array_equal(
+            transform.inputs[0], volume[None].transpose(0, 2, 3, 1)
+        )
+
+    def test_msk_subset(self, tmp_path: Path) -> None:
+        data_root, data_meta = helpers.create_mi_dataset(
+            tmp_path, n_cases=3, depths=(6, 9)
+        )
+        msk_root, msk_meta = helpers.create_msk_dataset(tmp_path, n_cases=2)
+        dataset = MIDataset(
+            {**data_root, "msk": msk_root},
+            {**data_meta, "msk": msk_meta},
+            transform=RecordingTransform(),
+            msk_subset=0.5,
+        )
+        assert len(dataset) == 6 + 2
+
+    def test_single_path_is_rejected(self, tmp_path: Path) -> None:
+        data_root, data_meta = helpers.create_mi_dataset(tmp_path, n_cases=1)
+        with pytest.raises(ValueError, match="used to be a single path"):
+            MIDataset(
+                data_root["internal"], data_meta, transform=RecordingTransform()
+            )
+
     @pytest.mark.parametrize(
         "min_series_len, max_series_len, expected_len",
         [(2, None, 4), (7, None, 2), (2, 7, 2)],

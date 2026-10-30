@@ -54,10 +54,11 @@ load_run_config = run_config.load_run_config
 MODEL = "dinov2/_vittest14"
 DATA = {
     "out": "/out",
-    "data_root": "/data",
-    "data_meta": "/meta.json",
+    "data_root": {"internal": "/data", "msk": None},
+    "data_meta": {"internal": "/meta.json", "msk": None},
     "series_depth": 24,
     "resample_mode": "nearest",
+    "msk_subset": 1.0,
 }
 
 
@@ -146,12 +147,12 @@ def test_load_run_config__expands_env_vars(
     monkeypatch.setenv("RUN", "vitb14")
     config = {
         "model": MODEL,
-        "data": {**DATA, "out": "/runs/${RUN}", "data_root": "$TMP/unlabeled"},
+        "data": {**DATA, "out": "/runs/${RUN}", "data_root": {"internal": "$TMP/unlabeled", "msk": "$TMP/msk"}},
         "eval": {"data": {"data_root": {"internal": "$TMP/labeled"}}},
     }
     loaded = load_run_config(_write(tmp_path, config))
     assert loaded["data"]["out"] == "/runs/vitb14"
-    assert loaded["data"]["data_root"] == "/scratch/unlabeled"
+    assert loaded["data"]["data_root"] == {"internal": "/scratch/unlabeled", "msk": "/scratch/msk"}
     assert loaded["eval"]["data"]["data_root"] == {"internal": "/scratch/labeled"}
 
 
@@ -509,6 +510,69 @@ def _run_submit_eval_script(
 
 
 DEFAULT_EVAL_CONFIG = "cluster/configs/eval-MI-vitb14-24f.yaml"
+
+
+def _run_submit_pretrain_script(
+    tmp_path: Path, env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Runs the pretraining submit script with srun, the venv's python and rm stubbed
+    (it deletes /dev/shm/kneeno_data at the end); returns the calls it made."""
+    repo = tmp_path / "repo"
+    calls = tmp_path / "calls.txt"
+    bin_dir, venv_bin = tmp_path / "bin", repo / ".venv" / "bin"
+    kneeno = tmp_path / "KneeNo" / "data"
+    for directory in (bin_dir, venv_bin, kneeno, repo / "cluster" / "configs"):
+        directory.mkdir(parents=True)
+    (kneeno / "prepare_data.py").touch()
+    (repo / "cluster" / "configs" / "pretrain-MI-vitb14-24f.yaml").touch()
+    # srun's own options (--nodes=1, ...) are dropped.
+    (bin_dir / "srun").write_text(
+        '#!/bin/bash\nwhile [[ "$1" == --* ]]; do shift; done\nexec "$@"\n'
+    )
+    (venv_bin / "python").write_text(f'#!/bin/bash\necho "python $*" >> {calls}\n')
+    (bin_dir / "rm").write_text(f'#!/bin/bash\necho "rm $*" >> {calls}\n')
+    for script in (bin_dir / "srun", venv_bin / "python", bin_dir / "rm"):
+        script.chmod(0o755)
+    run_env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SLURM_SUBMIT_DIR": str(repo),
+        "KNEENO_DIR": str(tmp_path / "KneeNo"),
+        **env,
+    }
+    result = subprocess.run(
+        ["bash", str(CLUSTER_DIR / "submit_pretrain_dinov2_kneeno.sh")],
+        env=run_env,
+        capture_output=True,
+        text=True,
+    )
+    return result, calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_submit_pretrain_script__msk_tar_dir(tmp_path: Path) -> None:
+    result, calls = _run_submit_pretrain_script(tmp_path, {})
+    assert result.returncode == 0, result.stderr
+    prepare = [call for call in calls if "prepare_data.py" in call]
+    assert len(prepare) == 1 and "--msk-tar-dir" not in prepare[0]
+    assert any("pretrain_dinov2_kneeno.py" in call for call in calls)
+    assert "rm -rf /dev/shm/kneeno_data" in calls
+
+    msk = tmp_path / "msk_tars"
+    msk.mkdir()
+    result, calls = _run_submit_pretrain_script(
+        tmp_path / "with_msk", {"MSK_TAR_DIR": str(msk)}
+    )
+    assert result.returncode == 0, result.stderr
+    prepare = [call for call in calls if "prepare_data.py" in call]
+    assert len(prepare) == 1 and f"--msk-tar-dir {msk} " in prepare[0]
+
+
+def test_submit_pretrain_script__missing_msk_tar_dir(tmp_path: Path) -> None:
+    result, calls = _run_submit_pretrain_script(
+        tmp_path, {"MSK_TAR_DIR": str(tmp_path / "missing")}
+    )
+    assert result.returncode != 0
+    assert "MSK_TAR_DIR is not a directory" in result.stderr
+    assert calls == []
 
 
 @pytest.mark.parametrize(

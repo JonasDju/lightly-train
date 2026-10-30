@@ -15,7 +15,8 @@ from typing import Any, Literal, Sequence
 
 import pytorch_lightning
 from omegaconf import DictConfig
-from pydantic import ConfigDict, Field
+from kneeno import pretraining_paths
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator
 from pytorch_lightning.accelerators.accelerator import Accelerator
 from pytorch_lightning.loggers import Logger
 from pytorch_lightning.strategies.strategy import Strategy
@@ -54,10 +55,11 @@ logger = logging.getLogger(__name__)
 def pretrain(
     *,
     out: PathLike,
-    data_root: PathLike,
-    data_meta: PathLike,
+    data_root: dict[str, PathLike | None],
+    data_meta: dict[str, PathLike | None],
     series_depth: int,
     resample_mode: str,
+    msk_subset: float = 1.0,
     model: str | Module | ModelWrapper | Any,
     method: str = "distillation",
     method_args: dict[str, Any] | None = None,
@@ -266,10 +268,11 @@ def pretrain(
 def train(
     *,
     out: PathLike,
-    data_root: PathLike,
-    data_meta: PathLike,
+    data_root: dict[str, PathLike | None],
+    data_meta: dict[str, PathLike | None],
     series_depth: int,
     resample_mode: str,
+    msk_subset: float = 1.0,
     model: str | Module | ModelWrapper | Any,
     method: str = "distillation",
     method_args: dict[str, Any] | None = None,
@@ -342,7 +345,7 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
         )
 
     logger.info(
-        # data_root and data_meta are single paths, so no sequence needs to be limited.
+        # data_root and data_meta are small mappings, so no sequence needs to be limited.
         f"Args: {common_helpers.pretty_format_args(args=config.model_dump(), limit_keys=set())}"
     )
     logger.info(f"Using output directory '{out_dir}'.")
@@ -382,6 +385,7 @@ def train_from_config(config: TrainConfig, called_via_train: bool = False) -> No
             transform=transform_instance,
             series_depth=config.series_depth,
             resample_mode=config.resample_mode,
+            msk_subset=config.msk_subset,
         )
 
         # dataset = common_helpers.get_dataset(
@@ -597,10 +601,12 @@ def train_from_dictconfig(config: DictConfig) -> None:
 
 class TrainConfig(PydanticConfig):
     out: PathLike
-    data_root: PathLike
-    data_meta: PathLike
+    # kneeno.UnlabeledDataset: {internal: <path>, msk: <path or None>}; the MSK data is used iff msk is set in both.
+    data_root: dict[str, PathLike | None]
+    data_meta: dict[str, PathLike | None]
     series_depth: int
     resample_mode: str
+    msk_subset: float = 1.0  # subsample of the MSK part only (KneeNoDataset's subset: a fraction or a count)
     model: str | Module | ModelWrapper | Any
     method: str = "distillation"
     method_args: dict[str, Any] | MethodArgs | None = None
@@ -636,6 +642,15 @@ class TrainConfig(PydanticConfig):
     # Allow arbitrary field types such as Module, Dataset, Accelerator, ...
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    @field_validator("data_root", "data_meta", mode="before")
+    @classmethod
+    def _per_source(cls, value: Any, info: ValidationInfo) -> Any:
+        # KneeNo's check, so that a single path (the format before the MSK data) fails with its migration hint.
+        # The paths are kept as strings: the config is dumped to JSON (logs, hyperparameters), and only top-level
+        # Paths are converted there (common_helpers.sanitize_config_dict).
+        paths = pretraining_paths(value, info.field_name)
+        return {source: None if path is None else str(path) for source, path in paths.items()}
+
 
 class FunctionTrainConfig(TrainConfig):
     # Configuration with simpler types for calling the train function.
@@ -651,8 +666,8 @@ class FunctionTrainConfig(TrainConfig):
 class CLITrainConfig(FunctionTrainConfig):
     # CLI configuration with simpler types for better error messages.
     out: str
-    data_root: str
-    data_meta: str
+    data_root: dict[str, str | None]
+    data_meta: dict[str, str | None]
     model: str
     checkpoint: str | None = None
     accelerator: str = "auto"

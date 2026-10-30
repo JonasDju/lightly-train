@@ -14,10 +14,13 @@ model: dinov2/vitb14-notpretrained
 # Required block, every key required. series_depth/resample_mode must match eval.data's (checked at startup).
 data:
   out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
-  data_root: /dev/shm/kneeno_data/internal  # extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py)
-  data_meta: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_unlabeled.json
+  # kneeno.UnlabeledDataset: the internal knee data, plus the musculoskeletal (MSK) data iff msk is set in both.
+  # Extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py); msk only with MSK_TAR_DIR set there.
+  data_root: {internal: /dev/shm/kneeno_data/internal, msk: null}
+  data_meta: {internal: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_unlabeled.json, msk: null}
   series_depth: 24  # > 0 resamples every volume to this many slices; <= 0 keeps native depth
   resample_mode: nearest
+  msk_subset: 1.0  # seeded subsample of the MSK series only (a fraction in (0, 1] or a count > 1)
 
 train:
   epochs: auto    # auto -> DINOv2's default of 125k steps, converted to epochs

@@ -73,8 +73,8 @@ this swap backwards is the single easiest way to reintroduce a silent H/W-swap b
 Gotchas).
 
 - `src/lightly_train/_data/mi_dataset.py` — `MIDataset`, thin wrapper over
-  `kneeno.UnlabeledKneeMRIDataset` producing `(1, D, H, W)` volumes, permuted to
-  `(1, H, W, D)` for MONAI transforms. Also owns `reseed_randomizables()` and
+  `kneeno.UnlabeledDataset` (since 2026-10-30: the internal knee data plus, optionally, the musculoskeletal (MSK)
+  data) producing `(1, D, H, W)` volumes, permuted to `(1, H, W, D)` for MONAI transforms. Also owns `reseed_randomizables()` and
   `worker_init_fn` (see Gotchas — RNG reseeding).
 - `src/lightly_train/_transforms/random_resized_crop.py` — `RandomResizedCrop3D`, a
   from-scratch anisotropy-aware 3D `RandomResizedCrop` (own separable resampling
@@ -341,8 +341,14 @@ Gotchas).
   grid `(d, h, w)` from `global_views.shape` and `self._patch_size` via `math.ceil`
   (matching `PatchEmbed`'s round-up-to-multiple behavior, not floor division).
 - `src/lightly_train/_commands/train.py` / `train_helpers.py` — `pretrain()`/`train()`/
-  `TrainConfig` take `data_root`, `data_meta`, `series_depth`, `resample_mode` instead
-  of `data`. `series_depth <= 0` (native per-series depth) works with plain
+  `TrainConfig` take `data_root`, `data_meta`, `series_depth`, `resample_mode`, `msk_subset` instead
+  of `data`. **`data_root` and `data_meta` are mappings `{internal: <path>, msk: <path or None>}`** (since
+  2026-10-30; KneeNo's `pretraining_paths` validates them in a `TrainConfig` field validator, so a single path
+  fails with a migration hint, and stores the paths as strings, since the config is JSON-dumped and
+  `sanitize_config_dict` only converts top-level `Path`s; on the CLI `data_root.internal=<path>`). The MSK data (`<case_id>/<series>.npz`,
+  KneeNo's `data/msk/preprocess_msk.py`) is used iff `msk` is set in both. `msk_subset` (default `1.0`) subsamples
+  the MSK part only; `epochs: auto` fixes the steps, so the full MSK data (about 2/3 of the samples) means each knee
+  series is seen about a third as often, and an epoch (so the in-training eval interval) about 3x longer. `series_depth <= 0` (native per-series depth) works with plain
   `DataLoader` collation — see Gotchas.
   `get_dataloader()` always sets `worker_init_fn=mi_dataset.worker_init_fn`.
 - `src/lightly_train/_models/dinov2_vit/dinov2_vit_src/configs/train/*.yaml` — every
@@ -534,7 +540,7 @@ there pass again, remove it from the list/set — don't leave a passing test ski
 
 **Known-good end-to-end check** (real `lightly-train pretrain` CLI, not just unit
 tests): build a small KneeNo-layout dataset with `tests/helpers.py::create_mi_dataset`,
-then run `lightly-train pretrain out=... data_root=... data_meta=... series_depth=8
+then run `lightly-train pretrain out=... data_root.internal=... data_meta.internal=... series_depth=8
 resample_mode=nearest model=dinov2/_vittest14 method=dinov2 epochs=1 batch_size=4
 accelerator=cpu num_workers=2 transform_args.image_size=[56,56,16] ...` — confirmed
 working (finishes, exports a model) as of this writing. `num_workers=2` matters: it's
@@ -545,9 +551,10 @@ what catches both dataset picklability issues and the RNG-reseeding gotcha above
 **`tests/helpers.py` additions for this fork:** `dummy_dinov2_vit_model(patch_size=(2,2,2), ...)`
 (3D `_vit_test`), `create_mi_dataset(root, n_cases, depths, height, width, identical=...)`
 (writes a KneeNo-layout dataset — JPEG slices + metadata JSON with
-`"dimensions": [H, W, depth]`, every case in the global split `"train"`, KneeNo's current schema — the `identical=True`
+`"dimensions": [H, W, depth]`, every case in the global split `"train"`, KneeNo's current schema; returns the
+`{"internal": ..., "msk": None}` mappings `pretrain` takes — the `identical=True`
 option makes all series bit-identical, used to prove RNG reseeding actually changes
-output across workers), `get_method_dinov2()` (now 1-channel), and
+output across workers), `create_msk_dataset(root, ...)` (MSK npz volumes + metadata, the `msk` entries), `get_method_dinov2()` (now 1-channel), and
 `MI_DINOV2_TRANSFORM_ARGS` (small transform sizes for fast end-to-end tests), and
 `dinov2_2d_checkpoint(model)` (a state_dict shaped like an original 2D DINOv2
 checkpoint — `Conv2d` kernel, 37×37 `pos_embed`, no `pos_embed_grid` — verified
@@ -689,7 +696,10 @@ left out of `freq` keeps the default, which is null (off) for every task since K
 ## Running on the cluster
 
 `cluster/submit_pretrain_dinov2_kneeno.sh` (sbatch, 1 GPU) extracts the internal dataset to
-`/dev/shm/kneeno_data/internal` with `KneeNo/data/prepare_data.py --internal-tar-dir` (pretraining, on the global
+`/dev/shm/kneeno_data/internal` with `KneeNo/data/prepare_data.py --internal-tar-dir`, and the MSK tars to
+`/dev/shm/kneeno_data/msk` with `--msk-tar-dir "$MSK_TAR_DIR"` iff the `MSK_TAR_DIR` env var is set (pass it with
+`--export=ALL,MSK_TAR_DIR=...`; set it iff the run config's `data.data_root.msk` is set: KneeNo raises at startup
+if that folder is missing) (pretraining, on the global
 splits `train` + `unlabeled`, and the in-training eval, `test_sets: [internal]`, both read it; the external NIfTI
 dataset is not extracted), then runs
 `cluster/pretrain_dinov2_kneeno.py --config <run config>`, which calls `lightly_train.pretrain(method="dinov2", ...)`.
@@ -697,7 +707,8 @@ dataset is not extracted), then runs
 process-group timeout — deliberately kept as a flag: an infrastructure knob, no effect on training).
 **Run config** (vjepa2-style, default `cluster/configs/pretrain-MI-vitb14-24f.yaml`): top-level `model:`
 (a string, e.g. `dinov2/vitb14-notpretrained`, -> `model`), `data:` (`out`, `data_root`, `data_meta`, `series_depth`,
-`resample_mode` — named like `pretrain`'s arguments and passed as `**data`), optional `train:` (further `pretrain`
+`resample_mode`, `msk_subset` — named like `pretrain`'s arguments and passed as `**data`; `data_root` / `data_meta`
+are `{internal, msk}` mappings, `msk: null` in the shipped config), optional `train:` (further `pretrain`
 arguments — `epochs`, `batch_size`, `num_workers`, `precision`, `trainer_args`, ...; allowlisted in
 `run_config.TRAIN_KEYS`, unknown keys rejected, also passed as-is), `method:` (-> `method_args`),
 `transform:` (-> `transform_args`), `callbacks:` (-> `callbacks`, lightly-train's own callbacks by name, e.g.
@@ -707,7 +718,7 @@ arguments — `epochs`, `batch_size`, `num_workers`, `precision`, `trainer_args`
 script merges it into `callbacks` as `kneeno_eval`, and `callbacks.kneeno_eval` is rejected), loaded and validated by
 `cluster/run_config.py::load_run_config` (the script imports it as `from run_config import ...`; running the script puts
 `cluster/` first on `sys.path`). **`model` and `data` with
-all five keys are required.** `load_run_config` runs KneeNo's `expand_env_vars` over the whole config
+all six keys are required.** `load_run_config` runs KneeNo's `expand_env_vars` over the whole config
 (`$VAR`, `${VAR}`, leading `~`, like vjepa2's `app/main.py`), and rejects unknown top-level and `data` keys
 and an `eval.data.series_depth`/`resample_mode` that differs from `data:`'s. A missing `method`/`transform`
 block falls back to lightly-train's defaults; **a missing `eval:` block means no evaluation**. The shipped

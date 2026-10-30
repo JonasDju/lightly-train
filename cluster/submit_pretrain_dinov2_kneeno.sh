@@ -25,11 +25,17 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 KNEENO_DIR="${KNEENO_DIR:-$REPO_DIR/../KneeNo}"
 CONFIG="${CONFIG:-cluster/configs/pretrain-MI-vitb14-24f.yaml}"  # relative to REPO_DIR
+# The MSK tars (KneeNo/data/msk/preprocess_msk.py's out_dir), extracted to /dev/shm/kneeno_data/msk. Set it iff the
+# run config's data.data_root.msk is set (pretraining fails at startup if that folder is missing).
+MSK_TAR_DIR="${MSK_TAR_DIR:-}"
 
 # Fail here rather than after the first epoch
 [[ "$CONFIG" == /* ]] || CONFIG="$REPO_DIR/$CONFIG"
 [[ -f "$CONFIG" ]] || { echo "Run config not found at $CONFIG (set CONFIG)" >&2; exit 1; }
 [[ -f "$KNEENO_DIR/data/prepare_data.py" ]] || { echo "KneeNo not found at $KNEENO_DIR (set KNEENO_DIR)" >&2; exit 1; }
+[[ -z "$MSK_TAR_DIR" || -d "$MSK_TAR_DIR" ]] || { echo "MSK_TAR_DIR is not a directory: $MSK_TAR_DIR" >&2; exit 1; }
+MSK_ARGS=()
+[[ -z "$MSK_TAR_DIR" ]] || MSK_ARGS=(--msk-tar-dir "$MSK_TAR_DIR")
 
 # Fail here rather than deep inside Lightning: one task per GPU is what DDP needs.
 if [[ -n "${SLURM_GPUS_ON_NODE:-}" && "${SLURM_NTASKS_PER_NODE:-1}" != "$SLURM_GPUS_ON_NODE" ]]; then
@@ -41,10 +47,10 @@ PG_TIMEOUT_MINUTES="${PG_TIMEOUT_MINUTES:-240}"
 cd "$REPO_DIR"
 PYTHON="$REPO_DIR/.venv/bin/python"
 
-# --- Data -> node-local scratch (/dev/shm/kneeno_data/internal); skipped if already populated -------
-# Exactly one extraction per node
+# --- Data -> node-local scratch (/dev/shm/kneeno_data/internal, and .../msk with MSK_TAR_DIR); each skipped if
+# already populated. Exactly one extraction per node
 srun --nodes="${SLURM_NNODES:-1}" --ntasks="${SLURM_NNODES:-1}" --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --internal-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
-     --pool-size 16 --data-root /dev/shm/kneeno_data
+     ${MSK_ARGS[@]+"${MSK_ARGS[@]}"} --pool-size 16 --data-root /dev/shm/kneeno_data
 
 # --- Training ---------------------------------------------------------------------------------------------
 srun "$PYTHON" cluster/pretrain_dinov2_kneeno.py --config "$CONFIG" --pg-timeout-minutes "$PG_TIMEOUT_MINUTES"

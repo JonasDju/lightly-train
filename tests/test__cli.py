@@ -111,8 +111,8 @@ def test__PRETRAIN_HELP_MSG__parameters() -> None:
         msg=_cli._PRETRAIN_HELP_MSG,
         config=CLITrainConfig(
             out="",
-            data_root="",
-            data_meta="",
+            data_root={"internal": ""},
+            data_meta={"internal": ""},
             series_depth=0,
             resample_mode="",
             model="",

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import torch
-from kneeno.dataset import UnlabeledKneeMRIDataset
+from kneeno.dataset import UnlabeledDataset
 from monai.transforms import Randomizable
 from monai.utils import MAX_SEED
 from torch.utils.data import Dataset
@@ -16,16 +16,24 @@ class MIDataset(Dataset[DatasetItem]):
 
     def __init__(
             self,
-            data_root: PathLike,
-            data_meta: PathLike,
+            data_root: Mapping[str, PathLike | None],
+            data_meta: Mapping[str, PathLike | None],
             transform: Transform,
             series_depth: int = 0,
             resample_mode: str = "nearest",
             min_series_len: int = 2,
-            max_series_len: int | None = None
+            max_series_len: int | None = None,
+            msk_subset: float = 1.0,
     ):
-        self._core = UnlabeledKneeMRIDataset(
-            data_root, data_meta, series_depth, resample_mode, min_series_len, max_series_len
+        # The internal knee data, plus the MSK data iff msk is set in data_root and data_meta.
+        self._core = UnlabeledDataset(
+            data_root,
+            data_meta,
+            series_depth=series_depth,
+            resample_mode=resample_mode,
+            min_series_len=min_series_len,
+            max_series_len=max_series_len,
+            msk_subset=msk_subset,
         )
         self.transform = transform
         # MONAI's Randomizable transforms share a class-level RandomState until they are

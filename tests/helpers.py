@@ -1162,7 +1162,7 @@ def create_msk_dataset(
 ) -> tuple[Path, Path]:
     """Create MSK data as KneeNo's ``data/msk/preprocess_msk.py`` writes it.
 
-    Layout: root/msk/<case_id>/<series_name>.npz (``volume``: a ``(D, H, W)`` uint8 array) and
+    Layout: the internal knee data's, root/msk/<case_id>/<series_name>/<NNN>.jpeg, and
     root/msk_meta.json, every case in the global split "unlabeled".
 
     Returns:
@@ -1174,11 +1174,13 @@ def create_msk_dataset(
     for case_idx in range(n_cases):
         case_id = f"msk_case_{case_idx}"
         metadata[case_id] = {}
-        (msk_root / case_id).mkdir(parents=True, exist_ok=True)
         for series_idx, depth in enumerate(depths):
             series_name = f"sag_t{series_idx}"
-            volume = rng.integers(0, 256, size=(depth, height, width), dtype=np.uint8)
-            np.savez_compressed(msk_root / case_id / f"{series_name}.npz", volume=volume)
+            series_dir = msk_root / case_id / series_name
+            series_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(depth):
+                slice_np = rng.integers(0, 256, size=(height, width), dtype=np.uint8)
+                Image.fromarray(slice_np).save(series_dir / f"{i:03d}.jpeg")
             metadata[case_id][series_name] = {
                 "dimensions": [height, width, depth],
                 "data_resolution": [0.5, 0.5, 3.0],

@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader
 
 from lightly_train._commands import train_helpers
@@ -82,7 +83,10 @@ class TestMIDataset:
         )
         assert len(dataset) == 6 + 4
         dataset[6]  # the first MSK series: msk_case_0/sag_t0, depth 5
-        volume = np.load(msk_root / "msk_case_0" / "sag_t0.npz")["volume"]
+        series_dir = msk_root / "msk_case_0" / "sag_t0"
+        volume = np.stack(
+            [np.asarray(Image.open(series_dir / f"{i:03d}.jpeg")) for i in range(5)]
+        )
         np.testing.assert_array_equal(
             transform.inputs[0], volume[None].transpose(0, 2, 3, 1)
         )

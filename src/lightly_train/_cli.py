@@ -98,7 +98,7 @@ _PRETRAIN_HELP_MSG = f"""
         data_root (dict, required):
             Root directories of the KneeNo pretraining data, {{internal: <path>, msk: <path or null>}}:
             the internal knee data (<case_id>/<series_name>/<NNN>.jpeg) and, optionally, the
-            musculoskeletal data (<case_id>/<series_name>.npz). E.g. data_root.internal=<path>.
+            musculoskeletal data (the same layout). E.g. data_root.internal=<path>.
         data_meta (dict, required):
             The metadata JSON of each, with the same keys. The MSK data is used iff msk is set
             in both data_root and data_meta.

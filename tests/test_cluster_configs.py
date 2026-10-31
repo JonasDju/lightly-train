@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 import yaml
+from kneeno import UnlabeledDataset
 from kneeno.dataset import split_hash
 from kneeno.evaluation import load_eval_config
 from kneeno.evaluation.config import ALL_TASKS
@@ -54,7 +55,12 @@ load_run_config = run_config.load_run_config
 
 
 MODEL = "dinov2/_vittest14"
-DATA = {"out": "/out", "data_root": "/data", "data_meta": "/meta.json"}
+DATA = {
+    "out": "/out",
+    "data_root": {"internal": "/data", "msk": None},
+    "data_meta": {"internal": "/meta.json", "msk": None},
+    "msk_subset": 1.0,
+}
 
 
 def _write(tmp_path: Path, config: dict[str, Any]) -> Path:
@@ -108,7 +114,7 @@ def test_run_config__train_valid(path: Path) -> None:
     FunctionTrainConfig.model_validate(
         {
             "out": config["data"]["out"],
-            "data": [config["data"]["data_root"]],
+            "data": [config["data"]["data_root"]["internal"]],
             **config.get("train", {}),
             "model": config["model"],
         }
@@ -148,14 +154,15 @@ def test_load_run_config__expands_env_vars(
         "model": MODEL,
         "data": {
             "out": "/runs/${RUN}",
-            "data_root": "$TMP/internal",
-            "data_meta": "/m",
+            "data_root": {"internal": "$TMP/internal", "msk": "$TMP/msk"},
+            "data_meta": {"internal": "/m", "msk": "/n"},
+            "msk_subset": 1.0,
         },
         "eval": {"data": {"data_root": {"internal": "$TMP/labeled"}}},
     }
     loaded = load_run_config(_write(tmp_path, config))
     assert loaded["data"]["out"] == "/runs/vitb14"
-    assert loaded["data"]["data_root"] == "/scratch/internal"
+    assert loaded["data"]["data_root"] == {"internal": "/scratch/internal", "msk": "/scratch/msk"}
     assert loaded["eval"]["data"]["data_root"] == {"internal": "/scratch/labeled"}
 
 
@@ -239,9 +246,16 @@ def test_load_run_config__callbacks_kneeno_eval(tmp_path: Path) -> None:
 SPLITS = {"c3": "train", "c1": "train", "c2": "unlabeled", "c0": "val"}
 
 
-def _data_block(tmp_path: Path, splits: dict[str, str] = SPLITS) -> dict[str, str]:
-    """A data block whose data_root has a folder for every case of ``splits``, one
-    folder in no split (``c9``), and whose data_meta groups the cases by ``splits``."""
+def _data_block(
+    tmp_path: Path,
+    splits: dict[str, str] = SPLITS,
+    msk: dict[str, dict[str, int]] | None = None,
+    msk_subset: float = 1.0,
+) -> dict[str, Any]:
+    """A data block whose data_root.internal has a folder for every case of ``splits``,
+    one folder in no split (``c9``), and whose data_meta.internal groups the cases by
+    ``splits``. With ``msk`` (``{case_id: {series: depth}}``), MSK data of that spec
+    too, every case ``unlabeled``."""
     root = tmp_path / "internal"
     metadata: dict[str, dict[str, Any]] = {}
     for case_id, split in splits.items():
@@ -250,7 +264,24 @@ def _data_block(tmp_path: Path, splits: dict[str, str] = SPLITS) -> dict[str, st
     (root / "c9").mkdir(exist_ok=True)
     meta = tmp_path / "meta.json"
     meta.write_text(json.dumps(metadata))
-    return {"out": "/out", "data_root": str(root), "data_meta": str(meta)}
+    data_root: dict[str, str | None] = {"internal": str(root), "msk": None}
+    data_meta: dict[str, str | None] = {"internal": str(meta), "msk": None}
+    if msk is not None:
+        msk_root, msk_metadata = tmp_path / "msk", {}
+        for case_id, series in msk.items():
+            msk_metadata[case_id] = {}
+            for name, depth in series.items():
+                (msk_root / case_id / name).mkdir(parents=True)
+                msk_metadata[case_id][name] = {"dimensions": [8, 8, depth]}
+        msk_meta = tmp_path / "msk_meta.json"
+        msk_meta.write_text(json.dumps({"unlabeled": msk_metadata}))
+        data_root["msk"], data_meta["msk"] = str(msk_root), str(msk_meta)
+    return {
+        "out": "/out",
+        "data_root": data_root,
+        "data_meta": data_meta,
+        "msk_subset": msk_subset,
+    }
 
 
 def _run_main(
@@ -355,6 +386,64 @@ def test_main__pretrains_only_on_train_and_unlabeled(
     assert "Pretraining on 3 exams" in out
     assert "2 exam folders there are held out" in out
     assert f"sha256 of the sorted case ids: {split_hash(['c1', 'c2', 'c3'])}." in out
+
+
+# MSK cases of _data_block: the 1-slice series is dropped by KneeNo's length filter.
+MSK = {"m0": {"sag_t2": 5, "cor_pd": 1}, "m1": {"tra_t2": 4}, "m2": {"cor_t1": 6}}
+
+
+def test_main__msk_series_follow_the_internal_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = _data_block(tmp_path, msk=MSK)
+    kwargs = _run_main(monkeypatch, {"model": MODEL, "data": data}, tmp_path)
+    root, msk = tmp_path / "internal", tmp_path / "msk"
+    assert kwargs["data"] == [
+        *(str(root / case) for case in ("c1", "c2", "c3")),
+        *(str(msk / name) for name in ("m0/sag_t2", "m1/tra_t2", "m2/cor_t1")),
+    ]
+    assert "Pretraining on 3 MSK series" in capsys.readouterr().out
+
+
+def test_main__msk_subset_selects_the_3d_runs_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    msk = {f"m{i}": {"sag_t2": 4} for i in range(10)}
+    data = _data_block(tmp_path, msk=msk, msk_subset=0.5)
+    kwargs = _run_main(monkeypatch, {"model": MODEL, "data": data}, tmp_path)
+    # What the 3D consumers' dataset reads with the same settings.
+    expected = UnlabeledDataset(
+        data["data_root"], data["data_meta"], msk_subset=0.5
+    ).parts["msk"]
+    assert kwargs["data"][3:] == [
+        str(tmp_path / "msk" / case / series) for case, series, _ in expected.samples
+    ]
+    assert len(kwargs["data"][3:]) == 5
+
+
+def test_main__msk_case_ids_must_not_be_internal_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _data_block(tmp_path, msk={"c0": {"sag_t2": 4}})  # c0: an internal val exam
+    with pytest.raises(ValueError, match="1 MSK case ids are also in the internal"):
+        _run_main(monkeypatch, {"model": MODEL, "data": data}, tmp_path)
+
+
+def test_main__msk_needs_both_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _data_block(tmp_path, msk=MSK)
+    data["data_meta"]["msk"] = None
+    with pytest.raises(ValueError, match="in both data_root and data_meta"):
+        _run_main(monkeypatch, {"model": MODEL, "data": data}, tmp_path)
+
+
+def test_load_run_config__single_data_path(tmp_path: Path) -> None:
+    for key in ("data_root", "data_meta"):
+        data = {**DATA, key: "/data"}
+        path = _write(tmp_path, {"model": MODEL, "data": data})
+        with pytest.raises(ValueError, match="used to be a single path"):
+            load_run_config(path)
 
 
 def test_main__no_exam_to_pretrain_on(
@@ -564,6 +653,69 @@ def _run_submit_eval_script(
 
 
 DEFAULT_EVAL_CONFIG = "cluster/configs/eval-MI-vitb14-2d.yaml"
+
+
+def _run_submit_pretrain_script(
+    tmp_path: Path, env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Runs the pretraining submit script with srun, the venv's python and rm stubbed
+    (it deletes /dev/shm/kneeno_data at the end); returns the calls it made."""
+    repo = tmp_path / "repo"
+    calls = tmp_path / "calls.txt"
+    bin_dir, venv_bin = tmp_path / "bin", repo / ".venv" / "bin"
+    kneeno = tmp_path / "KneeNo" / "data"
+    for directory in (bin_dir, venv_bin, kneeno, repo / "cluster" / "configs"):
+        directory.mkdir(parents=True)
+    (kneeno / "prepare_data.py").touch()
+    (repo / "cluster" / "configs" / "pretrain-MI-vitb14-2d.yaml").touch()
+    # srun's own options (--nodes=1, ...) are dropped.
+    (bin_dir / "srun").write_text(
+        '#!/bin/bash\nwhile [[ "$1" == --* ]]; do shift; done\nexec "$@"\n'
+    )
+    (venv_bin / "python").write_text(f'#!/bin/bash\necho "python $*" >> {calls}\n')
+    (bin_dir / "rm").write_text(f'#!/bin/bash\necho "rm $*" >> {calls}\n')
+    for script in (bin_dir / "srun", venv_bin / "python", bin_dir / "rm"):
+        script.chmod(0o755)
+    run_env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SLURM_SUBMIT_DIR": str(repo),
+        "KNEENO_DIR": str(tmp_path / "KneeNo"),
+        **env,
+    }
+    result = subprocess.run(
+        ["bash", str(CLUSTER_DIR / "submit_pretrain_dinov2_kneeno.sh")],
+        env=run_env,
+        capture_output=True,
+        text=True,
+    )
+    return result, calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_submit_pretrain_script__msk_tar_dir(tmp_path: Path) -> None:
+    result, calls = _run_submit_pretrain_script(tmp_path, {})
+    assert result.returncode == 0, result.stderr
+    prepare = [call for call in calls if "prepare_data.py" in call]
+    assert len(prepare) == 1 and "--msk-tar-dir" not in prepare[0]
+    assert any("pretrain_dinov2_kneeno.py" in call for call in calls)
+    assert "rm -rf /dev/shm/kneeno_data" in calls
+
+    msk = tmp_path / "msk_tars"
+    msk.mkdir()
+    result, calls = _run_submit_pretrain_script(
+        tmp_path / "with_msk", {"MSK_TAR_DIR": str(msk)}
+    )
+    assert result.returncode == 0, result.stderr
+    prepare = [call for call in calls if "prepare_data.py" in call]
+    assert len(prepare) == 1 and f"--msk-tar-dir {msk} " in prepare[0]
+
+
+def test_submit_pretrain_script__missing_msk_tar_dir(tmp_path: Path) -> None:
+    result, calls = _run_submit_pretrain_script(
+        tmp_path, {"MSK_TAR_DIR": str(tmp_path / "missing")}
+    )
+    assert result.returncode != 0
+    assert "MSK_TAR_DIR is not a directory" in result.stderr
+    assert calls == []
 
 
 @pytest.mark.parametrize(

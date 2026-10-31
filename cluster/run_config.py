@@ -11,14 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from kneeno import expand_env_vars
+from kneeno import expand_env_vars, pretraining_paths
 
 RUN_CONFIG_KEYS = ("model", "data", "train", "method", "transform", "callbacks", "eval")
 BLOCKS = ("data", "train", "method", "transform", "callbacks", "eval")  # the keys whose value is a mapping
-# All required. out is passed to lightly_train.pretrain as-is (the output directory). The script turns data_root (the
-# folder of the internal KneeNo dataset's JPEG slices, <case>/<series>/<NNN>.jpeg) and data_meta (its unlabeled
-# metadata) into pretrain's data: the list of the case folders pretraining may see (named as in branch 3d_dinov2).
-DATA_KEYS = ("out", "data_root", "data_meta")
+# All required. out is passed to lightly_train.pretrain as-is (the output directory). The script turns data_root and
+# data_meta, mappings {internal: <path>, msk: <path or null>} (the folders of the internal KneeNo data's and,
+# optionally, the MSK data's JPEG slices, <case>/<series>/<NNN>.jpeg, and their unlabeled metadata), and msk_subset
+# into pretrain's data: the list of the folders pretraining may see (named as in branch 3d_dinov2).
+DATA_KEYS = ("out", "data_root", "data_meta", "msk_subset")
 # The optional train block: the other lightly_train.pretrain arguments a run may set, passed as-is. Everything
 # the script derives itself (strategy, num_nodes, resume_interrupted, params_file) is deliberately absent, and so is
 # callbacks, which has its own top-level block.
@@ -71,6 +72,9 @@ def load_run_config(path: Path) -> dict[str, Any]:
     missing = [key for key in DATA_KEYS if data.get(key) is None]
     if missing:
         raise ValueError(f"'data' in run config '{path}' is missing required keys {missing}.")
+    for key in ("data_root", "data_meta"):
+        # KneeNo's check: a single path (the format before the MSK data) fails with its migration hint.
+        data[key] = pretraining_paths(data[key], f"data.{key}")
 
     unknown = set(config.get("train", {})) - set(TRAIN_KEYS)
     if unknown:

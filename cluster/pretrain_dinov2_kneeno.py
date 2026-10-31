@@ -13,17 +13,26 @@ vjepa2's ``configs/``: a YAML with
     callbacks:  -> lightly_train.pretrain(callbacks=...)        (CallbackArgs, all but kneeno_eval)
     eval:       -> the KneeNo eval callback's config            (deep-merged over KneeNo's DEFAULT_EVAL_CONFIG)
 
-``model`` and ``data`` (with all its keys: ``out``, ``data_root``, ``data_meta``) are required. A missing ``train``/``method``/``transform`` block, or a
+``model`` and ``data`` (with all its keys: ``out``, ``data_root``, ``data_meta``, ``msk_subset``) are required. A missing ``train``/``method``/``transform`` block, or a
 missing key within one, falls back to lightly-train's default; a missing ``eval`` block means no evaluation at
 all. Environment variables (``$VAR``, ``${VAR}``, leading ``~``) are expanded in every string value with
 KneeNo's ``expand_env_vars`` (loading and validation: ``run_config.load_run_config``).
 ``cluster/configs/pretrain-MI-vitb14-2d.yaml`` lists every train/method/transform default explicitly.
 
-``data.data_root`` holds the JPEG slices of every internal exam (``<case>/<series>/<NNN>.jpeg``), including the
-global ``val`` exams the evaluation tests on. So pretrain's ``data`` is not that folder but the list of the case
-folders in it that pretraining may see: those of the global splits ``train`` + ``unlabeled`` of ``data.data_meta``,
-as KneeNo's ``pretraining_cases`` (the same rule as the 3D run's dataset) returns them. lightly-train searches each
-recursively, so every slice is one sample, and raises if one of them does not exist.
+``data.data_root`` and ``data.data_meta`` are mappings ``{internal: <path>, msk: <path or null>}``, as on branch
+``3d_dinov2`` (KneeNo's ``UnlabeledDataset``). ``data_root.internal`` holds the JPEG slices of every internal exam
+(``<case>/<series>/<NNN>.jpeg``), including the global ``val`` exams the evaluation tests on. So pretrain's ``data``
+is not that folder but the list of the folders pretraining may see (``pretraining_dirs``):
+
+* the internal case folders of the global splits ``train`` + ``unlabeled`` of ``data_meta.internal``, as KneeNo's
+  ``pretraining_cases`` (the same rule as the 3D run's dataset) returns them;
+* if ``msk`` is set in both mappings, the musculoskeletal (MSK) data's series folders (same layout, written by
+  KneeNo's ``data/msk/preprocess_msk.py``): exactly the MSK series of a 3D run with the same ``data.msk_subset``
+  (KneeNo's ``UnlabeledDataset`` with its default length filter and ``subset_seed``). Building that dataset also
+  checks that no MSK case id is an internal one and that both folders exist. A 2D sample is a slice, so the MSK
+  share of the samples is not the 3D run's share of the series.
+
+lightly-train searches each folder recursively, so every slice is one sample, and raises if one does not exist.
 lightly-train copies the file into ``data.out`` as ``params-pretrain.yaml`` (``params-pretrain-1.yaml``, ...
 on each resume), so that copy is the complete record of the run's settings. The only command-line option
 besides ``--config`` is the multi-GPU process-group timeout, which does not affect training.
@@ -81,7 +90,7 @@ import argparse  # noqa: E402
 from datetime import timedelta  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from kneeno import load_metadata, pretraining_cases  # noqa: E402
+from kneeno import UnlabeledDataset, load_metadata, pretraining_cases  # noqa: E402
 from kneeno.dataset import split_hash  # noqa: E402
 from pytorch_lightning.strategies import DDPStrategy  # noqa: E402
 
@@ -96,13 +105,31 @@ def num_ranks() -> int:
     return int(os.environ.get("SLURM_NTASKS", "1"))
 
 
-def pretraining_dirs(data_root: Path, data_meta: Path) -> list[str]:
-    """The case folders under ``data_root`` that pretraining may see, sorted by case id.
+def pretraining_dirs(data_root: dict[str, str | None], data_meta: dict[str, str | None], msk_subset: float) -> list[str]:
+    """The folders pretraining may see: the internal case folders, sorted by case id, then (if ``msk`` is set) the
+    MSK series folders, in metadata order.
 
     Strings, not paths: lightly-train logs its arguments as JSON, which fails on a list of paths. Prints the
     exams' ``split_hash`` itself: KneeNo logs it too, but this runs before lightly-train gives the "kneeno" logger
     a handler, so that line is dropped.
     """
+    dirs = internal_dirs(Path(data_root["internal"]), Path(data_meta["internal"]))
+    if data_root.get("msk") is None and data_meta.get("msk") is None:
+        return dirs
+    # Metadata only, no volume is loaded. Raises if msk is set in only one mapping, if a folder is missing, or if an
+    # MSK case id is an internal one.
+    msk = UnlabeledDataset(data_root, data_meta, msk_subset=msk_subset).parts["msk"]
+    series = [f"{case_id}/{series_name}" for case_id, series_name, _ in msk.samples]
+    print(
+        f"Pretraining on {len(series):,} MSK series in '{data_root['msk']}' (msk_subset={msk_subset}); sha256 of "
+        f"the sorted <case>/<series> ids: {split_hash(series)}.",
+        flush=True,
+    )
+    return dirs + [str(Path(data_root["msk"]) / name) for name in series]
+
+
+def internal_dirs(data_root: Path, data_meta: Path) -> list[str]:
+    """The internal case folders under ``data_root`` that pretraining may see, sorted by case id."""
     cases = sorted(pretraining_cases(load_metadata(data_meta)))
     if not cases:
         raise ValueError(f"The metadata '{data_meta}' has no exams to pretrain on.")
@@ -151,7 +178,7 @@ def main() -> None:
     data = config["data"]
     lightly_train.pretrain(
         out=data["out"],
-        data=pretraining_dirs(Path(data["data_root"]), Path(data["data_meta"])),
+        data=pretraining_dirs(data["data_root"], data["data_meta"], data["msk_subset"]),
         **config.get("train", {}),
         model=config["model"],
         method="dinov2",

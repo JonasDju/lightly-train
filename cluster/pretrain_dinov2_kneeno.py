@@ -38,7 +38,7 @@ on each resume), so that copy is the complete record of the run's settings. The 
 besides ``--config`` is the multi-GPU process-group timeout, which does not affect training.
 
 With an ``eval`` block, the KneeNo adapter (``src/lightly_train/_data/kneeno_adapter.py``) evaluates the encoder
-slice by slice at the end of every epoch an eval task is due. The eval block's ``/dev/shm/kneeno_data/internal``
+slice by slice at the end of every epoch an eval task is due. The eval block's ``$BEEOND/kneeno_data/internal``
 data must exist by then (``submit_pretrain_dinov2_kneeno.sh`` extracts it); if it cannot be loaded the callback
 only logs a warning and disables itself, so check the log for "Disabling KneeNo evaluation".
 

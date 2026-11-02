@@ -7,13 +7,16 @@
 # eval loader. The run config's train.batch_size is the global batch size, split across all ranks. Set
 # PG_TIMEOUT_MINUTES (default 240) above the duration of one eval round: in a multi-GPU run the other ranks wait for
 # rank 0's eval.
-##SBATCH --account=truhnlab
-##SBATCH --partition=truhnlab
+# The data goes to $BEEOND, the job's temporary BeeGFS over the SSDs of all its nodes (#SBATCH --beeond; it makes
+# the job exclusive and is deleted when the job ends).
+#SBATCH --account=truhnlab
+#SBATCH --partition=truhnlab
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=32
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
+#SBATCH --beeond
 #SBATCH --job-name=lightly-2d-dinov2
 #SBATCH --output=slurm-%j-dinov2_2d_kneeno.out
 
@@ -28,7 +31,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 KNEENO_DIR="${KNEENO_DIR:-$REPO_DIR/../KneeNo}"
 CONFIG="${CONFIG:-cluster/configs/pretrain-MI-vitb14-2d.yaml}"  # relative to REPO_DIR
-# The MSK tars (KneeNo/data/msk/preprocess_msk.py's out_dir), extracted to /dev/shm/kneeno_data/msk. Set it iff the
+# The MSK tars (KneeNo/data/msk/preprocess_msk.py's out_dir), extracted to $BEEOND/kneeno_data/msk. Set it iff the
 # run config's data.data_root.msk is set (pretraining fails at startup if that folder is missing).
 MSK_TAR_DIR="${MSK_TAR_DIR:-}"
 
@@ -37,6 +40,7 @@ MSK_TAR_DIR="${MSK_TAR_DIR:-}"
 [[ -f "$CONFIG" ]] || { echo "Run config not found at $CONFIG (set CONFIG)" >&2; exit 1; }
 [[ -f "$KNEENO_DIR/data/prepare_data.py" ]] || { echo "KneeNo not found at $KNEENO_DIR (set KNEENO_DIR)" >&2; exit 1; }
 [[ -z "$MSK_TAR_DIR" || -d "$MSK_TAR_DIR" ]] || { echo "MSK_TAR_DIR is not a directory: $MSK_TAR_DIR" >&2; exit 1; }
+[[ -n "${BEEOND:-}" && -d "$BEEOND" ]] || { echo "BEEOND is not a directory; submit with #SBATCH --beeond" >&2; exit 1; }
 MSK_ARGS=()
 [[ -z "$MSK_TAR_DIR" ]] || MSK_ARGS=(--msk-tar-dir "$MSK_TAR_DIR")
 
@@ -50,15 +54,11 @@ PG_TIMEOUT_MINUTES="${PG_TIMEOUT_MINUTES:-240}"
 cd "$REPO_DIR"
 PYTHON="$REPO_DIR/.venv/bin/python"
 
-# --- Data -> node-local scratch (/dev/shm/kneeno_data/internal): the JPEG slices for pretraining and the eval ---
-# dataset alike, and /dev/shm/kneeno_data/msk with MSK_TAR_DIR; each skipped if already populated
-# Exactly one extraction per node
-srun --nodes="${SLURM_NNODES:-1}" --ntasks="${SLURM_NNODES:-1}" --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --internal-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
-     ${MSK_ARGS[@]+"${MSK_ARGS[@]}"} --pool-size 16 --data-root /dev/shm/kneeno_data
+# --- Data -> $BEEOND/kneeno_data/internal (the JPEG slices for pretraining and the eval dataset alike), and
+# .../msk with MSK_TAR_DIR; each skipped if already populated. $BEEOND is one file system for all the job's nodes,
+# so one extraction serves them all (one per node would race on the same folders).
+srun --nodes=1 --ntasks=1 --ntasks-per-node=1 "$PYTHON" "$KNEENO_DIR/data/prepare_data.py" --internal-tar-dir /hpcwork/p0021834/workspace_roman/jonas/BigKneeTar \
+     ${MSK_ARGS[@]+"${MSK_ARGS[@]}"} --pool-size 16 --data-root "$BEEOND/kneeno_data"
 
 # --- Training ---------------------------------------------------------------------------------------------
 srun "$PYTHON" cluster/pretrain_dinov2_kneeno.py --config "$CONFIG" --pg-timeout-minutes "$PG_TIMEOUT_MINUTES"
-
-# Cleanup
-rm -rf /dev/shm/kneeno_data
-echo "Deleted KneeNo data"

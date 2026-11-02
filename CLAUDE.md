@@ -697,8 +697,8 @@ left out of `freq` keeps the default, which is null (off) for every task since K
 ## Running on the cluster
 
 `cluster/submit_pretrain_dinov2_kneeno.sh` (sbatch, 1 GPU) extracts the internal dataset to
-`/dev/shm/kneeno_data/internal` with `KneeNo/data/prepare_data.py --internal-tar-dir`, and the MSK tars to
-`/dev/shm/kneeno_data/msk` with `--msk-tar-dir "$MSK_TAR_DIR"` iff the `MSK_TAR_DIR` env var is set (pass it with
+`$BEEOND/kneeno_data/internal` with `KneeNo/data/prepare_data.py --internal-tar-dir`, and the MSK tars to
+`$BEEOND/kneeno_data/msk` with `--msk-tar-dir "$MSK_TAR_DIR"` iff the `MSK_TAR_DIR` env var is set (pass it with
 `--export=ALL,MSK_TAR_DIR=...`; set it iff the run config's `data.data_root.msk` is set: KneeNo raises at startup
 if that folder is missing) (pretraining, on the global
 splits `train` + `unlabeled`, and the in-training eval, `test_sets: [internal]`, both read it; the external NIfTI
@@ -745,6 +745,14 @@ every shipped config's model. Submit
 from the repo root; the submit script takes `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES` env vars
 (`OUT_DIR`/`MODEL` are gone — they live in the config).
 Rerunning with the same `data.out` auto-resumes from `checkpoints/last.ckpt`.
+
+- **Data on `$BEEOND`** (since 2026-11-02; `/dev/shm` before): `#SBATCH --beeond` gives the job a temporary
+  BeeGFS over the SSDs of all its nodes, one namespace (not per node), at `$BEEOND`. It makes the job exclusive and
+  is deleted when the job ends. The script checks `$BEEOND` before anything runs, and extracts **once per job**
+  (`srun --nodes=1 --ntasks=1`): one extraction per node, as for `/dev/shm`, would race on the same folders. The
+  run config's `data.data_root` and `eval.data.data_root` are `$BEEOND/kneeno_data/...`. No cleanup step
+  (dropped 2026-11-02): BeeOND deletes the data at job end, and an `rm -rf` of millions of files would only
+  cost node time; the submit-script test checks that it calls no `rm`.
 
 **Run ID: `PRETRAIN_JOB_ID`** (since 2026-11-02). The pretraining config's `data.out` and `eval.logging.per_label_dir`
 are named after `${PRETRAIN_JOB_ID}` (`${SLURM_JOB_ID}` before, so resuming meant editing the config).
@@ -810,7 +818,7 @@ cluster/submit_eval_dinov2_kneeno.sh`. **Pass env vars with `--export`**: RWTH's
 check).
 - The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no process
   group and no `--pg-timeout-minutes`). It extracts the internal and the external data to the job's node-local
-  `$TMP/kneeno_data` (`prepare_data.py`'s default; `/dev/shm` is for pretraining only), then runs
+  `$TMP/kneeno_data` (`prepare_data.py`'s default; `$BEEOND` is for pretraining only), then runs
   `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-24f.yaml`). The
   external data comes from a hard-coded `--external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar`; the eval config's
   `label_meta.external` is `/hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json`. Env vars: `PRETRAIN_JOB_ID` (required) and `TMP`,
@@ -867,7 +875,7 @@ check).
 - **The `external` test set** needs the external NIfTI data: only `submit_eval_dinov2_kneeno.sh` extracts it (from
   the hard-coded tar above). The pretraining config tests on `internal` only, on purpose.
 - **`eval.data.data_root`/`label_meta` in the cluster run config are cluster paths** copied
-  from vjepa2's config (`/dev/shm/kneeno_data/internal`, `.../BigKneeTar/metadata_labeled.json`), so they do not resolve on a dev box. The callback logs a warning
+  from vjepa2's config (`$BEEOND/kneeno_data/internal`, `.../BigKneeTar/metadata_labeled.json`), so they do not resolve on a dev box. The callback logs a warning
   and disables itself rather than failing the run; pass a run config whose `eval:` block
   has local paths to actually evaluate here.
 - **`DINOv2ViTModelWrapper._input_mean`/`_input_std`** (TIPSv2 support) are still

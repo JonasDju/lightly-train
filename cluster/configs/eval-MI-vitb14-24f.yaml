@@ -41,7 +41,7 @@ resize_upscale_interpolation: linear
 # Identical to pretrain-MI-vitb14-24f.yaml's eval block except:
 #   * data: test_sets [internal, external] (the heads are trained once and scored on both; the in-training eval
 #     never tests on external), data_root on the job's
-#     node-local $TMP (where submit_eval_dinov2_kneeno.sh extracts both datasets; /dev/shm is for pretraining
+#     node-local $TMP (where submit_eval_dinov2_kneeno.sh extracts both datasets; $BEEOND is for pretraining
 #     only) and label_meta with the external dataset's paths too, 31 workers.
 #   * split.level / rep are ${SPLIT_LEVEL} / ${SPLIT_REP} instead of 0.25 / 0: one run per level and rep to report,
 #     set by submit_eval_dinov2_kneeno.sh (default 1.0 / 0). Each run writes to its own

@@ -174,19 +174,33 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 ## Running on the cluster
 
 - `cluster/submit_pretrain_dinov2_kneeno.sh` (sbatch, 1 GPU; job `lightly-2d-dinov2`) extracts the internal
-  dataset to `/dev/shm/kneeno_data/internal` (`KneeNo/data/prepare_data.py --internal-tar-dir`). It then runs
+  dataset to `/dev/shm/kneeno_data/internal` (`KneeNo/data/prepare_data.py --internal-tar-dir`), and the
+  musculoskeletal (MSK) tars to `/dev/shm/kneeno_data/msk` (`--msk-tar-dir`) iff `MSK_TAR_DIR` is set. It then runs
   `cluster/pretrain_dinov2_kneeno.py --config <run config>` (default `cluster/configs/pretrain-MI-vitb14-2d.yaml`).
-  Env vars: `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES`.
+  Env vars: `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES`, `MSK_TAR_DIR` (since 2026-11-02; a folder,
+  checked up front; set it iff the run config's `data.data_root.msk` is set, pass it with
+  `--export=ALL,MSK_TAR_DIR=...`). `tests/test_cluster_configs.py` runs the script with `srun`, the venv's python and
+  `rm` stubbed.
 - **Run config:**
   - `model:` (string);
-  - `data:` with exactly `out`, `data_root` and `data_meta` (all required; names as on `3d_dinov2`). `data_root`
-    (`/dev/shm/kneeno_data/internal`) holds every internal exam, the global `val` ones (the `internal` test set)
-    included, so it is not passed to lightly-train as one folder (it was until 2026-10-14). The launcher's
-    `pretraining_dirs` passes `pretrain(data=[...])`: the sorted list of `data_root/<case_id>` for the cases KneeNo's
-    `pretraining_cases` returns for `data_meta` (`internal_unlabeled.json`: global splits `train` + `unlabeled`,
-    the same rule as the 3D dataset). That is a stock input type, so lightly-train's code is untouched: it searches
-    each folder recursively (every `<case>/<series>/<NNN>.jpeg` slice is one sample) and raises on a missing one.
-    The launcher prints the number of exams used and of exam folders held out. The list holds strings, not
+  - `data:` with exactly `out`, `data_root`, `data_meta` and `msk_subset` (all required; names as on
+    `3d_dinov2`). Since 2026-11-02 `data_root` and `data_meta` are mappings `{internal: <path>, msk: <path or
+    null>}`, as for KneeNo's `UnlabeledDataset`; `run_config` checks them with `kneeno.pretraining_paths`, so a single
+    path fails at load with a migration hint. The shipped config has `msk: null` and `msk_subset: 1.0`.
+    `data_root.internal` (`/dev/shm/kneeno_data/internal`) holds every internal exam, the global `val` ones (the
+    `internal` test set) included, so it is not passed to lightly-train as one folder (it was until 2026-10-14).
+    The launcher's `pretraining_dirs` passes `pretrain(data=[...])`:
+    - the sorted list of `data_root.internal/<case_id>` for the cases KneeNo's `pretraining_cases` returns for
+      `data_meta.internal` (`internal_unlabeled.json`: global splits `train` + `unlabeled`, the same rule as the 3D
+      dataset);
+    - if `msk` is set in both mappings, the MSK series folders `data_root.msk/<case_id>/<series>`: the samples of
+      `kneeno.UnlabeledDataset(data_root, data_meta, msk_subset=...).parts["msk"]` (metadata only, default length
+      filter and seed), i.e. exactly the MSK series a 3D run with the same `msk_subset` reads. Building it also runs
+      KneeNo's checks (no MSK case id is an internal one, both folders exist, `msk` set in both or neither).
+
+    That is a stock input type, so lightly-train's code is untouched: it searches each folder recursively (every
+    `<case>/<series>/<NNN>.jpeg` slice is one sample) and raises on a missing one. The launcher prints the number of
+    exams used and of exam folders held out, and the number and hash of the MSK series. The list holds strings, not
     `Path`s: lightly-train logs its arguments with `json.dumps`, which fails on a list of `Path`s.
   - optional `train:` (allowlist `run_config.TRAIN_KEYS`), `method:` (`DINOv2Args`), `transform:`
     (`DINOv2ViTTransformArgs`) and `eval:` (eval callback config; a missing block means no eval).
@@ -270,6 +284,9 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   exams included, so the `internal/*` numbers of older 2D checkpoints are not clean, only their `external/*` ones).
   Remaining difference: the 3D run reads only the series listed in the metadata that pass KneeNo's length filter
   (`min_series_len` 2); the 2D run takes every series folder of an allowed case.
+- With MSK data, both read the same MSK series (same `msk_subset`), but a 2D sample is a slice, so the MSK share of
+  the 2D samples is not the 3D run's share of the series (MSK series differ from knee series in depth). Adding MSK
+  data changes what the model sees, but not how lightly-train trains: the procedure stays stock.
 - 2D defaults vs. the 3D config: ImageNet normalisation vs `0.5/0.5`; colour jitter/solarize vs MRI-specific
   intensity augmentations; 224² crops of single slices vs `224×224×16` volumes. These are all intended stock
   behaviour, but worth stating in the thesis.

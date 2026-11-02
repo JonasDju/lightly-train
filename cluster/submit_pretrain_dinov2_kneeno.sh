@@ -19,7 +19,10 @@
 
 set -euo pipefail
 
-# --- Locations (override by exporting before sbatch, e.g. `CONFIG=... sbatch ...`) ---------------------
+# --- Locations (override through --export, e.g. `sbatch --export=ALL,CONFIG=... ...`) ---------------------
+# RWTH's sbatch does not export a `CONFIG=... sbatch` prefix to the job. To resume a run, pass
+# PRETRAIN_JOB_ID=<id of its first job> the same way; unset, the run is named after this job (see
+# cluster/pretrain_dinov2_kneeno.py).
 # Model, output directory and everything else about the run are in the run config.
 # SLURM runs a copy of this script, so the repo cannot be located via $0.
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"

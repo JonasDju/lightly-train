@@ -745,6 +745,19 @@ every shipped config's model. Submit
 from the repo root; the submit script takes `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES` env vars
 (`OUT_DIR`/`MODEL` are gone — they live in the config).
 Rerunning with the same `data.out` auto-resumes from `checkpoints/last.ckpt`.
+
+**Run ID: `PRETRAIN_JOB_ID`** (since 2026-11-02). The pretraining config's `data.out` and `eval.logging.per_label_dir`
+are named after `${PRETRAIN_JOB_ID}` (`${SLURM_JOB_ID}` before, so resuming meant editing the config).
+`pretrain_dinov2_kneeno.py::set_pretrain_job_id` sets it before `load_run_config` expands the config:
+- unset: this job's `SLURM_JOB_ID`, a new run (a job SLURM re-queues keeps its ID, so it continues its own run);
+- set: `sbatch --export=ALL,PRETRAIN_JOB_ID=<first job's id> cluster/submit_pretrain_dinov2_kneeno.sh` resumes that
+  run. Inside a SLURM job `<out>/checkpoints/last.ckpt` must then exist (`check_out_dir` raises), so a mistyped ID
+  can't start a new run. Outside SLURM it must be set, and may name a new run.
+- The default lives in the launcher, not the submit script, because only Python knows `data.out` and whether the ID
+  was given. Every rank prints one `PRETRAIN_JOB_ID=... (given | this job's SLURM_JOB_ID)` line. The standalone eval
+  uses the same variable but requires it (no fallback: there `SLURM_JOB_ID` is the eval job's own ID).
+  Tests: `tests/test_cluster_configs.py::test_main__*pretrain_job_id*`, `test_run_config__named_after_pretrain_job_id`.
+
 **`last.ckpt` is written after every epoch, whatever `every_n_epochs` is** (since 2026-10-27,
 `_callbacks/checkpoint.py::ModelCheckpoint.on_train_epoch_end`, same as on `2d_dinov2`). Stock Lightning writes it
 only together with a periodic checkpoint and at a normal end of training: a 2D run with `every_n_epochs: 50`, killed
@@ -821,7 +834,7 @@ check).
   `lightly_train.eval_classification(eval_config=...)` (`accelerator="auto"`, so it also runs on CPU here; verified
   end to end on CPU with a tiny model, a JPEG fixture and 2 spawn workers).
 - The eval config locates the pretraining run through **`${PRETRAIN_JOB_ID}`, not `${SLURM_JOB_ID}`**, which in the
-  eval job is the eval job's own ID. Its outputs go to `<run>/eval/post-training/type-<config>.level-<l>.rep-<r>/` (`tb/`,
+  eval job is the eval job's own ID; the same variable the pretraining config names `data.out` after. Its outputs go to `<run>/eval/post-training/type-<config>.level-<l>.rep-<r>/` (`tb/`,
   `eval_per_label/`, `results.json`, `params.yaml`).
 - Its `eval:` block equals the pretraining config's except for `logging` (`tensorboard_dir` is set: no lightly-train
   loggers here), `freq` (the four volume tasks `1`, i.e. on; the slice tasks left out, i.e. off),

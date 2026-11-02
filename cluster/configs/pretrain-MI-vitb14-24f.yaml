@@ -7,13 +7,18 @@
 # method/transform list every DINOv2Args / DINOv2ViTTransformArgs field at its lightly-train default (except
 # num_channels, fixed to 1 for grayscale MRI); a block, or a key within one, that is left out falls back to
 # that default. Leave out the eval block to pretrain without evaluation.
+#
+# ${PRETRAIN_JOB_ID} (data.out, eval.logging.per_label_dir) is set by the script: this job's SLURM ID unless given.
+# Every submission is then a new run; to resume one, give the ID of its first job (RWTH's sbatch does not
+# export a `PRETRAIN_JOB_ID=... sbatch` prefix to the job):
+#     sbatch --export=ALL,PRETRAIN_JOB_ID=<id> cluster/submit_pretrain_dinov2_kneeno.sh
 
 # Required: any 3D dinov2/<name>, e.g. dinov2/vits14-notpretrained.
 model: dinov2/vitb14-notpretrained
 
 # Required block, every key required. series_depth/resample_mode must match eval.data's (checked at startup).
 data:
-  out: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
+  out: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px  # logs, checkpoints, exported model; resumes from it (see the header)
   # kneeno.UnlabeledDataset: the internal knee data, plus the musculoskeletal (MSK) data iff msk is set in both.
   # Extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py); msk only with MSK_TAR_DIR set there.
   data_root: {internal: /dev/shm/kneeno_data/internal, msk: null}
@@ -196,7 +201,7 @@ eval:
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
-    per_label_dir: /hpcwork/va105917/lightly/pretrain/${SLURM_JOB_ID}.14p.24d.vitb.224px/eval/in-training/eval_per_label
+    per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/in-training/eval_per_label
     tag_prefix: eval
   freq:
     knn: 5

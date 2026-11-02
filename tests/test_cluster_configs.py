@@ -285,7 +285,10 @@ def _data_block(
 
 
 def _run_main(
-    monkeypatch: pytest.MonkeyPatch, config: dict[str, Any], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, Any],
+    tmp_path: Path,
+    env: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Runs cluster/pretrain_dinov2_kneeno.py's main() and returns pretrain's kwargs.
 
@@ -308,6 +311,15 @@ def _run_main(
         config = {**config, "data": _data_block(tmp_path)}
     monkeypatch.setenv("SLURM_NNODES", "2")
     monkeypatch.delenv("SLURM_NTASKS", raising=False)
+    # A new run in a SLURM job, unless ``env`` says otherwise (None: unset). setenv
+    # first, so monkeypatch also undoes the PRETRAIN_JOB_ID the script sets itself.
+    job_env: dict[str, str | None] = {"SLURM_JOB_ID": "777", "PRETRAIN_JOB_ID": None}
+    for name, value in {**job_env, **(env or {})}.items():
+        monkeypatch.setenv(name, "unset")
+        if value is None:
+            monkeypatch.delenv(name)
+        else:
+            monkeypatch.setenv(name, value)
     path = _write(tmp_path, config)
     monkeypatch.setattr(
         sys, "argv", ["pretrain_dinov2_kneeno.py", "--config", str(path)]
@@ -315,6 +327,88 @@ def _run_main(
     script.main()
     assert len(calls) == 1
     return calls[0]
+
+
+@pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
+def test_run_config__named_after_pretrain_job_id(path: Path) -> None:
+    """The output folders are named after ${PRETRAIN_JOB_ID}, so a resubmission with the
+    first job's ID resumes the run; never after ${SLURM_JOB_ID}, which changes with every
+    job."""
+    raw = yaml.safe_load(path.read_text())
+    assert "SLURM_JOB_ID" not in path.read_text()
+    assert "${PRETRAIN_JOB_ID}" in raw["data"]["out"]
+    if "eval" in raw:
+        per_label_dir = raw["eval"]["logging"]["per_label_dir"]
+        assert per_label_dir.startswith(raw["data"]["out"] + "/")
+
+
+def _job_id_config(tmp_path: Path) -> dict[str, Any]:
+    out = str(tmp_path / "runs" / "${PRETRAIN_JOB_ID}")
+    return {"model": MODEL, "data": {**_data_block(tmp_path), "out": out}}
+
+
+def test_main__pretrain_job_id_defaults_to_slurm_job_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    kwargs = _run_main(monkeypatch, _job_id_config(tmp_path), tmp_path)
+    assert kwargs["out"] == str(tmp_path / "runs" / "777")
+    assert kwargs["resume_interrupted"] is False
+    assert os.environ["PRETRAIN_JOB_ID"] == "777"
+    assert "PRETRAIN_JOB_ID=777 (this job's SLURM_JOB_ID)" in capsys.readouterr().out
+
+
+def test_main__given_pretrain_job_id_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkpoint = tmp_path / "runs" / "42" / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.touch()
+    kwargs = _run_main(
+        monkeypatch, _job_id_config(tmp_path), tmp_path, {"PRETRAIN_JOB_ID": "42"}
+    )
+    assert kwargs["out"] == str(tmp_path / "runs" / "42")
+    assert kwargs["resume_interrupted"] is True
+    assert "PRETRAIN_JOB_ID=42 (given)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("folder_exists", [False, True])
+def test_main__given_pretrain_job_id_needs_a_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder_exists: bool
+) -> None:
+    """A mistyped ID inside a SLURM job must not start a new run (and an existing folder
+    without a checkpoint would make lightly-train refuse the non-empty out dir)."""
+    if folder_exists:
+        (tmp_path / "runs" / "42").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="PRETRAIN_JOB_ID=42 names a run"):
+        _run_main(
+            monkeypatch, _job_id_config(tmp_path), tmp_path, {"PRETRAIN_JOB_ID": "42"}
+        )
+
+
+def test_main__given_pretrain_job_id_outside_slurm_may_be_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {"SLURM_JOB_ID": None, "PRETRAIN_JOB_ID": "local"}
+    kwargs = _run_main(monkeypatch, _job_id_config(tmp_path), tmp_path, env)
+    assert kwargs["out"] == str(tmp_path / "runs" / "local")
+    assert kwargs["resume_interrupted"] is False
+
+
+@pytest.mark.parametrize(
+    "env, match",
+    [
+        ({"SLURM_JOB_ID": None}, "Neither PRETRAIN_JOB_ID nor SLURM_JOB_ID is set"),
+        ({"PRETRAIN_JOB_ID": ""}, "PRETRAIN_JOB_ID is set but empty"),
+    ],
+)
+def test_main__no_pretrain_job_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str | None],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _run_main(monkeypatch, _job_id_config(tmp_path), tmp_path, env)
 
 
 def test_main__passes_train_block(
@@ -511,7 +605,8 @@ def test_eval_config__matches_pretrain_config(
     eval_config = yaml.safe_load(path.read_text())
     run = yaml.safe_load(_pretrain_config_of(path).read_text())
 
-    out = run["data"]["out"].replace("${SLURM_JOB_ID}", "${PRETRAIN_JOB_ID}")
+    out = run["data"]["out"]
+    assert "${PRETRAIN_JOB_ID}" in out
     assert eval_config["weights"] == f"{out}/checkpoints/last.ckpt"
     for key in ("tensorboard_dir", "per_label_dir"):
         assert eval_config["eval"]["logging"][key].startswith(f"{out}/eval/")

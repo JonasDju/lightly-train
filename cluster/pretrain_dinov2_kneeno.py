@@ -58,7 +58,18 @@ Submit through ``submit_pretrain_dinov2_kneeno.sh``; that also prepares the node
 
     .venv/bin/python cluster/pretrain_dinov2_kneeno.py --config cluster/configs/pretrain-MI-vitb14-2d.yaml
 
-Rerunning with the same ``data.out`` resumes from ``<out>/checkpoints/last.ckpt`` if one exists.
+Rerunning with the same ``data.out`` resumes from ``<out>/checkpoints/last.ckpt`` if one exists. The shipped
+configs name ``data.out`` (and the eval's ``per_label_dir``) after ``${PRETRAIN_JOB_ID}``, which this script sets
+before expanding the config (``set_pretrain_job_id``):
+
+* unset (the default): this job's ``SLURM_JOB_ID``, so every submission is a new run, and a job SLURM re-queues
+  continues its own run;
+* set: an earlier run to resume. RWTH's sbatch does not pass a ``PRETRAIN_JOB_ID=... sbatch`` prefix to the job, so
+  ``sbatch --export=ALL,PRETRAIN_JOB_ID=<id of the first job> cluster/submit_pretrain_dinov2_kneeno.sh``. Inside a
+  SLURM job its ``<out>/checkpoints/last.ckpt`` must exist (``check_out_dir``), so a mistyped ID fails instead of
+  starting a new run. Outside SLURM it must be set, and names a new run as well as an old one.
+
+The script prints which of the two it is, and whether it resumes.
 
 Multi-GPU / multi-node: nothing to configure here. Devices, ranks and world size come from the SLURM job
 (``--ntasks-per-node`` = GPUs per node, launched with ``srun``), and ``num_nodes`` is read from
@@ -142,6 +153,41 @@ def internal_dirs(data_root: Path, data_meta: Path) -> list[str]:
     return [str(data_root / case) for case in cases]
 
 
+def set_pretrain_job_id() -> bool:
+    """Sets ``PRETRAIN_JOB_ID`` to this job's ``SLURM_JOB_ID`` unless it is set; returns whether it was set.
+
+    Must run before the config is expanded: ``expand_env_vars`` leaves an unset variable as it is, which would
+    create a literal ``${PRETRAIN_JOB_ID}`` folder. Every rank of a job sees the same ``SLURM_JOB_ID``.
+    """
+    given = os.environ.get("PRETRAIN_JOB_ID")
+    if given is not None:
+        if not given:
+            raise ValueError("PRETRAIN_JOB_ID is set but empty; unset it to start a new run.")
+        return True
+    slurm_job_id = os.environ.get("SLURM_JOB_ID")
+    if not slurm_job_id:
+        raise ValueError(
+            "Neither PRETRAIN_JOB_ID nor SLURM_JOB_ID is set, and the run config's paths may be named after "
+            "${PRETRAIN_JOB_ID}. Outside SLURM, set PRETRAIN_JOB_ID yourself."
+        )
+    os.environ["PRETRAIN_JOB_ID"] = slurm_job_id
+    return False
+
+
+def check_out_dir(out: Path, job_id_given: bool, resume_interrupted: bool) -> None:
+    """Raises if a ``PRETRAIN_JOB_ID`` given inside a SLURM job names no run to resume, i.e. ``out`` has no
+    ``checkpoints/last.ckpt`` (a mistyped ID would otherwise start a new run); prints which run this is."""
+    job_id = os.environ["PRETRAIN_JOB_ID"]
+    if job_id_given and os.environ.get("SLURM_JOB_ID") and not resume_interrupted:
+        raise FileNotFoundError(
+            f"PRETRAIN_JOB_ID={job_id} names a run to resume, but '{out / 'checkpoints' / 'last.ckpt'}' does not "
+            "exist. Check the ID, or leave PRETRAIN_JOB_ID unset to start a new run."
+        )
+    source = "given" if job_id_given else "this job's SLURM_JOB_ID"
+    state = "resuming from its checkpoints/last.ckpt" if resume_interrupted else "a new run"
+    print(f"PRETRAIN_JOB_ID={job_id} ({source}); output folder '{out}': {state}.", flush=True)
+
+
 def build_strategy(n_ranks: int, timeout_minutes: int) -> str | DDPStrategy:
     """The strategy for ``lightly_train.pretrain``.
 
@@ -167,9 +213,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    job_id_given = set_pretrain_job_id()
     config = load_run_config(Path(args.config))
-    # A re-queued job must continue rather than fail on the existing out dir.
-    resume_interrupted = (Path(config["data"]["out"]) / "checkpoints" / "last.ckpt").is_file()
+    # A re-queued or resubmitted job must continue rather than fail on the existing out dir.
+    out = Path(config["data"]["out"])
+    resume_interrupted = (out / "checkpoints" / "last.ckpt").is_file()
+    check_out_dir(out, job_id_given, resume_interrupted)
     callbacks = dict(config.get("callbacks", {}))
     # No eval block -> no evaluation: the callback is off unless given a config.
     if "eval" in config:

@@ -12,13 +12,18 @@
 # The eval block below runs KneeNo's classification tasks through the 2D adapter
 # (src/lightly_train/_data/kneeno_adapter.py), which encodes every slice of every volume separately. Leave out the
 # eval block to pretrain without evaluation.
+#
+# ${PRETRAIN_JOB_ID} (data.out, eval.logging.per_label_dir) is set by the script: this job's SLURM ID unless given.
+# Every submission is then a new run; to resume one, give the ID of its first job (RWTH's sbatch does not
+# export a `PRETRAIN_JOB_ID=... sbatch` prefix to the job):
+#     sbatch --export=ALL,PRETRAIN_JOB_ID=<id> cluster/submit_pretrain_dinov2_kneeno.sh
 
 # Required: any dinov2/<name>, e.g. dinov2/vits14-notpretrained.
 model: dinov2/vitb14-notpretrained
 
 # Required block, all keys required.
 data:
-  out: /hpcwork/va105917/lightly/pretrain_2d/${SLURM_JOB_ID}.2d.vitb.224px  # logs, checkpoints, exported model; rerunning resumes from it
+  out: /hpcwork/va105917/lightly/pretrain_2d/${PRETRAIN_JOB_ID}.2d.vitb.224px  # logs, checkpoints, exported model; resumes from it (see the header)
   # internal: every internal exam, the eval's val exams included; msk: the musculoskeletal (MSK) data, used iff set
   # in both data_root and data_meta. Extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py; msk
   # only with MSK_TAR_DIR set there).
@@ -203,7 +208,7 @@ eval:
     persistent_workers: true  # keep workers alive across head epochs (ignored when num_workers = 0)
   logging:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
-    per_label_dir: /hpcwork/va105917/lightly/pretrain_2d/${SLURM_JOB_ID}.2d.vitb.224px/eval/in-training/eval_per_label
+    per_label_dir: /hpcwork/va105917/lightly/pretrain_2d/${PRETRAIN_JOB_ID}.2d.vitb.224px/eval/in-training/eval_per_label
     tag_prefix: eval
   freq:  # One 2D epoch takes > 1h, so running these tasks very frequently does not add much overhead
     knn: 1

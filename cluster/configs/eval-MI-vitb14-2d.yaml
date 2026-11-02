@@ -3,9 +3,9 @@
 # weights, image_size, eval, and for an exported model also model, model_args (optional) and normalize. Env vars
 # ($VAR, ${VAR}, leading ~) are expanded everywhere; an unset one is an error.
 #
-# ${PRETRAIN_JOB_ID} is the SLURM job ID of the pretraining run (pretrain-MI-vitb14-2d.yaml's data.out is named
-# after it). Not ${SLURM_JOB_ID}: in the eval job that is the eval job's own ID. Submit with (RWTH's sbatch does not
-# export a `PRETRAIN_JOB_ID=... sbatch` prefix to the job)
+# ${PRETRAIN_JOB_ID} names the pretraining run, as in pretrain-MI-vitb14-2d.yaml's data.out: the SLURM ID of its
+# first job. Required here, with no fallback: ${SLURM_JOB_ID} is the eval job's own ID. Submit with (RWTH's sbatch
+# does not export a `PRETRAIN_JOB_ID=... sbatch` prefix to the job)
 #     sbatch --export=ALL,PRETRAIN_JOB_ID=<id> cluster/submit_eval_dinov2_kneeno.sh
 #
 # Outputs, all inside the pretraining run's folder: TensorBoard test metrics (eval.logging.tensorboard_dir), per-label

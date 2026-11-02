@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 
 import pytest
 import torch
+from lightly.utils.scheduler import cosine_schedule
 from lightning_utilities.core.imports import RequirementCache
 from omegaconf import OmegaConf
 from pytest import LogCaptureFixture
@@ -33,6 +34,8 @@ from lightly_train._data import kneeno_adapter
 from lightly_train._loggers.jsonl import JSONLLogger
 from lightly_train._methods import method_helpers
 from lightly_train._methods.dino.dino import DINOAdamWArgs, DINOArgs
+from lightly_train._methods.dinov2 import dinov2 as dinov2_module
+from lightly_train._methods.dinov2.dinov2 import DINOv2Args
 from lightly_train._models.dinov2_vit.dinov2_vit_package import DINOv2ViTPackage
 from lightly_train._scaling import ScalingInfo
 
@@ -478,6 +481,65 @@ def test_pretrain__model_config(tmp_path: Path) -> None:
     model_config.write_text("# written by the first run\n")
     train.pretrain(**{**kwargs, "epochs": 2, "resume_interrupted": True})
     assert model_config.read_text() == "# written by the first run\n"
+
+
+@pytest.mark.parametrize("gradient_accumulation_steps", [2, 4])
+def test_pretrain__teacher_ema_once_per_optimizer_step(
+    tmp_path: Path,
+    mocker: MockerFixture,
+    gradient_accumulation_steps: int,
+) -> None:
+    """With gradient accumulation the teacher EMA is applied once per optimizer step,
+    with that step's momentum, exactly as with one batch of the same effective size.
+    Applying it after every accumulated batch would update the teacher k times per
+    step (momentum m**k instead of m).
+    """
+    # 16 images: 2 optimizer steps per epoch with an effective batch size of 8.
+    helpers.create_images(image_dir=tmp_path / "data", files=16)
+    effective_batch_size = 8
+    epochs = 2
+    update_momentum_spy = mocker.spy(dinov2_module, "update_momentum")
+
+    def momenta(out: Path, batch_size: int, grad_accum_steps: int) -> list[float]:
+        update_momentum_spy.reset_mock()
+        train.pretrain(
+            **_dinov2_pretrain_kwargs(
+                tmp_path,
+                out=out,
+                batch_size=batch_size,
+                gradient_accumulation_steps=grad_accum_steps,
+                epochs=epochs,
+            )
+        )
+        return [c.kwargs["m"] for c in update_momentum_spy.call_args_list]
+
+    reference = momenta(
+        out=tmp_path / "out_reference",
+        batch_size=effective_batch_size,
+        grad_accum_steps=1,
+    )
+    accumulated = momenta(
+        out=tmp_path / "out_accumulated",
+        batch_size=effective_batch_size // gradient_accumulation_steps,
+        grad_accum_steps=gradient_accumulation_steps,
+    )
+
+    # One update per optimizer step (two calls: embedding model and head), after the
+    # step, i.e. with the momentum of steps 1..N.
+    max_steps = epochs * 16 // effective_batch_size
+    method_args = DINOv2Args()
+    expected = [
+        cosine_schedule(
+            step=step,
+            max_steps=max_steps,
+            start_value=method_args.momentum_start,
+            end_value=method_args.momentum_end,
+        )
+        for step in range(1, max_steps + 1)
+        for _ in range(2)
+    ]
+    assert reference == pytest.approx(expected)
+    assert accumulated == reference
 
 
 def test_pretrain__kneeno_eval_without_dataset(

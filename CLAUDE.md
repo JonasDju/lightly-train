@@ -22,6 +22,20 @@ and state-dict keys. Results differ by float rounding only, older checkpoints an
 resumed pretraining run just switches kernels. `tests/_models/dinov2_vit/test_attention.py` pins equality with
 `Attention` and that every builder uses it.
 
+**Deliberate deviation: gradient accumulation is fixed (2026-10-27, 2026-11-02).** Stock lightly-train ignored
+`gradient_accumulation_steps` in two places, both now fixed. They only matter with accumulation `> 1`; the shipped
+config uses `1`, which is bit-identical to stock.
+- `epochs: auto` (`train_helpers.get_epochs`) now counts optimizer steps of `batch_size * gradient_accumulation_steps`.
+- The teacher EMA (`DINOv2.on_train_batch_end`) is applied once per optimizer step. Lightning calls the hook after
+  every batch, but the student only changes when the optimizer steps, so stock applied the EMA `k` times per step
+  (momentum `m**k`). It is now gated on `global_step` changing (`_teacher_updated_at_step`, set in
+  `on_train_start`, because Lightning restores `global_step` after `on_fit_start` on resume). Pinned by
+  `test_pretrain__teacher_ema_once_per_optimizer_step`. DINOv3.1's PaKA head EMA (`dinov31.py`) still runs per
+  batch: out of scope.
+- Already correct in stock: the LR scaling (gets `batch_size * gradient_accumulation_steps`) and every schedule
+  (they use `global_step` / `estimated_stepping_batches`, both in optimizer steps). Still per batch: the DINO/iBOT
+  loss centers' EMA (`center_momentum`), which follows micro-batches, like a run with the smaller batch size.
+
 **Current status (2026-10-08):** the KneeNo in-training eval is wired in, with a slice-wise adapter that hands
 KneeNo the per-slice tokens, so KneeNo's 2D-only slice tasks run too (see below). `cluster/` holds SLURM scripts,
 launchers and configs for pretraining and for the standalone evaluation. Pretraining and the standalone eval run

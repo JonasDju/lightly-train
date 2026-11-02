@@ -345,8 +345,9 @@ Gotchas).
   of `data`. **`data_root` and `data_meta` are mappings `{internal: <path>, msk: <path or None>}`** (since
   2026-10-30; KneeNo's `pretraining_paths` validates them in a `TrainConfig` field validator, so a single path
   fails with a migration hint, and stores the paths as strings, since the config is JSON-dumped and
-  `sanitize_config_dict` only converts top-level `Path`s; on the CLI `data_root.internal=<path>`). The MSK data (`<case_id>/<series>.npz`,
-  KneeNo's `data/msk/preprocess_msk.py`) is used iff `msk` is set in both. `msk_subset` (default `1.0`) subsamples
+  `sanitize_config_dict` only converts top-level `Path`s; on the CLI `data_root.internal=<path>`). The MSK data
+  (KneeNo's `data/msk/preprocess_msk.py`, the internal data's `<case_id>/<series>/<NNN>.jpeg` layout) is used iff
+  `msk` is set in both. `msk_subset` (default `1.0`) subsamples
   the MSK part only; `epochs: auto` fixes the steps, so the full MSK data (about 2/3 of the samples) means each knee
   series is seen about a third as often, and an epoch (so the in-training eval interval) about 3x longer. `series_depth <= 0` (native per-series depth) works with plain
   `DataLoader` collation — see Gotchas.
@@ -554,7 +555,7 @@ what catches both dataset picklability issues and the RNG-reseeding gotcha above
 `"dimensions": [H, W, depth]`, every case in the global split `"train"`, KneeNo's current schema; returns the
 `{"internal": ..., "msk": None}` mappings `pretrain` takes — the `identical=True`
 option makes all series bit-identical, used to prove RNG reseeding actually changes
-output across workers), `create_msk_dataset(root, ...)` (MSK npz volumes + metadata, the `msk` entries), `get_method_dinov2()` (now 1-channel), and
+output across workers), `create_msk_dataset(root, ...)` (MSK JPEG slices + metadata, the `msk` entries), `get_method_dinov2()` (now 1-channel), and
 `MI_DINOV2_TRANSFORM_ARGS` (small transform sizes for fast end-to-end tests), and
 `dinov2_2d_checkpoint(model)` (a state_dict shaped like an original 2D DINOv2
 checkpoint — `Conv2d` kernel, 37×37 `pos_embed`, no `pos_embed_grid` — verified

@@ -381,6 +381,13 @@ class DINOv2(Method):
         # in unit tests that call on_before_optimizer_step directly).
         self._tokenization_only_active = False
 
+        # The global_step at which on_train_batch_end last updated the teacher, so that
+        # it is updated once per optimizer step (see there). Set for real in
+        # on_train_start, which knows the (possibly resumed) global_step; None (only
+        # before that, e.g. in unit tests that call the hook directly) updates on every
+        # call.
+        self._teacher_updated_at_step: int | None = None
+
     def training_step_impl(self, batch: Batch, batch_idx: int) -> TrainingStepResult:
         # Teacher temperature scheduling
         teacher_temp = linear_warmup_schedule(
@@ -840,19 +847,26 @@ class DINOv2(Method):
         batch: Batch,
         batch_idx: int,
     ) -> None:
-        # Momentum update teacher.
-        momentum = cosine_schedule(
-            step=self.trainer.global_step,
-            max_steps=self.trainer.estimated_stepping_batches,
-            start_value=self.method_args.momentum_start,
-            end_value=self.method_args.momentum_end,
-        )
-        update_momentum(
-            self.student_embedding_model,
-            self.teacher_embedding_model,
-            m=momentum,
-        )
-        update_momentum(self.student_head, self.teacher_head, m=momentum)
+        # Momentum update teacher, once per optimizer step. With gradient accumulation
+        # (k batches per optimizer step), Lightning calls this hook after every batch,
+        # but the student only changes when the optimizer steps, which is also when
+        # global_step increments. Updating on every batch would apply the EMA k times
+        # per step, i.e. with momentum m**k instead of m. Without accumulation,
+        # global_step increments after every batch, so nothing changes.
+        if self.trainer.global_step != self._teacher_updated_at_step:
+            self._teacher_updated_at_step = self.trainer.global_step
+            momentum = cosine_schedule(
+                step=self.trainer.global_step,
+                max_steps=self.trainer.estimated_stepping_batches,
+                start_value=self.method_args.momentum_start,
+                end_value=self.method_args.momentum_end,
+            )
+            update_momentum(
+                self.student_embedding_model,
+                self.teacher_embedding_model,
+                m=momentum,
+            )
+            update_momentum(self.student_head, self.teacher_head, m=momentum)
         super().on_train_batch_end(outputs=outputs, batch=batch, batch_idx=batch_idx)
 
     @staticmethod
@@ -927,3 +941,6 @@ class DINOv2(Method):
             self.trainer.global_step < self.method_args.n_tokenization_only_steps
         )
         self._log_tokenization_only_status()
+        # No optimizer step has happened yet in this run, so the teacher must not be
+        # updated before global_step increments (see on_train_batch_end).
+        self._teacher_updated_at_step = self.trainer.global_step

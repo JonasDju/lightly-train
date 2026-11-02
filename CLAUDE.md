@@ -509,6 +509,18 @@ Gotchas).
   skip the from-scratch step recommendation), so anything placed in `on_fit_start`
   here is silently skipped for DINOv3.1 — another reason the new logging lives in
   `on_train_start`, which DINOv31 does not override.
+- **The teacher EMA runs once per optimizer step, not per batch** (since 2026-11-02, also on `2d_dinov2`).
+  Lightning calls `on_train_batch_end` after every batch, also the batches it only accumulates gradients over, while
+  the student changes only when the optimizer steps. Stock lightly-train updated the teacher there unconditionally,
+  so with `gradient_accumulation_steps: k` the EMA ran `k` times per step (momentum `m**k`, e.g. 0.992 -> 0.968 at
+  `k = 4`). `DINOv2.on_train_batch_end` now updates only when `global_step` changed since its last update
+  (`_teacher_updated_at_step`, set in `on_train_start` for the reason in the previous bullet). With `k = 1` that is
+  every batch with the same momenta, bit-identical to before.
+  `tests/_commands/test_train.py::test_pretrain__teacher_ema_once_per_optimizer_step` compares the momentum
+  sequence with `k = 2, 4` to one batch of `k`x the size. Already correct in stock: the LR scaling gets
+  `batch_size * gradient_accumulation_steps`, and every schedule uses `global_step` / `estimated_stepping_batches`
+  (optimizer steps); `epochs: auto` was fixed in 6f7706b. Still per batch, deliberately untouched: the DINO/iBOT
+  loss centers' EMA (`center_momentum`), which follows micro-batches like a run with the smaller batch size.
 
 ## Testing
 

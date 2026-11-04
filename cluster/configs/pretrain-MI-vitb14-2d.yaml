@@ -27,7 +27,7 @@ data:
   # internal: every internal exam, the eval's val exams included; msk: the musculoskeletal (MSK) data, used iff set
   # in both data_root and data_meta. Extracted by submit_pretrain_dinov2_kneeno.sh (KneeNo/data/prepare_data.py; msk
   # only with MSK_TAR_DIR set there).
-  data_root: {internal: $BEEOND/kneeno_data/internal, msk: null}
+  data_root: {internal: $TMP/kneeno_data/internal, msk: null}
   # Only the internal case folders of the global splits train + unlabeled are pretrained on (KneeNo's
   # pretraining_cases), plus the MSK series a 3D run with the same msk_subset reads; lightly-train searches them
   # recursively for images: every <case>/<series>/<NNN>.jpeg slice is one sample.
@@ -196,7 +196,7 @@ eval:
   verbose: true  # log each task's start and every head epoch's val metrics
   data:
     # internal: global "train" (the heads' train/val) + "val" (the "internal" test set, not pretrained on).
-    data_root: {internal: $BEEOND/kneeno_data/internal}
+    data_root: {internal: $TMP/kneeno_data/internal}
     label_meta: {internal: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_labeled.json}
     test_sets: [internal]  # in-training: never external (that is for the final numbers, not for picking checkpoints)
     series_depth: 24  # slices per volume the encoder sees one by one; also the slice count of the slice tasks

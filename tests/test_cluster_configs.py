@@ -618,8 +618,8 @@ def test_eval_config__matches_pretrain_config(
 
     def without_differences(block: dict[str, Any]) -> dict[str, Any]:
         # Where it logs, which tasks run, and the data setup of a standalone job: the
-        # manifest's split level (one run per level and rep), the external test set too (its paths included), extracted to $TMP
-        # instead of $BEEOND, more workers, and a broken exam raises instead of being
+        # manifest's split level (one run per level and rep), the external test set too (its paths included), extracted to $TMP,
+        # more workers, and a broken exam raises instead of being
         # replaced (the in-training eval must not kill the run). The standalone heads
         # also train longer (max_epochs, warmup_epochs): they are trained once, not
         # every few pretraining epochs. Only the standalone eval compiles the encoder
@@ -764,20 +764,21 @@ def _run_submit_pretrain_script(
     tmp_path: Path, env: dict[str, str | None]
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Runs the pretraining submit script with srun, the venv's python and rm stubbed
-    (it must not delete anything) and BEEOND at ``tmp_path / "beeond"``
-    unless ``env`` sets it (None: unset); returns the calls it made."""
+    (it must not delete anything) and TMP at ``tmp_path / "job_tmp"``
+    unless ``env`` sets it (None: unset); returns the calls it made, srun with its options."""
     repo = tmp_path / "repo"
     calls = tmp_path / "calls.txt"
     bin_dir, venv_bin = tmp_path / "bin", repo / ".venv" / "bin"
     kneeno = tmp_path / "KneeNo" / "data"
-    beeond = tmp_path / "beeond"
-    for directory in (bin_dir, venv_bin, kneeno, repo / "cluster" / "configs", beeond):
+    job_tmp = tmp_path / "job_tmp"
+    for directory in (bin_dir, venv_bin, kneeno, repo / "cluster" / "configs", job_tmp):
         directory.mkdir(parents=True)
     (kneeno / "prepare_data.py").touch()
     (repo / "cluster" / "configs" / "pretrain-MI-vitb14-2d.yaml").touch()
-    # srun's own options (--nodes=1, ...) are dropped.
+    # srun logs its own options (--nodes=1, ...) and runs the rest.
     (bin_dir / "srun").write_text(
-        '#!/bin/bash\nwhile [[ "$1" == --* ]]; do shift; done\nexec "$@"\n'
+        '#!/bin/bash\nopts=()\nwhile [[ "$1" == --* ]]; do opts+=("$1"); shift; done\n'
+        f'echo "srun ${{opts[*]}}" >> {calls}\nexec "$@"\n'
     )
     (venv_bin / "python").write_text(f'#!/bin/bash\necho "python $*" >> {calls}\n')
     (bin_dir / "rm").write_text(f'#!/bin/bash\necho "rm $*" >> {calls}\n')
@@ -787,7 +788,7 @@ def _run_submit_pretrain_script(
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "SLURM_SUBMIT_DIR": str(repo),
         "KNEENO_DIR": str(tmp_path / "KneeNo"),
-        "BEEOND": str(beeond),
+        "TMP": str(job_tmp),
         **env,
     }
     run_env = {k: v for k, v in run_env.items() if v is not None}
@@ -800,16 +801,23 @@ def _run_submit_pretrain_script(
     return result, calls.read_text().splitlines() if calls.exists() else []
 
 
-@pytest.mark.parametrize("beeond", [None, "missing"])
-def test_submit_pretrain_script__needs_beeond(
-    tmp_path: Path, beeond: str | None
-) -> None:
-    """No $BEEOND (no #SBATCH --beeond): the script stops before extracting."""
-    value = None if beeond is None else str(tmp_path / beeond)
-    result, calls = _run_submit_pretrain_script(tmp_path, {"BEEOND": value})
+@pytest.mark.parametrize("job_tmp", [None, "missing"])
+def test_submit_pretrain_script__needs_tmp(tmp_path: Path, job_tmp: str | None) -> None:
+    """No $TMP (the job's node-local scratch): the script stops before extracting."""
+    value = None if job_tmp is None else str(tmp_path / job_tmp)
+    result, calls = _run_submit_pretrain_script(tmp_path, {"TMP": value})
     assert result.returncode != 0
-    assert "BEEOND is not a directory" in result.stderr
+    assert "TMP is not a directory" in result.stderr
     assert calls == []
+
+
+def test_submit_pretrain_script__extracts_once_per_node(tmp_path: Path) -> None:
+    """$TMP is node-local: one extraction task on every node, then training."""
+    result, calls = _run_submit_pretrain_script(tmp_path, {"SLURM_NNODES": "2"})
+    assert result.returncode == 0, result.stderr
+    prepare = calls.index(next(c for c in calls if "prepare_data.py" in c))
+    assert calls[prepare - 1] == "srun --nodes=2 --ntasks=2 --ntasks-per-node=1"
+    assert "pretrain_dinov2_kneeno.py" in calls[-1]
 
 
 def test_submit_pretrain_script__msk_tar_dir(tmp_path: Path) -> None:
@@ -817,9 +825,9 @@ def test_submit_pretrain_script__msk_tar_dir(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     prepare = [call for call in calls if "prepare_data.py" in call]
     assert len(prepare) == 1 and "--msk-tar-dir" not in prepare[0]
-    assert f"--data-root {tmp_path}/beeond/kneeno_data" in prepare[0]
+    assert f"--data-root {tmp_path}/job_tmp/kneeno_data" in prepare[0]
     assert any("pretrain_dinov2_kneeno.py" in call for call in calls)
-    # No cleanup: BeeOND deletes the data when the job ends.
+    # No cleanup: $TMP is deleted when the job ends.
     assert not any(call.startswith("rm ") for call in calls)
 
     msk = tmp_path / "msk_tars"

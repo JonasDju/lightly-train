@@ -187,29 +187,33 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
 
 ## Running on the cluster
 
-- `cluster/submit_pretrain_dinov2_kneeno.sh` (sbatch, 4 GPUs as 4 tasks of 32 CPUs, 24 h, `truhnlab`, `--beeond`; job
+- `cluster/submit_pretrain_dinov2_kneeno.sh` (sbatch, 4 GPUs as 4 tasks of 32 CPUs, 24 h, `truhnlab`; job
   `lightly-2d-dinov2`) extracts the internal
-  dataset to `$BEEOND/kneeno_data/internal` (`KneeNo/data/prepare_data.py --internal-tar-dir`), and the
-  musculoskeletal (MSK) tars to `$BEEOND/kneeno_data/msk` (`--msk-tar-dir`) iff `MSK_TAR_DIR` is set. It then runs
+  dataset to `$TMP/kneeno_data/internal` (`KneeNo/data/prepare_data.py --internal-tar-dir`), and the
+  musculoskeletal (MSK) tars to `$TMP/kneeno_data/msk` (`--msk-tar-dir`) iff `MSK_TAR_DIR` is set. It then runs
   `cluster/pretrain_dinov2_kneeno.py --config <run config>` (default `cluster/configs/pretrain-MI-vitb14-2d.yaml`).
   Env vars: `CONFIG`, `REPO_DIR`, `KNEENO_DIR`, `PG_TIMEOUT_MINUTES`, `MSK_TAR_DIR` (since 2026-11-02; a folder,
   checked up front; set it iff the run config's `data.data_root.msk` is set, pass it with
   `--export=ALL,MSK_TAR_DIR=...`). `tests/test_cluster_configs.py` runs the script with `srun`, the venv's python and
   `rm` stubbed.
-  - **Data on `$BEEOND`** (since 2026-11-02; `/dev/shm` before): `#SBATCH --beeond` gives the job a temporary
-    BeeGFS over the SSDs of all its nodes, one namespace (not per node), at `$BEEOND`. It makes the job exclusive and
-    is deleted when the job ends. The script checks `$BEEOND` before anything runs, and extracts **once per job**
-    (`srun --nodes=1 --ntasks=1`): one extraction per node, as for `/dev/shm`, would race on the same folders. The
-    run config's `data.data_root` and `eval.data.data_root` are `$BEEOND/kneeno_data/...`. No cleanup step
-    (dropped 2026-11-02): BeeOND deletes the data at job end, and an `rm -rf` of millions of files would only
-    cost node time; the submit-script test checks that it calls no `rm`.
+  - **Data on `$TMP`** (since 2026-11-05; `$BEEOND` from 2026-11-02, `/dev/shm` before): the job's folder on each
+    node's local SSD (`/w0`, 1.5 TB), deleted when the job ends. The script extracts **once per node** (`srun
+    --nodes=$SLURM_NNODES --ntasks=$SLURM_NNODES --ntasks-per-node=1`) with `--data-root "$TMP/kneeno_data"` (the
+    job's `$TMP` has the same path on every node), and the run config's `data.data_root` and `eval.data.data_root`
+    are `$TMP/kneeno_data/...`. BeeOND's metadata server starved the loader on millions of small JPEGs
+    (`MA/CLAUDE.md`).
+    - `$TMP` needs a KneeNo whose `prepare_data.py` gives the extracted files fresh timestamps (`FreshTimesTarFile`):
+      the cluster's nightly cleaner (23:00) deletes `$TMP` files whose atime and mtime are both old, and tar-restored
+      ones are (2024). The script checks `$TMP` before anything runs.
+    - No cleanup step: `$TMP` is deleted at job end, and an `rm -rf` of millions of files would only cost node time;
+      the submit-script test checks that it calls no `rm`.
 - **Run config:**
   - `model:` (string);
   - `data:` with exactly `out`, `data_root`, `data_meta` and `msk_subset` (all required; names as on
     `3d_dinov2`). Since 2026-11-02 `data_root` and `data_meta` are mappings `{internal: <path>, msk: <path or
     null>}`, as for KneeNo's `UnlabeledDataset`; `run_config` checks them with `kneeno.pretraining_paths`, so a single
     path fails at load with a migration hint. The shipped config has `msk: null` and `msk_subset: 1.0`.
-    `data_root.internal` (`$BEEOND/kneeno_data/internal`) holds every internal exam, the global `val` ones (the
+    `data_root.internal` (`$TMP/kneeno_data/internal`) holds every internal exam, the global `val` ones (the
     `internal` test set) included, so it is not passed to lightly-train as one folder (it was until 2026-10-14).
     The launcher's `pretraining_dirs` passes `pretrain(data=[...])`:
     - the sorted list of `data_root.internal/<case_id>` for the cases KneeNo's `pretraining_cases` returns for
@@ -266,7 +270,7 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
   check).
   - The sbatch script requests 1 GPU and 1 task (single process: KneeNo evaluates on rank 0 only, there's no
     process group and no `--pg-timeout-minutes`). It extracts the internal and the external data to the job's
-    node-local `$TMP/kneeno_data` (`prepare_data.py`'s default; `$BEEOND` is for pretraining only), then runs
+    node-local `$TMP/kneeno_data` (`prepare_data.py`'s default, as for pretraining), then runs
     `cluster/eval_dinov2_kneeno.py --config <eval config>` (default `cluster/configs/eval-MI-vitb14-2d.yaml`). The
     external data comes from a hard-coded `--external-tar /hpcwork/p0021834/workspace_roman/jonas/uka_gold_nifti.tar`; the eval config's
     `label_meta.external` is `/hpcwork/p0021834/workspace_roman/jonas/metadata/external_labeled.json`. Env vars: `PRETRAIN_JOB_ID` (required) and `TMP`,

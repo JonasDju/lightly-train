@@ -184,7 +184,7 @@ eval:
   cache_features: true  # linear / linear_pool / linear_slice_cls / attentive_slice_cls train on features extracted
                         # once per evaluation instead of re-encoding every head epoch; k-NN always uses the shared
                         # pass. attentive_pool / attentive_slice_pool never cache.
-  extraction_batch_size: 32  # exams -> at most 128 volumes, i.e. 128 * series_depth slices, per encoder forward
+  extraction_batch_size: 12  # exams -> at most 128 volumes, i.e. 128 * series_depth slices, per encoder forward
   split:  # train and val: one split of the split manifest (KneeNo data/make_split_manifest.py); the test sets are used whole
     manifest: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_split_manifest.json
     level: 0.25  # fraction of the internal global "train" split used for train + val (in-training indicator)
@@ -259,6 +259,6 @@ eval:
     max_epochs: 30
     batch_size: 64
     grad_accum_steps: 1  # memory only: the head trains on micro-batches of batch_size / grad_accum_steps exams
-    lr: 0.0005
+    lr: 0.00025
     warmup_epochs: 5
     weight_decay: 0.001

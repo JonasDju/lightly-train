@@ -62,4 +62,10 @@ srun --nodes="${SLURM_NNODES:-1}" --ntasks="${SLURM_NNODES:-1}" --ntasks-per-nod
      ${MSK_ARGS[@]+"${MSK_ARGS[@]}"} --pool-size 16 --data-root "$TMP/kneeno_data"
 
 # --- Training ---------------------------------------------------------------------------------------------
+# lightly-train's image-folder dataset writes its filename list (a memory-mapped file, plus a ref count guarded by a
+# file lock) to this folder, by default ~/.cache/lightly-train/data on NFS. Reason to keep it in $TMP:
+# - The file's name depends only on the output folder, and a resume (resume_interrupted) reuses the file if it
+#   exists. A crashed job leaves it behind, holding absolute paths into that job's $TMP, which is gone by then.
+#   $TMP is per job, so every job writes a fresh list.
+export LIGHTLY_TRAIN_DATA_CACHE_DIR="$TMP/lightly-train-data"
 srun "$PYTHON" cluster/pretrain_dinov2_kneeno.py --config "$CONFIG" --pg-timeout-minutes "$PG_TIMEOUT_MINUTES"

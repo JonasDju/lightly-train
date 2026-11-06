@@ -207,6 +207,17 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
       ones are (2024). The script checks `$TMP` before anything runs.
     - No cleanup step: `$TMP` is deleted at job end, and an `rm -rf` of millions of files would only cost node time;
       the submit-script test checks that it calls no `rm`.
+  - **`LIGHTLY_TRAIN_DATA_CACHE_DIR=$TMP/lightly-train-data`** (exported before training, since 2026-11-06). Stock
+    lightly-train writes the image-folder dataset's filename list (a memory-mapped file, plus a ref count under a
+    `filelock`) to `~/.cache/lightly-train/data`, which is on NFS. Two problems there:
+    - During the cluster's storage trouble (2026-11) every resume died at startup with `OSError: [Errno 37] No locks
+      available` (`flock` → NFS lock service). `3d_dinov2` never takes this lock (it builds `MIDataset` directly).
+    - The file's name is a hash of `data.out` + node rank only, and with `resume_interrupted` an existing one is
+      reused. A crashed job leaves it behind (`SIGKILL`ed ranks never decrement the ref count), holding absolute
+      paths into that job's `$TMP`, which no longer exists.
+
+    In `$TMP` every job writes a fresh list and the lock is on the local disk. Pinned by
+    `test_submit_pretrain_script__data_cache_dir_in_tmp`.
 - **Run config:**
   - `model:` (string);
   - `data:` with exactly `out`, `data_root`, `data_meta` and `msk_subset` (all required; names as on

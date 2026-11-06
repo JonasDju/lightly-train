@@ -780,7 +780,12 @@ def _run_submit_pretrain_script(
         '#!/bin/bash\nopts=()\nwhile [[ "$1" == --* ]]; do opts+=("$1"); shift; done\n'
         f'echo "srun ${{opts[*]}}" >> {calls}\nexec "$@"\n'
     )
-    (venv_bin / "python").write_text(f'#!/bin/bash\necho "python $*" >> {calls}\n')
+    # python also logs the lightly-train data cache dir it sees, one line per call.
+    cache_dirs = tmp_path / "cache_dirs.txt"
+    (venv_bin / "python").write_text(
+        f'#!/bin/bash\necho "python $*" >> {calls}\n'
+        f'echo "${{LIGHTLY_TRAIN_DATA_CACHE_DIR-<unset>}}" >> {cache_dirs}\n'
+    )
     (bin_dir / "rm").write_text(f'#!/bin/bash\necho "rm $*" >> {calls}\n')
     for script in (bin_dir / "srun", venv_bin / "python", bin_dir / "rm"):
         script.chmod(0o755)
@@ -838,6 +843,22 @@ def test_submit_pretrain_script__msk_tar_dir(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     prepare = [call for call in calls if "prepare_data.py" in call]
     assert len(prepare) == 1 and f"--msk-tar-dir {msk} " in prepare[0]
+
+
+def test_submit_pretrain_script__data_cache_dir_in_tmp(tmp_path: Path) -> None:
+    """lightly-train's filename mmap and its file lock go to the job's $TMP, not $HOME
+    (NFS): flock there failed with ENOLCK, and a crashed job's leftover mmap holds paths
+    into its own, deleted $TMP, which a resume would reuse. A value set outside the job
+    is overridden."""
+    result, calls = _run_submit_pretrain_script(
+        tmp_path, {"LIGHTLY_TRAIN_DATA_CACHE_DIR": "/home/someone/.cache/x"}
+    )
+    assert result.returncode == 0, result.stderr
+    cache_dirs = (tmp_path / "cache_dirs.txt").read_text().splitlines()
+    python_calls = [call for call in calls if call.startswith("python ")]
+    assert len(cache_dirs) == len(python_calls) == 2
+    assert "pretrain_dinov2_kneeno.py" in python_calls[1]
+    assert cache_dirs[1] == f"{tmp_path}/job_tmp/lightly-train-data"
 
 
 def test_submit_pretrain_script__missing_msk_tar_dir(tmp_path: Path) -> None:

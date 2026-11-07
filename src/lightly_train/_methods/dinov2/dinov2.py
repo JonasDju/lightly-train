@@ -65,6 +65,21 @@ from lightly_train.types import Batch
 logger = logging.getLogger(__name__)
 
 
+# The teacher momentum is held at least at this value during the backbone warmup if
+# DINOv2Args.backbone_warmup_teacher_momentum is set.
+BACKBONE_WARMUP_TEACHER_MOMENTUM = 0.999
+
+
+def is_backbone_block_group(name: str) -> bool:
+    """Whether a param group (named after its first parameter) holds pretrained
+    backbone parameters: the transformer blocks or the final norm.
+
+    Everything that is neither a projection head nor tokenization. The fusion in
+    utils.get_fused_param_groups keys on both properties, so a group never mixes them.
+    """
+    return "head" not in name and not is_tokenization_param(name)
+
+
 def freeze_eval_module(module: Module) -> None:
     """Freeze the parameters of a module."""
     for param in module.parameters():
@@ -107,7 +122,35 @@ class DINOv2Args(MethodArgs):
     # the high-res adaptation phase to keep the blocks frozen why the interpolated
     # pos-embeds settle. 0 (the default) disables this and trains everything from
     # the start, same as before this option existed.
+    # From the public checkpoints (*-2dinit): e.g. 12500, together with the backbone_*
+    # and tokenization_layerwise_decay settings below and warmup_steps <= this value.
     n_tokenization_only_steps: int = 0
+
+    # Backbone fine-tuning schedule, for pretraining from the public checkpoints
+    # (*-2dinit). "Backbone" here means the pretrained part of the backbone: the
+    # transformer blocks and the final norm, i.e. every backbone parameter that is
+    # not tokenization. The defaults train it like every other layer (no change).
+    #
+    # Multiplies the backbone's learning rate, on top of the layerwise decay: the
+    # global schedule is a from-scratch one (DINOv2's lr 0.004, scaled with the batch
+    # size), which erases pretrained weights; the heads and the tokenization, which
+    # start random, keep it. Suggested for *-2dinit: 0.05 (sweep 0.02 to 0.1).
+    # Applies to fresh runs only: Lightning restores the param groups' learning
+    # rates from the checkpoint, so changing it on a resume has no effect.
+    backbone_lr_multiplier: float = Field(default=1.0, gt=0.0)
+    # Linear warmup of the backbone's learning rate, starting when the blocks
+    # unfreeze (step max(n_tokenization_only_steps, student_freeze_backbone_steps)):
+    # its factor rises from 1/backbone_warmup_steps to 1 over this many steps and
+    # multiplies the global schedule. The global warmup counts from step 0, so
+    # without this the blocks jump from 0 to the global schedule's value at once.
+    # 0 (the default) disables it. Suggested for *-2dinit: 10000 (5000 to 10000).
+    backbone_warmup_steps: int = Field(default=0, ge=0)
+    # Hold the teacher's EMA momentum at least at 0.999 (BACKBONE_WARMUP_TEACHER_MOMENTUM)
+    # during the backbone warmup, for the whole teacher (backbone and heads), so that
+    # the teacher stays an anchor while the blocks start moving. Needs
+    # backbone_warmup_steps > 0. Suggested for *-2dinit: false; try true if the loss
+    # still jumps when the blocks unfreeze.
+    backbone_warmup_teacher_momentum: bool = False
 
     # loss
     dino_loss_weight: float = 1.0
@@ -149,6 +192,14 @@ class DINOv2Args(MethodArgs):
     # lr decay
     layerwise_decay: float = 0.9  # 0.9/1.0 for fast/long setup in original DINOv2
     patch_embed_lr_multiplier: float = 0.2
+    # Whether the tokenization (patch_embed, pos_embed, cls_token, mask_token,
+    # register_tokens) gets the layerwise decay of layer 0, the lowest learning rate
+    # of all (layerwise_decay ** (n_blocks + 1), 0.254 for ViT-B at 0.9). False gives
+    # it no decay, like the final norm; patch_embed_lr_multiplier still applies. The
+    # decay keeps pretrained lower layers close to their weights, but a tokenization
+    # loaded randomly (*-2dinit) is the least trained part of the model. Suggested
+    # for *-2dinit: false. Applies to fresh runs only, like backbone_lr_multiplier.
+    tokenization_layerwise_decay: bool = True
 
     # lr scaling
     lr_scale_method: Literal["linear", "sqrt"] = "sqrt"
@@ -209,6 +260,11 @@ class DINOv2Args(MethodArgs):
             raise ValueError(
                 "activation_memory_budget only applies to compiled regions, set "
                 "compile_blocks=True or compile_heads=True as well."
+            )
+        if self.backbone_warmup_teacher_momentum and self.backbone_warmup_steps == 0:
+            raise ValueError(
+                "backbone_warmup_teacher_momentum holds the teacher momentum during "
+                "the backbone warmup, set backbone_warmup_steps > 0 as well."
             )
         return self
 
@@ -741,6 +797,8 @@ class DINOv2(Method):
             trainable_modules=self.trainable_modules(),
             layerwise_decay=self.method_args.layerwise_decay,
             patch_embed_lr_multiplier=self.method_args.patch_embed_lr_multiplier,
+            tokenization_layerwise_decay=self.method_args.tokenization_layerwise_decay,
+            backbone_lr_multiplier=self.method_args.backbone_lr_multiplier,
         )
 
         if self.trainer.max_epochs is None:
@@ -799,6 +857,7 @@ class DINOv2(Method):
         if self._tokenization_only_active and not tokenization_only_active:
             self._log_tokenization_only_unfrozen()
         self._tokenization_only_active = tokenization_only_active
+        backbone_warmup_factor = self._backbone_warmup_factor(self.trainer.global_step)
 
         updates = []
         for group in optimizer.param_groups:
@@ -829,17 +888,25 @@ class DINOv2(Method):
 
             # Optionally train only the tokenization, freezing the transformer blocks
             # and the final norm.
-            if (
-                tokenization_only_active
-                and "head" not in group["name"]
-                and not is_tokenization_param(group["name"])
-            ):
+            if tokenization_only_active and is_backbone_block_group(group["name"]):
                 update["lr"] = 0.0
+
+            # Optionally warm up the transformer blocks and the final norm from the
+            # step they unfreeze. group["lr"] is the scheduler's value for this step:
+            # LambdaLR sets every group's lr from its base lr on each step, so the
+            # factor never compounds across steps.
+            if (
+                "lr" not in update
+                and backbone_warmup_factor < 1.0
+                and is_backbone_block_group(group["name"])
+            ):
+                update["lr"] = group["lr"] * backbone_warmup_factor
 
             if update:
                 update["name"] = group["name"]
                 updates.append(update)
         update_param_groups(optimizer, updates=updates)
+        self._log_effective_lrs(optimizer)
 
     def on_train_batch_end(
         self,
@@ -861,6 +928,13 @@ class DINOv2(Method):
                 start_value=self.method_args.momentum_start,
                 end_value=self.method_args.momentum_end,
             )
+            # The optimizer step that was just taken is global_step - 1.
+            if (
+                self.method_args.backbone_warmup_teacher_momentum
+                and self._in_backbone_warmup(self.trainer.global_step - 1)
+            ):
+                momentum = max(momentum, BACKBONE_WARMUP_TEACHER_MOMENTUM)
+            self._log_metrics({"teacher_momentum": momentum})
             update_momentum(
                 self.student_embedding_model,
                 self.teacher_embedding_model,
@@ -868,6 +942,57 @@ class DINOv2(Method):
             )
             update_momentum(self.student_head, self.teacher_head, m=momentum)
         super().on_train_batch_end(outputs=outputs, batch=batch, batch_idx=batch_idx)
+
+    def _backbone_warmup_start(self) -> int:
+        """The first step the transformer blocks and the final norm train."""
+        return max(
+            self.method_args.n_tokenization_only_steps,
+            self.method_args.student_freeze_backbone_steps,
+        )
+
+    def _in_backbone_warmup(self, step: int) -> bool:
+        """Whether an optimizer step is one of the backbone_warmup_steps."""
+        start = self._backbone_warmup_start()
+        return start <= step < start + self.method_args.backbone_warmup_steps
+
+    def _backbone_warmup_factor(self, step: int) -> float:
+        """The factor on the blocks' and final norm's lr at an optimizer step.
+
+        Rises linearly from 1/backbone_warmup_steps at the first step they train to 1
+        (cosine_warmup_schedule's step + 1 convention: no step with lr 0). 1.0 when
+        backbone_warmup_steps is 0, and before the blocks train (they are frozen then
+        anyway).
+        """
+        warmup_steps = self.method_args.backbone_warmup_steps
+        start = self._backbone_warmup_start()
+        if warmup_steps == 0 or step < start:
+            return 1.0
+        return min(1.0, (step - start + 1) / warmup_steps)
+
+    def _log_effective_lrs(self, optimizer: Optimizer) -> None:
+        """Log the lr each part of the model trains with in this step.
+
+        After the freezing and the backbone warmup above, which Lightning's
+        LearningRateMonitor does not see: it reads the lrs at the start of the batch,
+        before this hook changes them. The highest lr of each part (the layerwise decay
+        and patch_embed_lr_multiplier only scale it down).
+        """
+        lrs: dict[str, float] = {}
+        for group in optimizer.param_groups:
+            name = group["name"]
+            if "head" in name:
+                key = "lr_effective/head"
+            elif is_tokenization_param(name):
+                key = "lr_effective/tokenization"
+            else:
+                key = "lr_effective/backbone"
+            lrs[key] = max(lrs.get(key, 0.0), float(group["lr"]))
+        self._log_metrics(lrs)
+
+    def _log_metrics(self, metrics: dict[str, float]) -> None:
+        # Metrics only, identical on every rank, so no sync.
+        if metrics:
+            self.log_dict(metrics, on_step=True, on_epoch=False, prog_bar=False)
 
     @staticmethod
     def transform_cls() -> type[DINOv2ViTTransform]:
@@ -908,12 +1033,14 @@ class DINOv2(Method):
                 "transformer blocks and final norm are frozen for "
                 f"{remaining_steps} more step(s), until step "
                 f"{n_tokenization_only_steps} (currently at step {global_step})."
+                + self._backbone_warmup_description()
             )
         else:
             logger.info(
                 "Training all layers, including the transformer blocks and final "
                 "norm (n_tokenization_only_steps="
                 f"{n_tokenization_only_steps}, currently at step {global_step})."
+                + self._backbone_warmup_description()
             )
 
     @rank_zero_only  # type: ignore[misc]
@@ -922,7 +1049,18 @@ class DINOv2(Method):
             "Unfreezing the transformer blocks and final norm at step "
             f"{self.trainer.global_step} (n_tokenization_only_steps="
             f"{self.method_args.n_tokenization_only_steps}). Now training all "
-            "layers."
+            "layers." + self._backbone_warmup_description()
+        )
+
+    def _backbone_warmup_description(self) -> str:
+        warmup_steps = self.method_args.backbone_warmup_steps
+        if warmup_steps == 0:
+            return ""
+        start = self._backbone_warmup_start()
+        return (
+            " The learning rate of the transformer blocks and final norm warms up "
+            f"linearly over steps {start} to {start + warmup_steps - 1} "
+            f"(backbone_warmup_steps={warmup_steps})."
         )
 
     def on_fit_start(self) -> None:

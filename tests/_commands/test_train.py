@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import sys
 from pathlib import Path
@@ -241,6 +242,50 @@ def test_pretrain__teacher_ema_once_per_optimizer_step(
     ]
     assert reference == pytest.approx(expected)
     assert accumulated == reference
+
+
+def test_pretrain__backbone_warmup_logs_effective_lrs(tmp_path: Path) -> None:
+    """End to end with the backbone fine-tuning knobs: training runs (num_workers=2)
+    and the effective lrs and the teacher momentum are logged after the warmup.
+
+    8 series at batch size 4, 4 epochs: 8 steps, logged every 2nd (steps 1, 3, 5, 7).
+    The final norm has no layerwise decay, so the highest backbone lr is the head's
+    lr x backbone_lr_multiplier x the warmup factor (step + 1) / 6.
+    """
+    out = tmp_path / "out"
+    train.pretrain(
+        **_pretrain_kwargs(
+            tmp_path,
+            epochs=4,
+            num_workers=2,
+            method_args={
+                "warmup_steps": 1,
+                "backbone_warmup_steps": 6,
+                "backbone_lr_multiplier": 0.5,
+                "tokenization_layerwise_decay": False,
+                "backbone_warmup_teacher_momentum": True,
+            },
+        )
+    )
+    logged = {}
+    for line in (out / "metrics.jsonl").read_text().splitlines():
+        record = json.loads(line)
+        if "lr_effective/backbone" in record:
+            logged[record["step"]] = record
+    assert sorted(logged) == [1, 3, 5, 7]
+    for step, record in logged.items():
+        factor = min(1.0, (step + 1) / 6)
+        assert record["lr_effective/backbone"] == pytest.approx(
+            record["lr_effective/head"] * 0.5 * factor, rel=1e-5
+        )
+        # No layerwise decay on the tokenization: its highest lr is the head's.
+        assert record["lr_effective/tokenization"] == pytest.approx(
+            record["lr_effective/head"], rel=1e-5
+        )
+    # Held at >= 0.999 during the warmup, the schedule's end value at the end.
+    assert logged[1]["teacher_momentum"] == pytest.approx(0.999, rel=1e-6)
+    assert logged[3]["teacher_momentum"] == pytest.approx(0.999, rel=1e-6)
+    assert logged[7]["teacher_momentum"] == pytest.approx(1.0)
 
 
 def test_pretrain__resume_interrupted(

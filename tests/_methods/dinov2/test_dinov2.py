@@ -17,6 +17,7 @@ from typing import Any, Literal
 import pytest
 import torch
 import torch._dynamo
+from lightly.utils.scheduler import cosine_schedule
 from pydantic import ValidationError
 from pytest_mock import MockerFixture
 from torch import Size
@@ -24,11 +25,14 @@ from torch._dynamo.utils import counters
 
 from lightly_train._methods.dinov2 import dinov2 as dinov2_module
 from lightly_train._methods.dinov2.dinov2 import (
+    BACKBONE_WARMUP_TEACHER_MOMENTUM,
     DINOv2,
     DINOv2AdamWViTArgs,
     DINOv2Args,
+    is_backbone_block_group,
 )
 from lightly_train._methods.dinov2.utils import is_tokenization_param
+from lightly_train._methods.method import Method
 from lightly_train._models.dinov2_vit.dinov2_vit import DINOv2ViTModelWrapper
 from lightly_train._models.dinov2_vit.dinov2_vit_src.layers.attention import (
     SDPAttention,
@@ -504,6 +508,171 @@ class TestDINOv2:
         assert "Unfreezing the transformer blocks" not in caplog.text
 
 
+class TestBackboneWarmup:
+    """backbone_warmup_steps, backbone_lr_multiplier (through the optimizer) and
+    backbone_warmup_teacher_momentum, driven through the real hooks with a mocked
+    trainer."""
+
+    def _setup(
+        self, mocker: MockerFixture, **kwargs: Any
+    ) -> tuple[DINOv2, Any, Any, Any]:
+        emb_model = EmbeddingModel(wrapped_model=dummy_dinov2_vit_model())
+        # student_freeze_last_layer_steps would freeze the last layers independently.
+        kwargs.setdefault("student_freeze_last_layer_steps", 0)
+        dinov2_args = DINOv2Args(warmup_steps=3, **kwargs)
+        dinov2 = setup_dinov2_helper(dinov2_args, mocker, emb_model, batch_size=16)
+        trainer_mock = mocker.Mock()
+        trainer_mock.global_step = 0
+        trainer_mock.max_epochs = 1
+        trainer_mock.estimated_stepping_batches = 100
+        dinov2.trainer = trainer_mock
+        mocker.patch.object(dinov2, "log_dict")
+        optim_scheduler = dinov2.configure_optimizers()
+        optim = optim_scheduler[0][0]  # type: ignore[index, literal-required]
+        scheduler = optim_scheduler[1][0]["scheduler"]  # type: ignore[index, literal-required]
+        return dinov2, trainer_mock, optim, scheduler
+
+    def _run_steps(
+        self, dinov2: DINOv2, trainer_mock: Any, optim: Any, scheduler: Any, n: int
+    ) -> list[list[float]]:
+        """The lr of every group in each step, as Lightning runs them: the hook,
+        then optimizer.step() (no gradients, so a no-op), then scheduler.step()."""
+        lrs = []
+        for step in range(n):
+            trainer_mock.global_step = step
+            dinov2.on_before_optimizer_step(optim)
+            lrs.append([group["lr"] for group in optim.param_groups])
+            optim.step()
+            scheduler.step()
+        return lrs
+
+    @pytest.mark.parametrize(
+        "kwargs, expected_factor",
+        [
+            # Tokenization-only phase: frozen before step 10, then 1/4, 2/4, 3/4, 1.
+            (
+                {"n_tokenization_only_steps": 10, "backbone_warmup_steps": 4},
+                lambda s: 0.0 if s < 10 else min(1.0, (s - 9) / 4),
+            ),
+            # Starts at the later of the two freezes.
+            (
+                {
+                    "n_tokenization_only_steps": 3,
+                    "student_freeze_backbone_steps": 5,
+                    "backbone_warmup_steps": 2,
+                },
+                lambda s: 0.0 if s < 5 else min(1.0, (s - 4) / 2),
+            ),
+            # No freeze: from step 0, on top of the global warmup.
+            ({"backbone_warmup_steps": 4}, lambda s: min(1.0, (s + 1) / 4)),
+            # Default: no warmup, the global schedule.
+            ({"n_tokenization_only_steps": 10}, lambda s: 0.0 if s < 10 else 1.0),
+        ],
+    )
+    def test_backbone_lr(
+        self, mocker: MockerFixture, kwargs: dict[str, Any], expected_factor: Any
+    ) -> None:
+        dinov2, trainer_mock, optim, scheduler = self._setup(mocker, **kwargs)
+        base_lrs = list(scheduler.base_lrs)
+        lr_lambda = scheduler.lr_lambdas[0]
+        freeze_backbone_steps = kwargs.get("student_freeze_backbone_steps", 0)
+        lrs = self._run_steps(dinov2, trainer_mock, optim, scheduler, n=20)
+        for step, step_lrs in enumerate(lrs):
+            for group, base_lr, lr in zip(optim.param_groups, base_lrs, step_lrs):
+                scheduled = base_lr * lr_lambda(step)
+                name = group["name"]
+                if is_backbone_block_group(name):
+                    expected = scheduled * expected_factor(step)
+                elif "head" not in name and step < freeze_backbone_steps:
+                    expected = 0.0  # tokenization under student_freeze_backbone_steps
+                else:
+                    expected = scheduled
+                assert lr == pytest.approx(expected, rel=1e-12, abs=0.0), (step, name)
+
+    def test_backbone_warmup_off__lrs_unchanged(self, mocker: MockerFixture) -> None:
+        """backbone_warmup_steps=0 leaves every lr exactly at the scheduler's value."""
+        dinov2, trainer_mock, optim, scheduler = self._setup(mocker)
+        base_lrs = list(scheduler.base_lrs)
+        lr_lambda = scheduler.lr_lambdas[0]
+        lrs = self._run_steps(dinov2, trainer_mock, optim, scheduler, n=10)
+        for step, step_lrs in enumerate(lrs):
+            assert step_lrs == [base_lr * lr_lambda(step) for base_lr in base_lrs]
+
+    def test_logs_effective_lrs(self, mocker: MockerFixture) -> None:
+        """The highest lr of each part in each step, after the freeze and warmup."""
+        dinov2, trainer_mock, optim, scheduler = self._setup(
+            mocker, n_tokenization_only_steps=10, backbone_warmup_steps=4
+        )
+        lrs = self._run_steps(dinov2, trainer_mock, optim, scheduler, n=12)
+        calls = dinov2.log_dict.call_args_list  # type: ignore[attr-defined]
+        assert len(calls) == len(lrs)
+        names = [group["name"] for group in optim.param_groups]
+        for step, (step_lrs, call) in enumerate(zip(lrs, calls)):
+
+            def highest(select: Any) -> float:
+                return max(lr for n, lr in zip(names, step_lrs) if select(n))
+
+            assert call.args[0] == {
+                "lr_effective/backbone": highest(is_backbone_block_group),
+                "lr_effective/tokenization": highest(is_tokenization_param),
+                "lr_effective/head": highest(lambda n: "head" in n),
+            }
+            assert (call.args[0]["lr_effective/backbone"] > 0.0) == (step >= 10)
+
+    @pytest.mark.parametrize("hold", [True, False])
+    def test_teacher_momentum(self, mocker: MockerFixture, hold: bool) -> None:
+        """Held at 0.999 for the teacher updates after optimizer steps 10 to 13 (the
+        warmup), the scheduled momentum otherwise or with the switch off."""
+        dinov2, trainer_mock, _, _ = self._setup(
+            mocker,
+            n_tokenization_only_steps=10,
+            backbone_warmup_steps=4,
+            backbone_warmup_teacher_momentum=hold,
+        )
+        update_momentum_mock = mocker.patch.object(dinov2_module, "update_momentum")
+        mocker.patch.object(Method, "on_train_batch_end")
+        for global_step in range(1, 20):
+            trainer_mock.global_step = global_step
+            update_momentum_mock.reset_mock()
+            dinov2.on_train_batch_end(outputs=None, batch=mocker.Mock(), batch_idx=0)
+            momenta = {c.kwargs["m"] for c in update_momentum_mock.call_args_list}
+            scheduled = cosine_schedule(
+                step=global_step,
+                max_steps=100,
+                start_value=dinov2.method_args.momentum_start,
+                end_value=dinov2.method_args.momentum_end,
+            )
+            in_warmup = 10 <= global_step - 1 < 14
+            expected = (
+                BACKBONE_WARMUP_TEACHER_MOMENTUM if hold and in_warmup else scheduled
+            )
+            assert momenta == {expected}, global_step
+            dinov2.log_dict.assert_called_with(  # type: ignore[attr-defined]
+                {"teacher_momentum": expected},
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+            )
+
+    def test_teacher_momentum_without_warmup__raises(self) -> None:
+        with pytest.raises(ValidationError, match="backbone_warmup_steps > 0"):
+            DINOv2Args(backbone_warmup_teacher_momentum=True)
+        DINOv2Args(backbone_warmup_teacher_momentum=True, backbone_warmup_steps=1)
+
+    def test_unfreeze_log_mentions_warmup(
+        self, mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        dinov2, trainer_mock, optim, _ = self._setup(
+            mocker, n_tokenization_only_steps=10, backbone_warmup_steps=4
+        )
+        dinov2.on_train_start()
+        trainer_mock.global_step = 10
+        with caplog.at_level(logging.INFO):
+            dinov2.on_before_optimizer_step(optim)
+        assert "Unfreezing the transformer blocks" in caplog.text
+        assert "warms up linearly over steps 10 to 13" in caplog.text
+
+
 def _compile_test_model() -> EmbeddingModel:
     """Small, but with the block layout of the shipped dinov2/vitb14-notpretrained: unchunked blocks, the same
     drop path rate in every block (drop_path_uniform), registers, LayerScale."""
@@ -925,6 +1094,8 @@ class TestIBOTLossChunking:
             {"ibot_loss_chunk_size": 0},
             {"activation_memory_budget": 0.0},
             {"activation_memory_budget": 1.5},
+            {"backbone_lr_multiplier": 0.0},
+            {"backbone_warmup_steps": -1},
         ],
     )
     def test_args__out_of_range(self, kwargs: dict[str, Any]) -> None:

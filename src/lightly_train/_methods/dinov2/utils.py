@@ -217,6 +217,7 @@ def get_vit_lr_decay_rate(
     lr_decay_rate: float,
     num_layers: int = 12,
     chunked_blocks: bool = False,
+    tokenization_layerwise_decay: bool = True,
 ) -> float:
     """
     Calculate lr decay rate for different ViT blocks.
@@ -225,12 +226,17 @@ def get_vit_lr_decay_rate(
         lr_decay_rate (float): base lr decay rate.
         num_layers (int): number of ViT blocks.
         chunked_blocks (bool): if the blocks are chunked.
+        tokenization_layerwise_decay (bool): if False, the tokenization parameters
+            (is_tokenization_param) get no decay (rate 1.0, like the final norm)
+            instead of the rate of layer 0, the lowest of all.
     Returns:
         float: lr decay rate for the given parameter.
     """
 
     layer_id = num_layers + 1
     if is_tokenization_param(name):
+        if not tokenization_layerwise_decay:
+            return 1.0
         layer_id = 0
     elif ".blocks." in name and ".residual." not in name:
         layer_id = int(name[name.find(".blocks.") :].split(".")[2]) + 1
@@ -247,6 +253,8 @@ def get_optimizer_with_decay(
     trainable_modules: TrainableModules,
     layerwise_decay: float,
     patch_embed_lr_multiplier: float,
+    tokenization_layerwise_decay: bool = True,
+    backbone_lr_multiplier: float = 1.0,
 ) -> Optimizer:
     """
     Create an optimizer with layerwise learning rate decay and weight decay for different ViT blocks.
@@ -256,6 +264,12 @@ def get_optimizer_with_decay(
         trainable_modules (TrainableModules): trainable modules.
         layerwise_decay (float): base lr decay rate.
         patch_embed_lr_multiplier (float): multiplier for patch embedding layer.
+        tokenization_layerwise_decay (bool): whether the tokenization parameters get
+            the layerwise decay of layer 0 (True) or none (False), see
+            get_vit_lr_decay_rate.
+        backbone_lr_multiplier (float): multiplier for the backbone parameters that
+            are not tokenization (the transformer blocks and the final norm), on top
+            of the layerwise decay.
     Returns:
         Optimizer: optimizer with decay.
     """
@@ -281,7 +295,10 @@ def get_optimizer_with_decay(
                     lr_decay_rate=layerwise_decay,
                     num_layers=module.n_blocks,
                     chunked_blocks=module.chunked_blocks,
+                    tokenization_layerwise_decay=tokenization_layerwise_decay,
                 )
+                if not is_tokenization_param(name):
+                    decay_rate *= backbone_lr_multiplier
             d = {
                 "name": name,
                 "params": [param],

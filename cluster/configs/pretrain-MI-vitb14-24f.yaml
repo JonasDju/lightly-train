@@ -47,7 +47,17 @@ method:
   batch_norm: false
   student_freeze_last_layer_steps: 1250
   student_freeze_backbone_steps: 0
-  n_tokenization_only_steps: 0
+  # Pretraining from the public 2D DINOv2 checkpoints (model: dinov2/vit*-2dinit): the blocks are pretrained, the
+  # tokenization and the heads are random. With the defaults below, the blocks unfreeze into the from-scratch
+  # global schedule at once (0 -> ~3e-3 at batch 3072); a run that did this collapsed (DINO losses at ln(65536)).
+  # Suggested (comments on each key): train the tokenization + heads alone first, then warm the blocks up from the
+  # unfreeze to a fine-tuning lr, and keep warmup_steps <= n_tokenization_only_steps (e.g. 2500), so the global
+  # schedule is nearly flat over the frozen phase. backbone_lr_multiplier and tokenization_layerwise_decay apply to
+  # fresh runs only: a resume restores the param groups' lrs from the checkpoint.
+  n_tokenization_only_steps: 0  # *-2dinit: 12500
+  backbone_lr_multiplier: 1.0  # *-2dinit: 0.05 (sweep 0.02 to 0.1); blocks + final norm, on top of layerwise decay
+  backbone_warmup_steps: 0  # *-2dinit: 10000 (5000 to 10000); linear, from the step the blocks unfreeze
+  backbone_warmup_teacher_momentum: false  # *-2dinit: false; true holds the teacher momentum >= 0.999 during it
   dino_loss_weight: 1.0
   ibot_loss_weight: 1.0
   koleo_loss_weight: 0.1
@@ -64,9 +74,10 @@ method:
   mask_ratio_max: 0.5
   mask_probability: 0.5
   min_lr: 1.0e-06
-  warmup_steps: 12500
+  warmup_steps: 12500  # *-2dinit: <= n_tokenization_only_steps, e.g. 2500
   layerwise_decay: 0.9
   patch_embed_lr_multiplier: 0.2
+  tokenization_layerwise_decay: true  # *-2dinit: false (random tokenization: no layer-0 decay, 0.254x at ViT-B)
   weight_decay_start: auto
   weight_decay_end: 0.4
   gradient_clip_val: 3.0

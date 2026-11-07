@@ -286,6 +286,35 @@ Gotchas).
   `on_before_optimizer_step` logs once more when the blocks actually unfreeze. Both
   compare against `self.trainer.global_step` — see the gotcha below for why the
   status log has to live in `on_train_start`, not `on_fit_start`.
+- **Backbone fine-tuning knobs for `*-2dinit` runs** (since 2026-11-07, `DINOv2Args`; every default reproduces
+  the code before). A 2dinit run with `n_tokenization_only_steps: 12500` at batch 3072 collapsed when the blocks
+  unfroze: both DINO cross-entropies sat at ln(65536) (logged global × 18/2, local × 18/16, with 2 + 16 crop pairs).
+  The global schedule counts its warmup from step 0, so the blocks jumped from lr 0 to ~3e-3, DINOv2's
+  from-scratch lr. "Backbone" below means the blocks + final `norm`: `dinov2.is_backbone_block_group`, neither head
+  nor `is_tokenization_param`, the same selector as the tokenization freeze.
+  - `backbone_lr_multiplier` (1.0): baked into those groups' initial lr in `get_optimizer_with_decay`, on top of
+    layerwise decay.
+  - `tokenization_layerwise_decay` (true): false gives the tokenization decay rate 1.0 instead of layer 0's
+    (`get_vit_lr_decay_rate`); `patch_embed_lr_multiplier` still applies.
+  - `backbone_warmup_steps` (0): in `on_before_optimizer_step`, the backbone groups' lr is multiplied by
+    `min(1, (step - start + 1) / W)`, with `start = max(n_tokenization_only_steps, student_freeze_backbone_steps)`.
+    It doesn't compound because `LambdaLR` resets every group's lr from its base lr on each `scheduler.step()`. A
+    unit test that calls the hook twice without a scheduler step in between sees the previous step's lr.
+  - `backbone_warmup_teacher_momentum` (false; needs `W > 0`, validator): `on_train_batch_end` uses
+    `max(momentum, 0.999)` (`BACKBONE_WARMUP_TEACHER_MOMENTUM`) for whole-teacher updates after the optimizer steps
+    `start ≤ global_step - 1 < start + W`.
+  - **Logged:** `lr_effective/{backbone,tokenization,head}` (the highest lr of each part, after freeze and warmup)
+    and `teacher_momentum`, every step. Lightning's `lr-AdamW/*` are read at batch start, before the hook zeroes
+    or ramps them, so they never show the freeze or the warmup.
+  - **Fresh runs only** for `backbone_lr_multiplier` and `tokenization_layerwise_decay`: a resume restores the param
+    groups' lrs from the checkpoint (changed values are silently ignored, or the load fails if the group fusion
+    changed).
+  - Suggested 2dinit values are in the comments (`DINOv2Args`, `cluster/configs/pretrain-MI-vitb14-24f.yaml`):
+    `n_tokenization_only_steps: 12500`, `warmup_steps` ≤ that (e.g. 2500), `tokenization_layerwise_decay: false`,
+    `backbone_lr_multiplier: 0.05` (sweep 0.02–0.1), `backbone_warmup_steps: 10000`, the momentum switch only if
+    the loss still jumps at the unfreeze. Not run on the cluster yet.
+  - Tests: `TestBackboneWarmup` (`test_dinov2.py`), the lr tests at the end of `test_utils.py`,
+    `test_pretrain__backbone_warmup_logs_effective_lrs` (`test_train.py`).
 - `DINOv2Args.ibotpp` (`None` default / `"all"` / `"masked"`) — iBOT++ from TIPSv2: iBOT's patch loss
   without the mask indicator, so visible tokens are supervised too. Only the **loss token selection**
   changes (`utils.ibotpp_loss_mask` → `mask_indices_and_weights`, the same index/weight formulas

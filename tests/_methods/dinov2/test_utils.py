@@ -24,6 +24,9 @@ from lightly_train._methods.dinov2.utils import (
     is_tokenization_param,
     mask_indices_and_weights,
 )
+from lightly_train._models.dinov2_vit.dinov2_vit_src.models.vision_transformer import (
+    DinoVisionTransformer,
+)
 from lightly_train._optim.trainable_modules import TrainableModules
 
 from ... import helpers
@@ -460,9 +463,10 @@ def test_is_tokenization_param(name: str, expected: bool) -> None:
     assert is_tokenization_param(name) is expected
 
 
+@pytest.mark.parametrize("tokenization_layerwise_decay", [True, False])
 @pytest.mark.parametrize("layerwise_decay", [0.9, 1.0])
 def test_get_fused_param_groups__never_mixes_tokenization(
-    layerwise_decay: float,
+    layerwise_decay: float, tokenization_layerwise_decay: bool
 ) -> None:
     """Regression test: with layerwise_decay=1.0 every layer gets the same lr, so
     without the "tokenization" fusion key, pos_embed/cls_token/mask_token fuse into
@@ -479,6 +483,7 @@ def test_get_fused_param_groups__never_mixes_tokenization(
         trainable_modules=TrainableModules(modules=[vit]),
         layerwise_decay=layerwise_decay,
         patch_embed_lr_multiplier=0.2,
+        tokenization_layerwise_decay=tokenization_layerwise_decay,
     )
 
     for group in optim.param_groups:
@@ -488,3 +493,105 @@ def test_get_fused_param_groups__never_mixes_tokenization(
             f"Group '{group['name']}' mixes tokenization and non-tokenization "
             f"params: {names}"
         )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pos_embed",
+        "cls_token",
+        "mask_token",
+        "register_tokens",
+        "patch_embed.proj.weight",
+    ],
+)
+def test_get_vit_lr_decay_rate__tokenization_layerwise_decay(name: str) -> None:
+    """The tokenization gets layer 0's rate by default and no decay with the flag off."""
+    assert utils.get_vit_lr_decay_rate(
+        name=name, lr_decay_rate=0.9, num_layers=12
+    ) == pytest.approx(0.9**13)
+    assert (
+        utils.get_vit_lr_decay_rate(
+            name=name,
+            lr_decay_rate=0.9,
+            num_layers=12,
+            tokenization_layerwise_decay=False,
+        )
+        == 1.0
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["blocks.0.attn.qkv.weight", "blocks.11.mlp.fc1.bias", "norm.weight"]
+)
+def test_get_vit_lr_decay_rate__tokenization_flag_keeps_blocks(name: str) -> None:
+    for flag in (True, False):
+        assert utils.get_vit_lr_decay_rate(
+            name=name,
+            lr_decay_rate=0.9,
+            num_layers=12,
+            tokenization_layerwise_decay=flag,
+        ) == utils.get_vit_lr_decay_rate(name=name, lr_decay_rate=0.9, num_layers=12)
+
+
+def _lr_per_param(**kwargs: object) -> tuple[dict[str, float], int]:
+    """The lr of every trainable parameter by name (heads prefixed with "head."), and
+    the number of blocks, for a fresh DINOv2 method."""
+    dinov2 = helpers.get_method_dinov2()
+    trainable_modules = dinov2.trainable_modules()
+    optim = utils.get_optimizer_with_decay(
+        optim_args=DINOv2AdamWViTArgs(),
+        trainable_modules=trainable_modules,
+        layerwise_decay=0.9,
+        patch_embed_lr_multiplier=0.2,
+        **kwargs,  # type: ignore[arg-type]
+    )
+    names = {}
+    n_blocks = 0
+    for module in trainable_modules.modules:
+        prefix = "head."
+        if isinstance(module, DinoVisionTransformer):
+            n_blocks = module.n_blocks
+            prefix = ""
+        names.update({p: prefix + n for n, p in module.named_parameters()})
+    lrs = {
+        names[p]: group["lr"] for group in optim.param_groups for p in group["params"]
+    }
+    return lrs, n_blocks
+
+
+def test_get_optimizer_with_decay__defaults_unchanged() -> None:
+    """The new arguments' defaults give exactly the lrs of calling without them."""
+    assert _lr_per_param() == _lr_per_param(
+        tokenization_layerwise_decay=True, backbone_lr_multiplier=1.0
+    )
+
+
+def test_get_optimizer_with_decay__backbone_lr_multiplier_and_tokenization_decay() -> (
+    None
+):
+    """backbone_lr_multiplier scales the blocks and the final norm only;
+    tokenization_layerwise_decay=False lifts the tokenization by layer 0's decay
+    (patch_embed keeps its multiplier); the heads are untouched."""
+    default, n_blocks = _lr_per_param()
+    changed, _ = _lr_per_param(
+        tokenization_layerwise_decay=False, backbone_lr_multiplier=0.05
+    )
+    assert n_blocks > 0
+    assert default.keys() == changed.keys()
+    seen = set()
+    for name, lr in default.items():
+        if name.startswith("head."):
+            expected, kind = lr, "head"
+        elif is_tokenization_param(name):
+            expected, kind = lr / 0.9 ** (n_blocks + 1), "tokenization"
+        else:
+            expected, kind = lr * 0.05, "backbone"
+        seen.add(kind)
+        assert changed[name] == pytest.approx(expected, rel=1e-12), name
+    assert seen == {"head", "tokenization", "backbone"}
+    assert changed["norm.weight"] == pytest.approx(default["norm.weight"] * 0.05)
+    # patch_embed: no decay any more, but still its multiplier.
+    assert changed["patch_embed.proj.weight"] == pytest.approx(
+        DINOv2AdamWViTArgs().lr * 0.2
+    )

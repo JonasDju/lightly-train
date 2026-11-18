@@ -928,6 +928,30 @@ check).
   (`eval-<name>.yaml` <-> `pretrain-<name>.yaml`). Until 2026-10-14 that test did not allow the deliberate
   `abort_on_io_error` difference and failed.
 
+## Tools
+
+`tools/transform_viewer.py` (since 2026-11-18; not part of the package) is an interactive matplotlib viewer of the
+training augmentations on one series:
+`.venv/bin/python tools/transform_viewer.py <data_root>/<case>/<series> <augmentation> --spacing H W D`.
+- **The real code throughout.** `MIDataset` reads the series (KneeNo reader, `series_depth` resampling, `data_spacing`
+  from `--spacing` through a temporary metadata file), and `DINOv2ViTTransform` comes from a run config's `transform:`
+  block via `train_helpers.get_transform_args` / `get_transform` (default `cluster/configs/pretrain-MI-vitb14-24f.yaml`,
+  also its `data.series_depth` / `resample_mode`).
+- **What differs from training.** Only the tested augmentation is on (`prob = 1`; blur/sharpen keep their
+  `local_view` block for the local view). Only global view 0 and one local view run. The crop is `CenterCrop3D`: the
+  training crop's subclass with centred placement and no aspect jitter. Its scale slider is the crop's volume
+  fraction (`random_resize`'s quantity). Resampling and the view-spacing tag are the real crop's.
+- **What it shows.** The series with both crops boxed, and both views. Images use the physical aspect from the voxel
+  spacing. The titles show the view spacing, `scale_z` and what the augmentation drew.
+- **Controls.** Sliders for every numeric field of the tested augmentation's config block(s). Radio groups for
+  `resize_interpolation` / `resize_upscale_interpolation` (in-plane and depth separately, "off" = `null`) and the
+  rotation's `interpolation`. An invalid value is reported in the title, and the last good rendering is kept.
+- **Tests:** `tests/tools/test_transform_viewer.py` (headless, Agg). The key one,
+  `test_render__equals_training_with_the_same_crops`, builds the training transform independently, forces its crops to
+  the viewer's crop parameters and requires bit-identical views, over augmentations, crop scales (incl. enlarging
+  ones) and interpolations. Dropping any of the crop settings `CenterCrop3D` copies (interpolation, upscale
+  interpolation, output dtype) fails it.
+
 ## Open risks / known follow-ups (not yet done, not blocking)
 
 - **Eval now uses the real labeled datasets** (`KneeNo/kneeno/evaluation/dataset.py::KneeNoEvalDataset`, built

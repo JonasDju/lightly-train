@@ -36,6 +36,13 @@ config uses `1`, which is bit-identical to stock.
   (they use `global_step` / `estimated_stepping_batches`, both in optimizer steps). Still per batch: the DINO/iBOT
   loss centers' EMA (`center_momentum`), which follows micro-batches, like a run with the smaller batch size.
 
+**Deliberate deviation: training length and batch size (2026-11-18).** `DINOv2Args.default_steps` is 200,000
+instead of lightly-train's 125,000, which `epochs: auto` converts to epochs. The shipped config trains at
+`batch_size: 512` (global) instead of `pretrain`'s default of 128. Neither lightly-train value is DINOv2's own:
+official DINOv2 trains at batch 3072, and 128 is lightly-train's arbitrary choice. `test_run_config__stock_defaults`
+exempts `batch_size`. `default_steps` needs no exemption, because the test compares against `DINOv2Args` at runtime.
+`3d_dinov2` has the same 200k default and 512 samples per optimizer step (256 × 2 accumulation steps).
+
 **Current status (2026-10-08):** the KneeNo in-training eval is wired in, with a slice-wise adapter that hands
 KneeNo the per-slice tokens, so KneeNo's 2D-only slice tasks run too (see below). `cluster/` holds SLURM scripts,
 launchers and configs for pretraining and for the standalone evaluation. Pretraining and the standalone eval run
@@ -266,9 +273,10 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     private `_should_skip_saving_checkpoint` / `_save_last_checkpoint`; `tests/_callbacks/test_checkpoint.py`
     pins the behaviour (recheck it after a Lightning upgrade). A timeout still loses up to one epoch.
   - Loaded by `cluster/run_config.py::load_run_config`, which expands env vars and rejects unknown keys.
-- **The shipped config lists every train/method/transform key at its stock default.** Unlike `3d_dinov2`, that
-  includes `num_channels: auto` (3 channels: the grayscale JPEGs are loaded as RGB). `tests/test_cluster_configs.py`
-  pins equality with the defaults, so a deliberate deviation needs that test changed too.
+- **The shipped config lists every train/method/transform key at its stock default**, except `batch_size: 512`
+  (see "training length and batch size" above). Unlike `3d_dinov2`, that includes `num_channels: auto` (3
+  channels: the grayscale JPEGs are loaded as RGB). `tests/test_cluster_configs.py` pins equality with the
+  defaults, so a deliberate deviation needs that test changed too.
 - The `eval:` block is copied from `3d_dinov2`, except `per_label_dir` (follows this config's `data.out`),
   `linear.pooling` and the three slice tasks. `linear_slice_cls` / `attentive_slice_cls` run every 5 epochs
   (they train on the cached slice cls tokens); `attentive_slice_pool` is `null` like `attentive_pool`.

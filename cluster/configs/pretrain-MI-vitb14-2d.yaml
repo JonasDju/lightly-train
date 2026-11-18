@@ -35,8 +35,8 @@ data:
   msk_subset: 1.0  # seeded subsample of the MSK series only (a fraction in (0, 1] or a count > 1)
 
 train:
-  epochs: auto  # auto -> DINOv2's default of 125k steps, converted to epochs
-  batch_size: 128  # GLOBAL batch size, split across all GPUs of all nodes
+  epochs: auto  # auto -> default of 200k steps, converted to epochs
+  batch_size: 512  # GLOBAL batch size, split across all GPUs of all nodes
   gradient_accumulation_steps: 1
   num_workers: auto  # auto -> cpus-per-task - 1, per rank
   precision: auto

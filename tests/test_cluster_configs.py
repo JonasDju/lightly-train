@@ -96,11 +96,18 @@ def test_run_config__valid(path: Path) -> None:
 @pytest.mark.parametrize("path", RUN_CONFIGS, ids=lambda p: p.name)
 def test_run_config__stock_defaults(path: Path) -> None:
     # The 2D baseline trains with stock lightly-train: the train, method and transform
-    # blocks list every key, each at its default.
+    # blocks list every key, each at its default, except the deliberate deviations
+    # below (see CLAUDE.md).
     config = load_run_config(path)
     defaults = inspect.signature(lightly_train.pretrain).parameters
-    assert config["train"] == {
-        key: defaults[key].default for key in run_config.TRAIN_KEYS
+    # batch_size: pretrain's default of 128 is lightly-train's choice, not DINOv2's
+    # (official DINOv2 trains at 3072), so neither value is "stock"; the run uses 512.
+    deviations = {"batch_size"}
+    assert config["train"].keys() == set(run_config.TRAIN_KEYS)
+    assert {k: v for k, v in config["train"].items() if k not in deviations} == {
+        key: defaults[key].default
+        for key in run_config.TRAIN_KEYS
+        if key not in deviations
     }
     assert config["method"] == DINOv2Args().model_dump(mode="json")
     assert config["transform"] == DINOv2ViTTransformArgs().model_dump(mode="json")

@@ -73,7 +73,7 @@ class DINOv2Args(MethodArgs):
     See: https://github.com/facebookresearch/dinov2/tree/main?tab=readme-ov-file#training
     """
 
-    default_steps: ClassVar[int | None] = 125_000
+    default_steps: ClassVar[int | None] = 200_000
     default_epochs: ClassVar[int | None] = None
 
     # projection head

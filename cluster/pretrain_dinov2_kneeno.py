@@ -130,7 +130,7 @@ def pretraining_dirs(data_root: dict[str, str | None], data_meta: dict[str, str 
     # Metadata only, no volume is loaded. Raises if msk is set in only one mapping, if a folder is missing, or if an
     # MSK case id is an internal one.
     msk = UnlabeledDataset(data_root, data_meta, msk_subset=msk_subset).parts["msk"]
-    series = [f"{case_id}/{series_name}" for case_id, series_name, _ in msk.samples]
+    series = [f"{case_id}/{series_name}" for case_id, series_name, *_ in msk.samples]
     print(
         f"Pretraining on {len(series):,} MSK series in '{data_root['msk']}' (msk_subset={msk_subset}); sha256 of "
         f"the sorted <case>/<series> ids: {split_hash(series)}.",

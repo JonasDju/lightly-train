@@ -520,7 +520,7 @@ def test_main__msk_subset_selects_the_3d_runs_series(
         data["data_root"], data["data_meta"], msk_subset=0.5
     ).parts["msk"]
     assert kwargs["data"][3:] == [
-        str(tmp_path / "msk" / case / series) for case, series, _ in expected.samples
+        str(tmp_path / "msk" / case / series) for case, series, *_ in expected.samples
     ]
     assert len(kwargs["data"][3:]) == 5
 

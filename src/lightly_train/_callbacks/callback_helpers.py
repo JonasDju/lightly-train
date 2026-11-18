@@ -114,6 +114,7 @@ def get_callbacks(
                 normalize_args=normalize_args,
                 resize_interpolation=resize_interpolation,
                 resize_upscale_interpolation=resize_upscale_interpolation,
+                out_dir=out / "exported_models",
                 **callback_args.kneeno_eval.model_dump(),
             )
         )

@@ -189,6 +189,10 @@ eval:
   cache_features: true  # linear / linear_pool train on embeddings extracted once per evaluation instead of
                         # re-encoding every head epoch; k-NN always uses the shared pass. attentive_pool never caches.
   extraction_batch_size: 32  # exams -> at most 128 volumes per encoder forward (cache pass and re-encoding heads)
+  # Export the evaluated encoder of the best evaluation (mean of internal/knn/k100/auroc and
+  # internal/linear_pool/auroc) to <out>/exported_models/exported_best.pt; needs knn (with k 100) and linear_pool.
+  # Its internal/* numbers of the full evaluation are then optimistic.
+  model_selection: true
   split:  # train and val: one split of the split manifest (KneeNo data/make_split_manifest.py); the test sets are used whole
     manifest: /hpcwork/p0021834/workspace_roman/jonas/metadata/internal_split_manifest.json
     level: 0.25  # fraction of the internal global "train" split used for train + val (in-training indicator)

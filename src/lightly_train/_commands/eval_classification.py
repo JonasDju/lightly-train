@@ -23,7 +23,8 @@ with these top-level keys:
                                    content: a LightlyTrain checkpoint
                                    (``<out>/checkpoints/*.ckpt``) or the state dict of the
                                    bare DINOv2 ViT, as exported by pretraining
-                                   (``<out>/exported_models/exported_last.pt``) or
+                                   (``<out>/exported_models/exported_last.pt``, or
+                                   ``exported_best.pt`` with ``eval.model_selection``) or
                                    ``lightly-train export`` (default ``part`` and ``format``)
     image_size:                    [H, W, D], the crop size the model was pretrained with
     resize_interpolation:          how volumes are resampled to it, e.g. area or area+nearest

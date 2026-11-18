@@ -727,13 +727,25 @@ barrier the other ranks never reach, deadlocking the run. Do not "optimize" this
 
 **Metrics go through lightly-train's loggers, not KneeNo's.** The config sets
 `logging.tensorboard_dir: null`, disabling KneeNo's own `SummaryWriter`, and the callback
-re-logs the returned `{"{test_set}/{task}/{metric}": float}` dict via `pl_module.log_dict` under an
-`eval/` prefix — so eval scalars land in the same TensorBoard/JSONL run as the training
+re-logs the returned `{"{test_set}/{task}/{metric}": float}` dict via `pl_module.log_dict` under
+`eval.logging.tag_prefix` (`eval/` in the shipped configs; hardcoded `eval/` until 2026-11-18) — so eval scalars land in the same TensorBoard/JSONL run as the training
 curves, and no unpicklable `SummaryWriter` is ever held by a callback (see the
 `collate_fn` picklability gotcha in `MA/CLAUDE.md`).
 
 **Config deep-merge:** `load_eval_config` deep-merges over `DEFAULT_EVAL_CONFIG`, so a task
 left out of `freq` keeps the default, which is null (off) for every task since KneeNo `77839f0`.
+
+**Best model (`eval.model_selection: true`, since 2026-11-17; set in the pretraining config).** After each eval,
+`kneeno.BestModelTracker` scores the metrics: the mean of `internal/knn/k100/auroc` and
+`internal/linear_pool/auroc`. On a strict improvement, the evaluated encoder (teacher, or student with
+`encoder: online`) is exported to `<out>/exported_models/exported_best.pt`. That's `exported_last.pt`'s format
+(`common_helpers.export_model`, package default), written to a `.tmp` and renamed, so `eval_classification` loads
+it via `weights:`.
+- The tracker state is the callback's `state_dict`, so it's in every `last.ckpt` and restored on resume.
+  Lightning runs `ModelCheckpoint` after all other callbacks, so an epoch's checkpoint already holds that epoch's
+  eval. `test_model_selection__resume_restores_the_best` pins this with a real `Trainer`.
+- A failed export logs a warning and keeps the previous best.
+- Its `internal/*` numbers are optimistic (picked on them); report `external/*`.
 
 ## Running on the cluster
 

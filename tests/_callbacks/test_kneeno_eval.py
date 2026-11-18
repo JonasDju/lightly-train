@@ -15,16 +15,22 @@ from typing import Any
 
 import pytest
 import torch
-from kneeno import LabeledExternalKneeMRIDataset
+from kneeno import MODEL_SELECTION_KEYS, LabeledExternalKneeMRIDataset
 from kneeno.evaluation.dataset import KneeNoEvalDataset, LabeledInternalKneeMRIDataset
 from kneeno.evaluation.splits import write_manifest_for
 from pydantic import ValidationError
 from pytest import LogCaptureFixture
 from pytest_mock import MockerFixture
+from pytorch_lightning import Callback, LightningModule, Trainer
+from torch.utils.data import DataLoader, TensorDataset
 
 from lightly_train._callbacks.callback_args import CallbackArgs
+from lightly_train._callbacks.checkpoint import ModelCheckpoint
 from lightly_train._callbacks.kneeno_eval import KneeNoEval, KneeNoEvalArgs
+from lightly_train._checkpoint import CheckpointLightlyTrainModels
 from lightly_train._data.kneeno_adapter import DINOv2Adapter
+from lightly_train._models.embedding_model import EmbeddingModel
+from lightly_train._torch_helpers import _torch_weights_only_false
 from lightly_train._transforms.transform import NormalizeArgs
 
 from .. import helpers
@@ -129,16 +135,25 @@ def _config(**overrides: Any) -> dict[str, Any]:
     return config
 
 
-def _callback(**overrides: Any) -> KneeNoEval:
-    wrapper = helpers.dummy_dinov2_vit_model(patch_size=(2, 2, 2), img_size=IMAGE_SIZE)
+def _wrapper() -> Any:
+    return helpers.dummy_dinov2_vit_model(patch_size=(2, 2, 2), img_size=IMAGE_SIZE)
+
+
+#: The default ``out_dir`` of ``_callback()``; nothing is exported there without
+#: ``model_selection: true``.
+_OUT_DIR = tempfile.TemporaryDirectory(prefix="lightly-kneeno-out-")
+
+
+def _callback(out_dir: Path | None = None, **overrides: Any) -> KneeNoEval:
     return KneeNoEval(
-        wrapped_model=wrapper,
+        wrapped_model=_wrapper(),
         image_size=IMAGE_SIZE,
         normalize_args=NormalizeArgs(),
         # Not the defaults, so the tests can tell they reach the adapter.
         resize_interpolation="cubic",
         resize_upscale_interpolation="linear",
         config=_config(**overrides),
+        out_dir=Path(_OUT_DIR.name) if out_dir is None else out_dir,
     )
 
 
@@ -357,3 +372,242 @@ def test_resolve_encoder__online_falls_back_without_student(
         resolved = callback._resolve_encoder(module)
     assert resolved is callback._wrapped_model
     assert "no 'student_embedding_model'" in caplog.text
+
+
+# -- Best-model selection (eval.model_selection) ---------------------------------------
+
+_SELECTION: dict[str, Any] = {
+    "model_selection": True,
+    "freq": {"knn": 1, "linear_pool": 1},
+}
+
+
+def _selection_metrics(score: float) -> dict[str, float]:
+    return {key: score for key in MODEL_SELECTION_KEYS} | {"internal/knn/k5/auroc": 0.5}
+
+
+def _mock_evaluator(
+    callback: KneeNoEval, mocker: MockerFixture, scores: list[float]
+) -> Any:
+    """Skip the real evaluation: each due epoch returns the next score's metrics."""
+    evaluator = mocker.MagicMock()
+    evaluator.evaluate.side_effect = [_selection_metrics(s) for s in scores]
+    callback._evaluator = evaluator
+    return evaluator
+
+
+def _perturb(wrapper: Any, value: float) -> None:
+    with torch.no_grad():
+        next(wrapper.get_model().parameters()).fill_(value)
+
+
+def _first_param(path: Path) -> torch.Tensor:
+    state = torch.load(path, weights_only=True)
+    param: torch.Tensor = next(iter(state.values()))
+    return param
+
+
+def test_model_selection__exports_only_on_improvement(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    callback = _callback(out_dir=tmp_path, **_SELECTION)
+    _mock_evaluator(callback, mocker, [0.6, 0.55, 0.6, 0.7])
+    module = _fake_module(mocker)
+    best = tmp_path / "exported_best.pt"
+
+    for epoch, value in enumerate([1.0, 2.0, 3.0, 4.0]):
+        _perturb(callback._wrapped_model, value)
+        callback.on_train_epoch_end(_fake_trainer(mocker, epoch=epoch), module)
+        # epoch 0 (0.6) is the best until epoch 3 (0.7); a tie at epoch 2 does not count
+        expected = 4.0 if epoch == 3 else 1.0
+        assert torch.all(_first_param(best) == expected), epoch
+
+    # The same format as exported_last.pt: the bare ViT's state dict.
+    assert (
+        torch.load(best, weights_only=True).keys()
+        == callback._wrapped_model.get_model().state_dict().keys()
+    )
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["exported_best.pt"]
+    assert callback.state_dict() == {"best_model": {"best_score": 0.7, "best_epoch": 4}}
+    logged = module.log_dict.call_args.args[0]
+    assert logged["eval/model_selection/score"] == pytest.approx(0.7)
+    assert logged["eval/model_selection/best_score"] == pytest.approx(0.7)
+
+
+def test_model_selection__exports_the_online_encoder(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    callback = _callback(out_dir=tmp_path, encoder="online", **_SELECTION)
+    _mock_evaluator(callback, mocker, [0.6])
+    module = _fake_module(mocker)
+    student = _wrapper()
+    module.student_embedding_model.wrapped_model = student
+    _perturb(student, 5.0)
+    _perturb(callback._wrapped_model, 1.0)
+
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+    assert torch.all(_first_param(tmp_path / "exported_best.pt") == 5.0)
+
+
+def test_model_selection__off_exports_nothing(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    callback = _callback(out_dir=tmp_path, freq={"knn": 1, "linear_pool": 1})
+    _mock_evaluator(callback, mocker, [0.6])
+    module = _fake_module(mocker)
+
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+    assert list(tmp_path.iterdir()) == []
+    assert not any("model_selection" in k for k in module.log_dict.call_args.args[0])
+
+
+def test_model_selection__epoch_without_score_logs_no_score(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    callback = _callback(out_dir=tmp_path, **_SELECTION)
+    evaluator = _mock_evaluator(callback, mocker, [])
+    evaluator.evaluate.side_effect = [{MODEL_SELECTION_KEYS[0]: 0.9}]
+    module = _fake_module(mocker)
+
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+    assert list(tmp_path.iterdir()) == []
+    assert not any("model_selection" in k for k in module.log_dict.call_args.args[0])
+
+
+def test_model_selection__failed_export_keeps_the_previous_best(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    callback = _callback(out_dir=tmp_path, **_SELECTION)
+    _mock_evaluator(callback, mocker, [0.6, 0.7, 0.7])
+    module = _fake_module(mocker)
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+
+    mocker.patch(
+        "lightly_train._callbacks.kneeno_eval.common_helpers.export_model",
+        side_effect=OSError("disk full"),
+    )
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=1), module)
+    assert callback.state_dict()["best_model"] == {"best_score": 0.6, "best_epoch": 1}
+
+    mocker.stopall()
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=2), module)
+    assert callback.state_dict()["best_model"] == {"best_score": 0.7, "best_epoch": 3}
+
+
+def test_on_train_epoch_end__logs_under_the_configured_tag_prefix(
+    mocker: MockerFixture,
+) -> None:
+    callback = _callback(logging={"tag_prefix": "in_training"}, **_SELECTION)
+    _mock_evaluator(callback, mocker, [0.6])
+    module = _fake_module(mocker)
+
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=0), module)
+    logged = module.log_dict.call_args.args[0]
+    assert logged and all(key.startswith("in_training/") for key in logged), logged
+    assert "in_training/internal/knn/k100/auroc" in logged
+    assert "in_training/model_selection/best_score" in logged
+
+
+def test_model_selection__state_dict_round_trip(caplog: LogCaptureFixture) -> None:
+    callback = _callback(**_SELECTION)
+    callback._best_model_tracker.update(_selection_metrics(0.65), epoch=5)
+    restored = _callback(**_SELECTION)
+    restored.load_state_dict(callback.state_dict())
+    assert restored.state_dict() == callback.state_dict()
+    # A checkpoint from before model selection has no state for this callback's key.
+    fresh = _callback(**_SELECTION)
+    caplog.clear()  # drop the restore above
+    with caplog.at_level("INFO"):
+        fresh.load_state_dict({})
+    assert fresh.state_dict() == _callback(**_SELECTION).state_dict()
+    assert "no model selection state" in caplog.text
+    assert "Restored model selection state" not in caplog.text
+
+
+def test_model_selection__invalid_config_raises() -> None:
+    with pytest.raises(ValueError, match="freq.linear_pool > 0"):
+        _callback(model_selection=True, freq={"knn": 1})
+
+
+class _Module(LightningModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layer = torch.nn.Linear(2, 1)
+
+    def training_step(self, batch: list[torch.Tensor], batch_idx: int) -> torch.Tensor:
+        loss: torch.Tensor = self.layer(batch[0]).sum()
+        return loss
+
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        return torch.optim.SGD(self.parameters(), lr=0.1)
+
+    def train_dataloader(self) -> DataLoader[tuple[torch.Tensor, ...]]:
+        return DataLoader(TensorDataset(torch.randn(4, 2)), batch_size=2)
+
+
+class _KillAtEpoch(Callback):
+    """Stands in for a SLURM time limit: training stops without on_train_end."""
+
+    def __init__(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def on_train_epoch_start(
+        self, trainer: Trainer, pl_module: LightningModule
+    ) -> None:
+        if trainer.current_epoch == self._epoch:
+            raise RuntimeError("killed")
+
+
+def _fit(callbacks: list[Callback], max_epochs: int, ckpt_path: Path | None) -> None:
+    trainer = Trainer(
+        max_epochs=max_epochs,
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=callbacks,
+    )
+    # Like lightly-train's own resume (_commands/train.py): its checkpoints pickle models.
+    with _torch_weights_only_false():
+        trainer.fit(_Module(), ckpt_path=ckpt_path)
+
+
+def test_model_selection__resume_restores_the_best(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    # Real Lightning: ModelCheckpoint is listed first but must run after the eval
+    # callback, so last.ckpt holds the best score of the epoch it was written at.
+    def checkpoint() -> ModelCheckpoint:
+        model = helpers.DummyCustomModel()
+        return ModelCheckpoint(
+            models=CheckpointLightlyTrainModels(
+                model=model.get_model(),
+                wrapped_model=model,
+                embedding_model=EmbeddingModel(wrapped_model=model),
+            ),
+            normalize_args=NormalizeArgs(),
+            dirpath=str(tmp_path / "checkpoints"),
+            license_info="",
+            save_last=True,
+            every_n_epochs=50,
+        )
+
+    out = tmp_path / "exported_models"
+    first = _callback(out_dir=out, **_SELECTION)
+    _mock_evaluator(first, mocker, [0.6, 0.7])
+    with pytest.raises(RuntimeError, match="killed"):
+        _fit([checkpoint(), first, _KillAtEpoch(epoch=2)], max_epochs=4, ckpt_path=None)
+    exported = (out / "exported_best.pt").read_bytes()
+
+    resumed = _callback(out_dir=out, **_SELECTION)
+    evaluator = _mock_evaluator(resumed, mocker, [0.65, 0.8])
+    _fit(
+        [checkpoint(), resumed],
+        max_epochs=3,
+        ckpt_path=tmp_path / "checkpoints" / "last.ckpt",
+    )
+
+    # Epoch 3's 0.65 is below the restored 0.7 of epoch 2: nothing exported.
+    assert evaluator.evaluate.call_count == 1
+    assert resumed.state_dict()["best_model"] == {"best_score": 0.7, "best_epoch": 2}
+    assert (out / "exported_best.pt").read_bytes() == exported

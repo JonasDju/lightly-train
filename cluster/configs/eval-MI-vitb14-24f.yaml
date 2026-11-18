@@ -14,7 +14,8 @@
 # config with env vars expanded (params.yaml). The command refuses to start if any of them already exist.
 
 # A LightlyTrain checkpoint or an exported model (the state dict of the bare ViT, e.g. <data.out>/exported_models/
-# exported_last.pt); the command tells them apart by their content.
+# exported_last.pt, or exported_best.pt: the best in-training evaluation, eval.model_selection); the command tells
+# them apart by their content.
 weights: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/checkpoints/last.ckpt
 # For an exported model only: it holds the weights only, so these describe the model. A checkpoint records them, and
 # setting them with one is an error. Uncomment when weights points to an exported model; the values are

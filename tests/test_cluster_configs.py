@@ -147,12 +147,19 @@ def test_load_run_config__expands_env_vars(
     monkeypatch.setenv("RUN", "vitb14")
     config = {
         "model": MODEL,
-        "data": {**DATA, "out": "/runs/${RUN}", "data_root": {"internal": "$TMP/unlabeled", "msk": "$TMP/msk"}},
+        "data": {
+            **DATA,
+            "out": "/runs/${RUN}",
+            "data_root": {"internal": "$TMP/unlabeled", "msk": "$TMP/msk"},
+        },
         "eval": {"data": {"data_root": {"internal": "$TMP/labeled"}}},
     }
     loaded = load_run_config(_write(tmp_path, config))
     assert loaded["data"]["out"] == "/runs/vitb14"
-    assert loaded["data"]["data_root"] == {"internal": "/scratch/unlabeled", "msk": "/scratch/msk"}
+    assert loaded["data"]["data_root"] == {
+        "internal": "/scratch/unlabeled",
+        "msk": "/scratch/msk",
+    }
     assert loaded["eval"]["data"]["data_root"] == {"internal": "/scratch/labeled"}
 
 
@@ -482,12 +489,19 @@ def test_eval_config__matches_pretrain_config(
         # every few pretraining epochs. Only the standalone eval compiles the encoder
         # (compile_encoder: the in-training eval gets the training loop's model) and
         # the attentive heads (compile_attentive_heads), and sweeps the linear heads'
-        # lr and k-NN's temperature.
+        # lr and k-NN's temperature. model_selection is pretraining only: it picks the
+        # best in-training evaluation's model.
         block = {
             k: v
             for k, v in block.items()
             if k
-            not in ("logging", "freq", "compile_encoder", "compile_attentive_heads")
+            not in (
+                "logging",
+                "freq",
+                "compile_encoder",
+                "compile_attentive_heads",
+                "model_selection",
+            )
             and not (k in ALL_TASKS and k not in in_training)
         }
         for task in in_training:

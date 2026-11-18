@@ -420,7 +420,8 @@ _EVAL_CLASSIFICATION_HELP_MSG = f"""
                 a LightlyTrain checkpoint, e.g.
                 `out/my_experiment/checkpoints/last.ckpt`, or an exported model (the
                 state dict of the bare DINOv2 ViT), e.g.
-                `out/my_experiment/exported_models/exported_last.pt`.
+                `out/my_experiment/exported_models/exported_last.pt` (or
+                `exported_best.pt`, the best in-training evaluation).
               image_size: [H, W, D], the crop size the model was pretrained with; every
                 volume is resized to it. Neither file records it.
               resize_interpolation, resize_upscale_interpolation (optional): how volumes

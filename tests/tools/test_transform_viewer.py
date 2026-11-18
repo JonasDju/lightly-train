@@ -356,6 +356,17 @@ def test_viewer__widgets_and_errors(tmp_path: Path) -> None:
     assert first.shape == good.views["global"].shape
 
 
+def test_viewer__window_resize(tmp_path: Path) -> None:
+    """matplotlib's own TextBox raised (headless) or printed a traceback (GUI) on every window resize."""
+    from matplotlib.backend_bases import ResizeEvent
+
+    viewer = tv.Viewer(_renderer(tmp_path), _config(), "gaussian_blur", title="test")
+    assert all(isinstance(textbox, tv._TextBox) for textbox in viewer.textboxes)
+    ResizeEvent(
+        "resize_event", viewer.fig.canvas
+    )._process()  # headless, a failing callback raises
+
+
 def test_main__runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import matplotlib.pyplot as plt
 

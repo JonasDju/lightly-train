@@ -47,6 +47,7 @@ from typing import Any
 import numpy as np
 import torch
 import yaml
+from matplotlib.widgets import TextBox
 from PIL import Image
 
 from lightly_train._commands import train_helpers
@@ -516,15 +517,9 @@ class Viewer:
     ) -> None:
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
-        from matplotlib.widgets import (
-            Button,
-            CheckButtons,
-            RadioButtons,
-            Slider,
-            TextBox,
-        )
+        from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
 
-        self._Slider, self._TextBox = Slider, TextBox
+        self._Slider, self._TextBox = Slider, _TextBox
         self.renderer = renderer
         self.augmentation = augmentation
         self.seed = seed
@@ -887,6 +882,18 @@ class Viewer:
             ax.set_ylim(plane.shape[0] - 0.5, -0.5)
             ax.set_aspect(aspect)
             line.set_xdata([x, x])
+
+
+class _TextBox(TextBox):
+    """``TextBox`` whose resize handler works.
+
+    matplotlib (3.11 at least) decorates ``TextBox._resize`` with ``_call_with_reparented_event``, which reads
+    ``event.inaxes``, an attribute a ``ResizeEvent`` doesn't have: every window resize printed one
+    ``AttributeError`` traceback per text box. The handler only has to stop typing.
+    """
+
+    def _resize(self, event: Any) -> None:
+        self.stop_typing()
 
 
 def _fmt(value: float, is_int: bool) -> str:

@@ -218,10 +218,10 @@ eval:
     tensorboard_dir: null  # lightly-train's own loggers handle this -- see the header above
     per_label_dir: /hpcwork/va105917/lightly/pretrain/${PRETRAIN_JOB_ID}.14p.24d.vitb.224px/eval/in-training/eval_per_label
     tag_prefix: eval
-  freq:
-    knn: 5
-    linear: 5
-    linear_pool: 5
+  freq:  # 6 x (181,712 / 512) ~ 2,129 steps between evals (vjepa2: 2,100); with the full MSK data use 2 (~2,191)
+    knn: 6
+    linear: 6
+    linear_pool: 6
   knn:
     k: [5, 20, 50, 100]
     metric: cosine

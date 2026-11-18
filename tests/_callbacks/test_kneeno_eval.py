@@ -157,9 +157,10 @@ def _callback(out_dir: Path | None = None, **overrides: Any) -> KneeNoEval:
     )
 
 
-def _fake_trainer(mocker: MockerFixture, epoch: int) -> Any:
+def _fake_trainer(mocker: MockerFixture, epoch: int, max_epochs: int = 1000) -> Any:
     trainer = mocker.MagicMock()
     trainer.current_epoch = epoch
+    trainer.max_epochs = max_epochs
     trainer.global_rank = 0
     trainer.world_size = 1
     return trainer
@@ -245,6 +246,27 @@ def test_on_train_epoch_end__test_sets_select_dataset_and_preprocessing(
     # Every test set, plus the val metrics (evaluation_val/...), which never test.
     assert {key.split("/")[1] for key in logged} == {*test_sets, "evaluation_val"}
     assert all(math.isfinite(v) for v in logged.values())
+
+
+def test_on_train_epoch_end__last_epoch_runs_every_enabled_task(
+    mocker: MockerFixture,
+) -> None:
+    callback = _callback(freq={"knn": 7, "linear_pool": 7, "linear": 3})
+    evaluator = mocker.MagicMock()
+    evaluator.evaluate.return_value = {}
+    callback._evaluator = evaluator
+    module = _fake_module(mocker)
+
+    # Epoch 9 of 10 is the last; no frequency divides 10.
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=8, max_epochs=10), module)
+    evaluator.evaluate.assert_called_once()
+    assert evaluator.evaluate.call_args.kwargs["tasks"] == ["linear"]  # 9 % 3 == 0
+    callback.on_train_epoch_end(_fake_trainer(mocker, epoch=9, max_epochs=10), module)
+    assert evaluator.evaluate.call_args.kwargs["tasks"] == [
+        "knn",
+        "linear",
+        "linear_pool",
+    ]
 
 
 def test_on_train_epoch_end__skips_when_no_task_is_due(mocker: MockerFixture) -> None:

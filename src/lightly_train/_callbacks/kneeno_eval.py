@@ -157,7 +157,9 @@ class KneeNoEval(Callback):
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         epoch = trainer.current_epoch
-        due = tasks_due(epoch, self._config["freq"])
+        # The last epoch runs every task with a frequency set, so the final model is
+        # always evaluated (and seen by model selection).
+        due = tasks_due(epoch, self._config["freq"], num_epochs=trainer.max_epochs)
         if not due:
             return
 

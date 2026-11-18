@@ -745,6 +745,8 @@ it via `weights:`.
   Lightning runs `ModelCheckpoint` after all other callbacks, so an epoch's checkpoint already holds that epoch's
   eval. `test_model_selection__resume_restores_the_best` pins this with a real `Trainer`.
 - A failed export logs a warning and keeps the previous best.
+- **The last epoch evaluates every task with a frequency set** (since 2026-11-18): `tasks_due(...,
+  num_epochs=trainer.max_epochs)`, so the final model is always evaluated and seen by model selection.
 - Its `internal/*` numbers are optimistic (picked on them); report `external/*`.
 
 ## Running on the cluster

@@ -154,7 +154,7 @@ transform:
 # epochs, besides last.ckpt:
 callbacks:
   model_checkpoint:
-    every_n_epochs: 50
+    every_n_epochs: 10
     save_top_k: -1  # the default 1 keeps only the newest periodic checkpoint
 
 # KneeNo classification evaluation, run on the frozen encoder every eval.freq.<task>

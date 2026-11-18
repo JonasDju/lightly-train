@@ -28,11 +28,11 @@ data:
   msk_subset: 1.0  # seeded subsample of the MSK series only (a fraction in (0, 1] or a count > 1)
 
 train:
-  epochs: auto    # auto -> DINOv2's default of 125k steps, converted to epochs
-  batch_size: 128  # GLOBAL batch size, split across all GPUs of all nodes (use 32x N_GPU)
+  epochs: auto    # auto -> default of 200k steps, converted to epochs
+  batch_size: 256  # GLOBAL batch size, split across all GPUs of all nodes (use 32x N_GPU)
   num_workers: auto  # auto -> cpus-per-task - 1, per rank
   precision: auto
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   loader_args:
     pin_memory: true
 
@@ -82,8 +82,8 @@ method:
   weight_decay_end: 0.4
   gradient_clip_val: 3.0
   compile_blocks: true
-  compile_heads: false  # compile the projection heads and the iBOT loss, see DINOv2Args.compile_heads
-  ibot_loss_chunk_size: null  # e.g. 4096: iBOT loss in token chunks with activation checkpointing (ibotpp: all)
+  compile_heads: true  # compile the projection heads and the iBOT loss, see DINOv2Args.compile_heads
+  ibot_loss_chunk_size: 4096  # e.g. 4096: iBOT loss in token chunks with activation checkpointing (ibotpp: all)
   activation_memory_budget: null  # e.g. 0.5, for the compiled regions
                                   # DO NOT ENABLE THIS WHILE compile_blocks IS TRUE. activation_memory_budget is broken when
                                   # the model consumes randomness (see https://github.com/pytorch/pytorch/issues/190758)

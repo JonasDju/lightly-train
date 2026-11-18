@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from monai.data import MetaTensor
 from PIL import Image
 from torch.utils.data import DataLoader
 
@@ -21,6 +22,7 @@ from lightly_train._commands import train_helpers
 from lightly_train._data import mi_dataset
 from lightly_train._data.mi_dataset import MIDataset
 from lightly_train._transforms.monai_wrappers import (
+    VOXEL_SPACING_META_KEY,
     AnisotropyTrackingRandomResizedCrop3D,
 )
 from lightly_train._transforms.transform import MethodTransform
@@ -34,9 +36,11 @@ class RecordingTransform:
 
     def __init__(self) -> None:
         self.inputs: list[np.ndarray] = []
+        self.spacings: list[tuple[float, float, float] | None] = []
 
     def __call__(self, input: TransformInput) -> TransformOutput:
         self.inputs.append(input["image"])
+        self.spacings.append(input.get("voxel_spacing"))
         return [{"image": torch.from_numpy(np.ascontiguousarray(input["image"]))}]
 
 
@@ -182,6 +186,75 @@ class TestMIDataset:
         raw = dataset._core[0].numpy()  # (1, D, H, W)
         np.testing.assert_array_equal(transform.inputs[0], raw.transpose(0, 2, 3, 1))
 
+    @pytest.mark.parametrize(
+        "series_depth, expected",
+        [
+            # (H, W, D), like the volume; the metadata's [H, W, D] is 0.3 x 0.4 x 3.0.
+            (0, {6: (0.3, 0.4, 3.0), 9: (0.3, 0.4, 3.0)}),
+            # Resampled to 5 slices: the slice step grows by (depth - 1) / (5 - 1).
+            (5, {6: (0.3, 0.4, 3.0 * 5 / 4), 9: (0.3, 0.4, 3.0 * 8 / 4)}),
+        ],
+    )
+    def test_getitem__voxel_spacing(
+        self,
+        tmp_path: Path,
+        series_depth: int,
+        expected: dict[int, tuple[float, float, float]],
+    ) -> None:
+        data_root, data_meta = helpers.create_mi_dataset(
+            tmp_path, n_cases=1, depths=(6, 9), spacing=(0.3, 0.4, 3.0)
+        )
+        transform = RecordingTransform()
+        dataset = MIDataset(
+            data_root, data_meta, transform=transform, series_depth=series_depth
+        )
+        for i in range(len(dataset)):
+            dataset[i]
+            native_depth = dataset._core.parts["internal"].samples[i][2]
+            assert transform.spacings[-1] == pytest.approx(expected[native_depth])
+
+    def test_getitem__no_voxel_spacing(self, tmp_path: Path) -> None:
+        data_root, data_meta = helpers.create_mi_dataset(tmp_path, n_cases=1)
+        transform = RecordingTransform()
+        MIDataset(data_root, data_meta, transform=transform)[0]
+        assert transform.spacings == [None]
+
+    @pytest.mark.parametrize("spacing", [(0.3, 0.4, 3.0), None])
+    @pytest.mark.parametrize("crop_foreground", [None, {"threshold": 10}])
+    def test_getitem__crops_receive_the_spacing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        spacing: tuple[float, float, float] | None,
+        crop_foreground: dict[str, Any] | None,
+    ) -> None:
+        # Every view's crop gets a MetaTensor (with or without crop_foreground), tagged with
+        # the (H, W, D) spacing iff the metadata has one.
+        seen: list[Any] = []
+        call = AnisotropyTrackingRandomResizedCrop3D.__call__
+
+        def spy(self: Any, data: Any) -> Any:
+            seen.append(data)
+            return call(self, data)
+
+        monkeypatch.setattr(AnisotropyTrackingRandomResizedCrop3D, "__call__", spy)
+        dataset = _dinov2_dataset(
+            tmp_path,
+            transform_overrides={"crop_foreground": crop_foreground},
+            n_cases=1,
+            depths=(9,),
+            spacing=spacing,
+        )
+        dataset[0]
+        assert len(seen) == 2 + 2  # global + local views
+        for data in seen:
+            assert isinstance(data, MetaTensor)
+            if spacing is None:
+                assert VOXEL_SPACING_META_KEY not in data.meta
+            else:
+                # series_depth=8: 9 slices -> 8, step 3.0 * 8 / 7.
+                assert data.meta[VOXEL_SPACING_META_KEY] == pytest.approx((0.3, 0.4, 3.0 * 8 / 7))
+
     def test_getitem__dinov2_views(self, tmp_path: Path) -> None:
         dataset = _dinov2_dataset(tmp_path, n_cases=1)
         item = dataset[0]
@@ -210,6 +283,7 @@ class TestMIDataset:
             tmp_path,
             transform_overrides={"crop_foreground": {"threshold": 10}},
             n_cases=2,
+            spacing=(0.3, 0.4, 3.0),
         )
         dataloader = DataLoader(
             dataset, batch_size=1, num_workers=2, multiprocessing_context="spawn"

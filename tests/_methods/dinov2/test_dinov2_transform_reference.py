@@ -8,9 +8,11 @@
 """Pins the DINOv2 augmentations to a stored reference.
 
 ``dinov2_views_reference.npz`` holds the views ``_views()`` produced at commit d1aab3e,
-before ``transform.crop_foreground`` existed. With the option off (its default), the
-pipeline must still produce exactly those views. Regenerate the file only for an
-intended change of the augmentations:
+before ``transform.crop_foreground`` existed, regenerated on 2026-11-18 when the blur and
+sharpen started scaling their depth sigma by the view's voxel spacing (``monai_wrappers``;
+these inputs carry no spacing, so they pin the ``1 / shape`` fallback). With
+``crop_foreground`` off (its default), the pipeline must still produce exactly those views.
+Regenerate the file only for an intended change of the augmentations:
 
     .venv/bin/python tests/_methods/dinov2/test_dinov2_transform_reference.py
 """

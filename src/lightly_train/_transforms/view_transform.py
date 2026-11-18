@@ -151,9 +151,11 @@ class ViewTransform:
             args.random_resized_crop.scale = RandomResizeArgs(
                 min_scale=1.0, max_scale=1.0
             )
-        # The input is the raw, uncropped volume. It may already wrapped in a MetaTensor
-        # by DINOTransform.__call__ (dino_transform.py), tagged with the tissue's bounding box
-        # (transform.crop_foreground), which this crop reads to place itself on the tissue.
+        # The input is the raw, uncropped volume, which DINOTransform.__call__
+        # (dino_transform.py) wraps in a MetaTensor tagged with the series' voxel spacing (if
+        # the metadata has one) and the tissue's bounding box (transform.crop_foreground).
+        # This crop places itself on the tissue and tags the view with its own spacing, which
+        # the blur/sharpen below scale their depth sigma by.
         transform += [
             AnisotropyTrackingRandomResizedCrop3D(
                 size=args.random_resized_crop.size,

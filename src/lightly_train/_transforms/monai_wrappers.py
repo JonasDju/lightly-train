@@ -7,14 +7,21 @@
 #
 """Anisotropy-aware wrappers around MONAI's ``RandGaussianSmooth``/``RandGaussianSharpen``.
 
-Knee-MRI volumes are highly anisotropic: the depth axis (``D``, slice count)
-typically has far fewer voxels than the in-plane axes (``H``, ``W``). MONAI's
-``RandGaussianSmooth`` applies the same sigma to every axis, which is too strong
-for ``D``. No real physical voxel-spacing metadata is available anywhere in this
-data pipeline (KneeNo's source is plain JPEG slices, not DICOM/NIfTI), so we use
-each volume's own voxel-count shape ratio as a proxy for its anisotropy -- the
-same proxy ``RandomResizedCrop3D`` and ``MaskingGenerator`` already use to anchor
-their own sampled ratios.
+Knee-MRI volumes are highly anisotropic: slices are typically several times further
+apart than the in-plane voxels. MONAI's ``RandGaussianSmooth`` applies the same sigma
+(in voxels) to every axis, which is too strong along depth. The wrappers below scale the
+depth sigma by ``sqrt(h * w) / d`` of the **view's voxel spacing** (``VOXEL_SPACING_META_KEY``),
+so the blur extends about as far along depth, in mm, as in-plane.
+
+The spacing is the view's, not the series': ``RandomResizedCrop3D`` resizes every crop to a
+fixed size, so per axis the view's spacing is the series' spacing times ``crop / out``. The
+series' spacing comes from KneeNo's metadata (``data_spacing``, via
+``MIDataset`` -> ``TransformInput["voxel_spacing"]`` -> ``DINOTransform.__call__``). A series
+without one is treated as having the spacing ``1 / shape``: every volume spans the same
+(unit) extent along each axis, the voxel-count proxy this pipeline used before the metadata
+had spacings (and ``RandomResizedCrop3D`` and ``MaskingGenerator`` still use for their aspect
+ratios). Through the crop's conversion that gives a view spacing of about ``1 / out`` per axis,
+whatever the series' shape.
 
 Rotation is deliberately *not* made anisotropy-aware this way: a rotation in
 voxel-index space is only a true physical rotation when voxels are cubic.
@@ -41,16 +48,13 @@ unwrapped -- see the "no anisotropy wrapper" note on ``RandGibbsNoiseArgs`` in
 ``transform.py`` for the one case (Gibbs ringing) where this was a deliberate
 choice rather than an oversight.
 
-Why a ``MetaTensor`` tag instead of reading ``img.shape`` directly: in the real
-pipeline (``view_transform.py``), ``RandomResizedCrop3D`` runs immediately before
-``RandGaussianSmooth`` and always resizes to a *fixed configured output size* --
-so by the time ``RandGaussianSmooth`` would see it, every volume's shape is
-identical regardless of its real anisotropy. ``AnisotropyTrackingRandomResizedCrop3D``
-tags its output with the *pre-crop* shape as `MetaTensor` metadata; MONAI's own
-meta-propagation machinery (``convert_to_dst_type``) carries that tag, untouched,
-through ``RandGaussianSmooth``. ``ToTensor`` (the last step in
-``view_transform.py``) already strips ``MetaTensor`` down to a plain tensor, so
-the tag never reaches the model.
+Why a ``MetaTensor`` tag: the spacing isn't in the array. ``DINOTransform.__call__`` wraps
+every raw volume in a ``MetaTensor`` carrying the series' spacing (if any);
+``AnisotropyTrackingRandomResizedCrop3D`` reads it and tags its output with the view's
+spacing; MONAI's own meta-propagation machinery (``convert_to_dst_type``) carries that tag,
+untouched, through ``RandRotate`` (in-plane only, so the spacing stays the view's) and the
+intensity transforms. ``ToTensor`` (the last step in ``view_transform.py``) strips
+``MetaTensor`` down to a plain tensor, so the tag never reaches the model.
 
 The same mechanism carries the optional tissue bounding box
 (``transform.crop_foreground``): ``TagForegroundBox`` runs once per sample in
@@ -59,12 +63,7 @@ The same mechanism carries the optional tissue bounding box
 place its crop on the tissue (``RandomResizedCrop3D.get_params``) and does not pass it
 on, since it is in pre-crop coordinates. The volume itself is never cropped to the box
 -- resizing a box with the tissue's proportions to the fixed view size would stretch
-the anatomy -- so the pre-crop shape above stays the full volume's.
-
-This voxel-count ratio is a heuristic approximation, not true physical spacing.
-When a real per-case anisotropy signal becomes available (e.g. loaded from a
-separate dataset-metadata file), only what populates ``ORIG_SHAPE_META_KEY``
-needs to change -- the consuming code below stays the same.
+the anatomy.
 """
 
 from __future__ import annotations
@@ -91,7 +90,7 @@ from scipy import ndimage
 from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 
 __all__ = [
-    "ORIG_SHAPE_META_KEY",
+    "VOXEL_SPACING_META_KEY",
     "FOREGROUND_BOX_META_KEY",
     "TagForegroundBox",
     "AnisotropyTrackingRandomResizedCrop3D",
@@ -100,26 +99,40 @@ __all__ = [
     "AlphaRandHistogramShift"
 ]
 
-# (H, W, D) of the volume before RandomResizedCrop3D's crop+resize.
-ORIG_SHAPE_META_KEY = "lt_orig_spatial_shape"
+# (H, W, D) voxel spacing of the volume as it is now: the series' (mm) on the raw volume,
+# the view's after AnisotropyTrackingRandomResizedCrop3D (mm, or relative units for a series
+# without a spacing).
+VOXEL_SPACING_META_KEY = "lt_voxel_spacing"
 # ((h0, w0, d0), (h1, w1, d1)) bounding box of the tissue, exclusive end.
 FOREGROUND_BOX_META_KEY = "lt_foreground_box"
 
 
-def _get_anisotropy_shape(img: Any) -> tuple[int, int, int]:
-    """Read the (H, W, D) shape to derive anisotropy ratios from.
+def _shape_spacing(shape: Any) -> tuple[float, float, float]:
+    """The spacing of a volume without one: ``1 / shape``, i.e. the same unit extent along every axis."""
+    h, w, d = (int(s) for s in shape[-3:])
+    return 1.0 / h, 1.0 / w, 1.0 / d
 
-    Prefers the pre-crop shape tagged by ``AnisotropyTrackingRandomResizedCrop3D``
-    (reached through MONAI's meta propagation); falls back to the input's own
-    shape so these transforms stay usable standalone (e.g. in tests) without a
+
+def _get_view_spacing(img: Any) -> tuple[float, float, float]:
+    """The (H, W, D) voxel spacing to derive the anisotropy from.
+
+    Prefers the view's spacing tagged by ``AnisotropyTrackingRandomResizedCrop3D``
+    (reached through MONAI's meta propagation); falls back to ``1 / img.shape``
+    so these transforms stay usable standalone (e.g. in tests) without a
     preceding tagging step.
     """
     meta = getattr(img, "meta", None)
-    if meta is not None and ORIG_SHAPE_META_KEY in meta:
-        h, w, d = meta[ORIG_SHAPE_META_KEY]
-        return int(h), int(w), int(d)
-    h, w, d = img.shape[-3:]
-    return int(h), int(w), int(d)
+    if meta is not None and meta.get(VOXEL_SPACING_META_KEY) is not None:
+        h, w, d = meta[VOXEL_SPACING_META_KEY]
+        return float(h), float(w), float(d)
+    return _shape_spacing(img.shape)
+
+
+def _depth_scale(img: Any) -> float:
+    """``sqrt(h * w) / d`` of the view's spacing: depth sigma (voxels) per in-plane sigma (voxels) for the
+    same physical extent."""
+    h, w, d = _get_view_spacing(img)
+    return math.sqrt(h * w) / d
 
 
 class AlphaRandHistogramShift(RandHistogramShift):
@@ -188,8 +201,13 @@ class TagForegroundBox(Transform):
 
 
 class AnisotropyTrackingRandomResizedCrop3D(RandomResizedCrop3D):
-    """``RandomResizedCrop3D`` that tags its output with the pre-crop shape, and places
-    its crop on the tissue if the input carries ``TagForegroundBox``'s box.
+    """``RandomResizedCrop3D`` that tags its output with the view's voxel spacing, and
+    places its crop on the tissue if the input carries ``TagForegroundBox``'s box.
+
+    The input's spacing is its ``VOXEL_SPACING_META_KEY`` tag, or ``1 / shape`` without
+    one. The view's is that times ``crop / out`` per axis, the resampler's own scale
+    (exact for area, linear and cubic; depth ``nearest`` keeps both end slices, a step of
+    ``(crop - 1) / (out - 1)``, which this ignores).
 
     Kept separate from ``RandomResizedCrop3D`` itself (which is general-purpose,
     also used to replay a crop onto a label volume, and separately tested) so
@@ -198,21 +216,27 @@ class AnisotropyTrackingRandomResizedCrop3D(RandomResizedCrop3D):
 
     def __call__(self, data: NDArray | MetaTensor) -> MetaTensor:
         foreground_box = None
+        spacing = None
         if isinstance(data, MetaTensor):
             foreground_box = data.meta.get(FOREGROUND_BOX_META_KEY)
+            spacing = data.meta.get(VOXEL_SPACING_META_KEY)
             data = data.as_tensor().numpy()  # no copy; the resampler works on numpy
-        orig_shape = tuple(int(s) for s in data.shape[-3:])
-        out = self.apply(
-            data, self.get_params(data.shape, foreground_box=foreground_box)
+        if spacing is None:
+            spacing = _shape_spacing(data.shape)
+        params = self.get_params(data.shape, foreground_box=foreground_box)
+        out = self.apply(data, params)
+        crop = (params.height, params.width, params.depth)  # size of the crop before resizing to self.size
+        view_spacing = tuple(
+            float(s) * c / o for s, c, o in zip(spacing, crop, self.size)
         )
         # The box is not passed on: it is in pre-crop coordinates.
-        return MetaTensor(out, meta={ORIG_SHAPE_META_KEY: orig_shape})
+        return MetaTensor(out, meta={VOXEL_SPACING_META_KEY: view_spacing})
 
 
 class AnisotropyAwareRandGaussianSmooth(RandGaussianSmooth):
-    """``RandGaussianSmooth`` with a ``sigma_z`` scaled down by the volume's own
-    ``D / sqrt(H * W)`` ratio, so the effective blur extent along the coarse
-    depth axis roughly matches the in-plane blur extent.
+    """``RandGaussianSmooth`` with a ``sigma_z`` scaled by ``sqrt(h * w) / d`` of the
+    view's voxel spacing, so the blur extends about as far along depth (in mm) as
+    in-plane.
     """
 
     def __init__(self, sigma_range: tuple[float, float], *args: Any, **kwargs: Any) -> None:
@@ -224,8 +248,7 @@ class AnisotropyAwareRandGaussianSmooth(RandGaussianSmooth):
 
     def __call__(self, img: Any, randomize: bool = True) -> Any:
         if randomize:
-            h, w, d = _get_anisotropy_shape(img)
-            scale_z = d / math.sqrt(h * w)
+            scale_z = _depth_scale(img)
             self.sigma_z = tuple(s * scale_z for s in self._base_sigma_z)
         # RandGaussianSmooth.__call__, with GaussianSmooth's filtering done by _separable_gaussian: same random draws,
         # same kernels, same result up to float rounding -- only faster (see there).
@@ -262,8 +285,8 @@ def _separable_gaussian(volume: NDArray[np.float32], sigmas: Iterable[float], ap
 
 class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
     """``RandGaussianSharpen`` with its two z-axis sigmas (``sigma1_z``, the
-    pre-blur sigma, and ``sigma2_z``, the post-blur sigma) scaled down by the same
-    ``D / sqrt(H * W)`` ratio as ``AnisotropyAwareRandGaussianSmooth``.
+    pre-blur sigma, and ``sigma2_z``, the post-blur sigma) scaled by the same
+    ``sqrt(h * w) / d`` of the view's spacing as ``AnisotropyAwareRandGaussianSmooth``.
     """
 
     def __init__(self,
@@ -288,8 +311,7 @@ class AnisotropyAwareRandGaussianSharpen(RandGaussianSharpen):
 
     def __call__(self, img: Any, randomize: bool = True) -> Any:
         if randomize:
-            h, w, d = _get_anisotropy_shape(img)
-            scale_z = d / math.sqrt(h * w)
+            scale_z = _depth_scale(img)
             self.sigma1_z = tuple(s * scale_z for s in self._base_sigma1_z)
             # sigma2_z may be a plain float (MONAI then samples it against sigma1_z's
             # sampled value at call time) or a tuple, unlike sigma1_z which is always

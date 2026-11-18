@@ -9,10 +9,15 @@ from __future__ import annotations
 
 from typing import Literal
 
+import torch
+from monai.data import MetaTensor
 from pydantic import Field
 
 from lightly_train._configs.config import PydanticConfig
-from lightly_train._transforms.monai_wrappers import TagForegroundBox
+from lightly_train._transforms.monai_wrappers import (
+    VOXEL_SPACING_META_KEY,
+    TagForegroundBox,
+)
 from lightly_train._transforms.random_resized_crop import ResizeInterpolation
 from lightly_train._transforms.transform import (
     CropForegroundArgs,
@@ -230,11 +235,16 @@ class DINOTransform(MethodTransform):
         )
 
     def __call__(self, input: TransformInput) -> TransformOutput:
+        # Always a MetaTensor (no copy), carrying what the views' crops read: the voxel
+        # spacing if the dataset has one, and the tissue box if crop_foreground is set.
+        # The views' ToTensor strips it again. TransformInput only names the plain array type.
+        image = MetaTensor(torch.as_tensor(input["image"]))
+        spacing = input.get("voxel_spacing")
+        if spacing is not None:
+            image.meta[VOXEL_SPACING_META_KEY] = tuple(float(s) for s in spacing)
         if self.foreground_tag is not None:
-            # A MetaTensor carrying the box, which the views' crops read; TransformInput
-            # only names the plain array type.
-            image = self.foreground_tag(input["image"])
-            input = {**input, "image": image}  # type: ignore[typeddict-item]
+            image = self.foreground_tag(image)
+        input = {**input, "image": image}  # type: ignore[typeddict-item]
         return [transform(input) for transform in self.transforms]
 
     @staticmethod

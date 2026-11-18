@@ -48,6 +48,9 @@ NDArrayBinaryMasksInt = NDArray[np.uint8]  # (n_instances, H, W)
 class TransformInput(TypedDict):
     image: NDArrayImage
     mask: NotRequired[NDArrayMask]
+    # 3D DINOv2 (MIDataset): the image's (H, W, D) voxel spacing in mm, or None if the
+    # metadata has none. DINOTransform passes it to the views' crops.
+    voxel_spacing: NotRequired[tuple[float, float, float] | None]
     # TODO: bbox: NDArray[np.float64] | None
 
 

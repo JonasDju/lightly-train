@@ -75,7 +75,10 @@ Gotchas).
 - `src/lightly_train/_data/mi_dataset.py` — `MIDataset`, thin wrapper over
   `kneeno.UnlabeledDataset` (since 2026-10-30: the internal knee data plus, optionally, the musculoskeletal (MSK)
   data) producing `(1, D, H, W)` volumes, permuted to `(1, H, W, D)` for MONAI transforms. Also owns `reseed_randomizables()` and
-  `worker_init_fn` (see Gotchas — RNG reseeding).
+  `worker_init_fn` (see Gotchas — RNG reseeding). It loads through `UnlabeledDataset.load_with_spacing` (since
+  2026-11-18), which returns the volume with its `(D, H, W)` voxel spacing from the metadata's optional
+  `data_spacing` (depth step rescaled for `series_depth`), or `None`, from one load-retry, so a substitute volume
+  comes with its own spacing. It passes it on permuted to `(H, W, D)` as `TransformInput["voxel_spacing"]`.
 - `src/lightly_train/_transforms/random_resized_crop.py` — `RandomResizedCrop3D`, a
   from-scratch anisotropy-aware 3D `RandomResizedCrop` (own separable resampling
   weights for area/linear/nearest/cubic, no external volume-augmentation dependency).
@@ -171,18 +174,25 @@ Gotchas).
   is actually `AlphaRandHistogramShift` (also `monai_wrappers.py` — not for anisotropy,
   see below).
 - `src/lightly_train/_transforms/monai_wrappers.py` — `AnisotropyAwareRandGaussianSmooth`
-  scales `RandGaussianSmooth`'s `sigma_z` down by the volume's own voxel-count shape
-  ratio (`D/sqrt(H*W)`; no physical spacing metadata exists anywhere in this pipeline,
-  so this is a proxy — same one `RandomResizedCrop3D` and `MaskingGenerator` already
-  use). `AnisotropyTrackingRandomResizedCrop3D` tags its output with the *pre-crop*
-  `(H, W, D)` shape as `MetaTensor` metadata (`ORIG_SHAPE_META_KEY`), since
-  `RandomResizedCrop3D` always resizes to a fixed configured size — reading the
-  post-crop shape instead would make the "per-volume" signal a constant. MONAI's own
-  meta-propagation (`convert_to_dst_type`) carries that tag untouched through
-  `RandRotate` and `RandGaussianSmooth`; `ToTensor` strips it at the end as usual.
+  scales `RandGaussianSmooth`'s `sigma_z` by `sqrt(h*w)/d` of the **view's voxel spacing**
+  (`VOXEL_SPACING_META_KEY`, `(H, W, D)`; since 2026-11-18, before: `D/sqrt(H*W)` of the pre-crop
+  shape, `ORIG_SHAPE_META_KEY`), so the blur extends about as far along depth in mm as in-plane.
+  `DINOTransform.__call__` always wraps the raw volume in a `MetaTensor` (no copy), tagged with
+  `TransformInput["voxel_spacing"]` if it is set. `AnisotropyTrackingRandomResizedCrop3D` reads
+  that spacing, or uses `1/shape` without one (every series the same unit extent: the old
+  voxel-count proxy), and tags its output with the *view's* spacing, `spacing × crop / out` per
+  axis, since `RandomResizedCrop3D` always resizes to a fixed configured size. With `1/shape` that is
+  about `1/out` whatever the series' shape, so series without a spacing get a near-constant
+  `scale_z` (~`out_d/sqrt(out_h·out_w)`, e.g. 16/224 for global views; ~1.5x the old proxy's),
+  series with one 2–3x the old proxy's. That is an intended augmentation change: the views
+  reference `.npz` was regenerated. `RandomResizedCrop3D`'s aspect-ratio anchoring and
+  `MaskingGenerator` still use voxel-count shapes. MONAI's own
+  meta-propagation (`convert_to_dst_type`) carries the tag untouched through
+  `RandRotate` (in-plane only, so it stays the view's spacing) and the intensity
+  transforms; `ToTensor` strips it at the end as usual.
   `TagForegroundBox` (run once per sample in `DINOTransform.__call__` when
-  `crop_foreground` is set, not per view: ~7 ms per 672×672×24 volume) wraps the raw
-  volume in a `MetaTensor` tagged with the tissue box (`FOREGROUND_BOX_META_KEY`, from
+  `crop_foreground` is set, not per view: ~7 ms per 672×672×24 volume) tags the raw
+  volume's `MetaTensor` with the tissue box (`FOREGROUND_BOX_META_KEY`, from
   `CropForeground.compute_bounding_box`; no tag if nothing exceeds the threshold);
   `AnisotropyTrackingRandomResizedCrop3D` reads it for placement and does not pass it on.
   Its `select_fn` is the picklable `_AboveThreshold` class -- a lambda fails to pickle into
@@ -199,9 +209,6 @@ Gotchas).
   MONAI's default is too strong unblended; it linearly blends the shifted output with
   the original by a fixed `alpha` (an intensity-strength knob, see
   `RandHistogramShiftArgs.alpha` in `transform.py`).
-  Future work: once real per-case anisotropy is available (a separate
-  dataset-metadata file), swap what populates `ORIG_SHAPE_META_KEY` — the consuming
-  blur code doesn't need to change.
 - **CPU fast paths in the transforms (2026-10-01).** Four hot spots of the per-sample
   pipeline were replaced by faster CPU code that computes the same thing as before:
   - `_resample` (`random_resized_crop.py`): an axis whose weight matrix is at most

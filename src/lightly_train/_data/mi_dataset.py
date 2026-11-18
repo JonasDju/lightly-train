@@ -47,12 +47,15 @@ class MIDataset(Dataset[DatasetItem]):
         return len(self._core)
 
     def __getitem__(self, index) -> DatasetItem:
-        volume = self._core[index]                  # (1, D, H, W)
+        # One load-retry for both, so a substitute volume comes with its own spacing.
+        volume, spacing = self._core.load_with_spacing(index)  # (1, D, H, W), (D, H, W) or None
 
         # The monai transforms expect C, H, W, D
         volume = volume.permute(0, 2, 3, 1).numpy() # (1, H, W, D)
+        if spacing is not None:
+            spacing = (spacing[1], spacing[2], spacing[0])  # (H, W, D), like the volume
 
-        input: TransformInput = {"image": volume}
+        input: TransformInput = {"image": volume, "voxel_spacing": spacing}
         transformed = self.transform(input)         # (1, D, H, W)
 
         dataset_item: DatasetItem = {

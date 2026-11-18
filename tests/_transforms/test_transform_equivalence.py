@@ -28,7 +28,6 @@ amplifies the blurs' rounding by up to ``1 + 2a`` (``a`` in [5, 10] by default),
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
@@ -43,7 +42,7 @@ from lightly_train._data.mi_dataset import reseed_randomizables
 from lightly_train._transforms import monai_wrappers
 from lightly_train._transforms import random_resized_crop as rrc
 from lightly_train._transforms.monai_wrappers import (
-    ORIG_SHAPE_META_KEY,
+    VOXEL_SPACING_META_KEY,
     AlphaRandHistogramShift,
     AnisotropyAwareRandGaussianSharpen,
     AnisotropyAwareRandGaussianSmooth,
@@ -252,8 +251,7 @@ class _OldSmooth(AnisotropyAwareRandGaussianSmooth):
 
     def __call__(self, img: Any, randomize: bool = True) -> Any:
         if randomize:
-            h, w, d = monai_wrappers._get_anisotropy_shape(img)
-            scale_z = d / math.sqrt(h * w)
+            scale_z = monai_wrappers._depth_scale(img)
             self.sigma_z = tuple(s * scale_z for s in self._base_sigma_z)
         return RandGaussianSmooth.__call__(self, img, randomize=randomize)
 
@@ -269,27 +267,27 @@ def _smooths(
 
 
 def _tagged(
-    shape: tuple[int, ...], orig_shape: tuple[int, int, int], seed: int = 0
+    shape: tuple[int, ...], spacing: tuple[float, float, float], seed: int = 0
 ) -> MetaTensor:
     return MetaTensor(
         torch.from_numpy(_volume(shape, seed=seed)),
-        meta={ORIG_SHAPE_META_KEY: orig_shape},
+        meta={VOXEL_SPACING_META_KEY: spacing},
     )
 
 
 @pytest.mark.parametrize("seed", range(5))
 @pytest.mark.parametrize(
-    "shape, orig_shape",
+    "shape, spacing",
     [
-        ((1, 56, 48, 16), (512, 512, 24)),
-        ((1, 24, 24, 8), (384, 384, 30)),
-        ((2, 20, 30, 12), (20, 30, 12)),
+        ((1, 56, 48, 16), (0.3 * 512 / 224, 0.3 * 512 / 224, 3.0 * 24 / 16)),
+        ((1, 24, 24, 8), (0.4, 0.5, 3.6)),
+        ((2, 20, 30, 12), (1 / 20, 1 / 30, 1 / 12)),
     ],
 )
 def test_smooth__equals_monai(
-    seed: int, shape: tuple[int, ...], orig_shape: tuple[int, int, int]
+    seed: int, shape: tuple[int, ...], spacing: tuple[float, float, float]
 ) -> None:
-    img = _tagged(shape, orig_shape, seed=seed)
+    img = _tagged(shape, spacing, seed=seed)
     new_t, old_t = _smooths(seed)
     new, old = new_t(img), old_t(img)
     assert (new_t.x, new_t.y, new_t.z) == (
@@ -299,7 +297,7 @@ def test_smooth__equals_monai(
     )  # same draws, bit for bit
     assert_bit_equal(new_t.R.get_state()[1], old_t.R.get_state()[1])
     assert type(new) is type(old) is MetaTensor
-    assert new.meta[ORIG_SHAPE_META_KEY] == old.meta[ORIG_SHAPE_META_KEY] == orig_shape
+    assert new.meta[VOXEL_SPACING_META_KEY] == old.meta[VOXEL_SPACING_META_KEY] == spacing
     assert_rounding_equal(new, old)
 
 
@@ -312,7 +310,7 @@ def test_smooth__numpy_input() -> None:
 
 
 def test_smooth__not_applied_bit_equal() -> None:
-    img = _tagged((1, 30, 20, 10), (512, 512, 24))
+    img = _tagged((1, 30, 20, 10), (0.69, 0.69, 4.5))
     new_t, old_t = _smooths(0, prob=0.0)
     assert_bit_equal(new_t(img), old_t(img))
     assert_bit_equal(new_t(img), img)
@@ -320,7 +318,7 @@ def test_smooth__not_applied_bit_equal() -> None:
 
 def test_smooth__unity_kernels_bit_equal() -> None:
     # sigmas this small give the kernel [1.0] on every axis, which both skip: the volume comes back unfiltered.
-    img = _tagged((1, 30, 20, 10), (30, 20, 10))
+    img = _tagged((1, 30, 20, 10), (1 / 30, 1 / 20, 1 / 10))
     new_t, old_t = _smooths(0, sigma_range=(1e-6, 2e-6))
     assert_bit_equal(new_t(img), old_t(img))
     assert_bit_equal(new_t(img), img)
@@ -329,10 +327,10 @@ def test_smooth__unity_kernels_bit_equal() -> None:
 def test_smooth__randomize_false() -> None:
     """randomize=False filters with the previous draw (as MONAI does) -- and returns a result."""
     new_t, old_t = _smooths(1)
-    first = _tagged((1, 40, 40, 12), (512, 512, 24), seed=1)
+    first = _tagged((1, 40, 40, 12), (0.69, 0.69, 4.5), seed=1)
     new_t(first)
     old_t(first)
-    second = _tagged((1, 40, 40, 12), (128, 128, 48), seed=2)
+    second = _tagged((1, 40, 40, 12), (1 / 128, 1 / 128, 1 / 48), seed=2)
     new, old = new_t(second, randomize=False), old_t(second, randomize=False)
     assert new is not None
     assert (new_t.x, new_t.y, new_t.z) == (old_t.x, old_t.y, old_t.z)
@@ -344,8 +342,7 @@ class _OldSharpen(AnisotropyAwareRandGaussianSharpen):
 
     def __call__(self, img: Any, randomize: bool = True) -> Any:
         if randomize:
-            h, w, d = monai_wrappers._get_anisotropy_shape(img)
-            scale_z = d / math.sqrt(h * w)
+            scale_z = monai_wrappers._depth_scale(img)
             self.sigma1_z = tuple(s * scale_z for s in self._base_sigma1_z)
             if isinstance(self._base_sigma2_z, tuple):
                 self.sigma2_z = tuple(s * scale_z for s in self._base_sigma2_z)
@@ -384,23 +381,23 @@ def assert_sharpen_rounding_equal(new: Any, old: Any, img: Any, a: float) -> Non
     "sigma2", [(0.3, 1.0), 0.3]
 )  # a float is sampled between it and the drawn sigma1
 @pytest.mark.parametrize(
-    "shape, orig_shape",
+    "shape, spacing",
     [
-        ((1, 56, 48, 16), (512, 512, 24)),
-        ((1, 24, 24, 8), (384, 384, 30)),
-        ((2, 20, 30, 12), (20, 30, 12)),
+        ((1, 56, 48, 16), (0.3 * 512 / 224, 0.3 * 512 / 224, 3.0 * 24 / 16)),
+        ((1, 24, 24, 8), (0.4, 0.5, 3.6)),
+        ((2, 20, 30, 12), (1 / 20, 1 / 30, 1 / 12)),
     ],
 )
 def test_sharpen__equals_monai(
-    seed: int, sigma2: Any, shape: tuple[int, ...], orig_shape: tuple[int, int, int]
+    seed: int, sigma2: Any, shape: tuple[int, ...], spacing: tuple[float, float, float]
 ) -> None:
-    img = _tagged(shape, orig_shape, seed=seed)
+    img = _tagged(shape, spacing, seed=seed)
     new_t, old_t = _sharpens(seed, sigma2=sigma2)
     new, old = new_t(img), old_t(img)
     assert _sharpen_draws(new_t) == _sharpen_draws(old_t)  # same draws, bit for bit
     assert_bit_equal(new_t.R.get_state()[1], old_t.R.get_state()[1])
     assert type(new) is type(old) is MetaTensor
-    assert new.meta[ORIG_SHAPE_META_KEY] == old.meta[ORIG_SHAPE_META_KEY] == orig_shape
+    assert new.meta[VOXEL_SPACING_META_KEY] == old.meta[VOXEL_SPACING_META_KEY] == spacing
     assert_sharpen_rounding_equal(new, old, img, new_t.a)
 
 
@@ -413,7 +410,7 @@ def test_sharpen__numpy_input() -> None:
 
 
 def test_sharpen__not_applied_bit_equal() -> None:
-    img = _tagged((1, 30, 20, 10), (512, 512, 24))
+    img = _tagged((1, 30, 20, 10), (0.69, 0.69, 4.5))
     new_t, old_t = _sharpens(0, prob=0.0)
     assert_bit_equal(new_t(img), old_t(img))
     assert_bit_equal(new_t(img), img)
@@ -421,7 +418,7 @@ def test_sharpen__not_applied_bit_equal() -> None:
 
 def test_sharpen__unity_kernels_bit_equal() -> None:
     # Unity kernels everywhere: blurred = filtered = img, so both return img + a * 0 = img exactly.
-    img = _tagged((1, 30, 20, 10), (30, 20, 10))
+    img = _tagged((1, 30, 20, 10), (1 / 30, 1 / 20, 1 / 10))
     new_t, old_t = _sharpens(0, sigma1=(1e-6, 2e-6), sigma2=(1e-6, 2e-6))
     assert_bit_equal(new_t(img), old_t(img))
     assert_bit_equal(new_t(img), img)
@@ -429,10 +426,10 @@ def test_sharpen__unity_kernels_bit_equal() -> None:
 
 def test_sharpen__randomize_false() -> None:
     new_t, old_t = _sharpens(1)
-    first = _tagged((1, 40, 40, 12), (512, 512, 24), seed=1)
+    first = _tagged((1, 40, 40, 12), (0.69, 0.69, 4.5), seed=1)
     new_t(first)
     old_t(first)
-    second = _tagged((1, 40, 40, 12), (128, 128, 48), seed=2)
+    second = _tagged((1, 40, 40, 12), (1 / 128, 1 / 128, 1 / 48), seed=2)
     new, old = new_t(second, randomize=False), old_t(second, randomize=False)
     assert new is not None
     assert _sharpen_draws(new_t) == _sharpen_draws(old_t)

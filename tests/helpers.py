@@ -1119,6 +1119,7 @@ def create_mi_dataset(
     height: int = 20,
     width: int = 24,
     identical: bool = False,
+    spacing: Sequence[float] | None = None,
 ) -> tuple[dict[str, Path | None], dict[str, Path | None]]:
     """Create a dataset in the KneeNo layout.
 
@@ -1127,6 +1128,7 @@ def create_mi_dataset(
 
     Args:
         identical: If True, all series of the same depth contain identical slices.
+        spacing: If given, every series' ``data_spacing`` ([H, W, D] mm, KneeNo's metadata order).
 
     Returns:
         (data_root, data_meta), as ``pretrain``/``MIDataset`` take them: the internal data only,
@@ -1148,6 +1150,8 @@ def create_mi_dataset(
                 slice_np = rng.integers(0, 256, size=(height, width), dtype=np.uint8)
                 Image.fromarray(slice_np).save(series_dir / f"{i:03d}.jpeg")
             metadata[case_id][series_name] = {"dimensions": [height, width, depth]}
+            if spacing is not None:
+                metadata[case_id][series_name]["data_spacing"] = list(spacing)
     data_meta = root / "meta.json"
     data_meta.write_text(json.dumps({"train": metadata}))
     return {"internal": data_root, "msk": None}, {"internal": data_meta, "msk": None}
@@ -1183,7 +1187,7 @@ def create_msk_dataset(
                 Image.fromarray(slice_np).save(series_dir / f"{i:03d}.jpeg")
             metadata[case_id][series_name] = {
                 "dimensions": [height, width, depth],
-                "data_resolution": [0.5, 0.5, 3.0],
+                "data_spacing": [0.5, 0.5, 3.0],
                 "body_part": "shoulder",
             }
     msk_meta = root / "msk_meta.json"

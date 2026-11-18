@@ -139,7 +139,9 @@ Gotchas).
   done (yet). The opt-in `RandGaussianNoise`'s `mean`/`std` are in **raw `[0, 255]`
   intensity units** and passed through unscaled (unlike `NormalizeArgs`, which is for
   `[0, 1]`); in the normalized input they shrink by `255 * normalize.std` (127.5 by
-  default). It is the only augmentation with intensity-unit parameters — every other one is
+  default). Its `std` is a **maximum**: MONAI's default `sample_std=True` (not overridden) draws the std per view,
+  uniform in `[0, std]`, so the strength varies from view to view (the viewer's titles show the drawn value). It is
+  the only augmentation with intensity-unit parameters — every other one is
   min/max-relative, a blend weight, or in voxels/degrees — so it was the only default that
   needed re-tuning when Normalize moved to the end.
   MONAI's intensity ops return float32 anyway, so uint8 would only ever survive through
@@ -937,8 +939,10 @@ training augmentations on one series:
   from `--spacing` through a temporary metadata file), and `DINOv2ViTTransform` comes from a run config's `transform:`
   block via `train_helpers.get_transform_args` / `get_transform` (default `cluster/configs/pretrain-MI-vitb14-24f.yaml`,
   also its `data.series_depth` / `resample_mode`).
-- **What differs from training.** Only the tested augmentation is on (`prob = 1`; blur/sharpen keep their
-  `local_view` block for the local view). Only global view 0 and one local view run. The crop is `CenterCrop3D`: the
+- **What differs from training.** Only the tested augmentation is on (`prob = 1`). An augmentation with a
+  `local_view` block (blur, sharpen, Gibbs noise) uses it for the local view, as in training. The viewer reads which
+  augmentations have per-view blocks from the args classes `DINOv2ViTTransformArgs` uses (`local_view`,
+  `global_view_1`), so a new per-view block needs no viewer change. Only global view 0 and one local view run. The crop is `CenterCrop3D`: the
   training crop's subclass with centred placement and no aspect jitter. Its scale slider is the crop's volume
   fraction (`random_resize`'s quantity). Resampling and the view-spacing tag are the real crop's.
 - **What it shows.** The series with both crops boxed, and both views. Images use the physical aspect from the voxel
@@ -950,7 +954,10 @@ training augmentations on one series:
   `test_render__equals_training_with_the_same_crops`, builds the training transform independently, forces its crops to
   the viewer's crop parameters and requires bit-identical views, over augmentations, crop scales (incl. enlarging
   ones) and interpolations. Dropping any of the crop settings `CenterCrop3D` copies (interpolation, upscale
-  interpolation, output dtype) fails it.
+  interpolation, output dtype) fails it. That test can't see a per-view block the viewer misses (both sides get the
+  same config), so `test_isolate__the_built_views_have_only_the_tested_augmentation` enables every augmentation
+  block the args classes have, at the top level and in every view group, and requires each shown view to hold only
+  the tested augmentation. A hard-coded `LOCAL_OVERRIDES` without Gibbs fails it.
 
 ## Open risks / known follow-ups (not yet done, not blocking)
 

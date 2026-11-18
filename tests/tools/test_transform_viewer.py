@@ -13,6 +13,7 @@ import copy
 import importlib.util
 import math
 import sys
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +22,12 @@ import numpy as np
 import pytest
 import torch
 from monai.data import MetaTensor
+from monai.transforms import NormalizeIntensity
+from pydantic import BaseModel
 
 from lightly_train._commands import train_helpers
 from lightly_train._data.mi_dataset import reseed_randomizables
+from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
 from lightly_train._transforms.monai_wrappers import (
     VOXEL_SPACING_META_KEY,
     AnisotropyAwareRandGaussianSmooth,
@@ -156,6 +160,103 @@ def test_editable_config__rows() -> None:
         ("alpha", False),
         ("num_control_points", True),
     ]
+    # Gibbs noise has a local_view block of its own (its own alpha range).
+    cfg, rows = tv.editable_config(_config(), "gibbs_noise")
+    assert [row.label for row in rows] == [
+        "alpha lo",
+        "alpha hi",
+        "local alpha lo",
+        "local alpha hi",
+    ]
+    rows[2].set(cfg, 0.25)
+    assert cfg["local_view"]["gibbs_noise"]["alpha"][0] == 0.25
+    assert cfg["gibbs_noise"]["alpha"][0] != 0.25
+
+
+#: The step each augmentation adds to a view's pipeline (``ViewTransform``).
+STEP_TYPES = {
+    "random_rotation": "RandRotate",
+    "histogram_shift": "AlphaRandHistogramShift",
+    "adjust_contrast": "RandAdjustContrast",
+    "gaussian_blur": "AnisotropyAwareRandGaussianSmooth",
+    "gaussian_sharpen": "AnisotropyAwareRandGaussianSharpen",
+    "gibbs_noise": "RandGibbsNoise",
+    "gaussian_noise": "RandGaussianNoise",
+}
+#: ``ViewTransformArgs`` fields that are not augmentations the viewer can test.
+NOT_AUGMENTATIONS = {"random_resized_crop", "normalize", "random_flip"}
+
+
+def _args_classes(annotation: Any) -> list[type[BaseModel]]:
+    """The config classes an annotation allows (``X | None`` -> ``[X]``; none for a plain field)."""
+    options = typing.get_args(annotation) or (annotation,)
+    return [a for a in options if isinstance(a, type) and issubclass(a, BaseModel)]
+
+
+def _everything_on() -> dict[str, Any]:
+    """The config with every augmentation block on, wherever the args classes have one: top level, and every field
+    of the view groups (local_view, global_view_1, ...) that is an augmentation's args (has a ``prob``).
+
+    Read from the classes on purpose, not from the viewer's lists: a block the viewer doesn't know must be on here.
+    """
+    cfg = _config()
+    for name in tv.AUGMENTATIONS:
+        cfg[name] = {"prob": 0.5, **tv.FALLBACK_ARGS.get(name, {})}
+    for group, field in DINOv2ViTTransformArgs.model_fields.items():
+        if group in tv.AUGMENTATIONS:
+            continue
+        for group_cls in _args_classes(field.annotation):
+            blocks = {
+                name: {"prob": 0.5, **tv.FALLBACK_ARGS.get(name, {})}
+                for name, sub in group_cls.model_fields.items()
+                if any(
+                    "prob" in cls.model_fields for cls in _args_classes(sub.annotation)
+                )
+            }
+            if blocks:
+                cfg[group] = {**(cfg.get(group) or {}), **blocks}
+    return cfg
+
+
+def test_everything_on__enables_every_view_group() -> None:
+    cfg = _everything_on()
+    args = tv.resolve(cfg)
+    assert {"local_view", "global_view_1"} <= set(cfg)
+    assert (
+        args.local_view.gibbs_noise is not None
+        and args.global_view_1.gaussian_sharpen is not None
+    )
+
+
+@pytest.mark.parametrize("augmentation", [None, *tv.AUGMENTATIONS])
+def test_isolate__the_built_views_have_only_the_tested_augmentation(
+    augmentation: str | None,
+) -> None:
+    """With every block on (per-view ones included), isolating leaves the tested augmentation alone in both shown
+    views, always applied. This catches a per-view block the viewer misses, wherever it comes from."""
+    cfg = tv.isolate(_everything_on(), augmentation)
+    _, views = tv.build_transform(cfg, SCALES)
+    for name, view in views.items():
+        steps = view.transform.transforms
+        assert type(steps[0]) is tv.CenterCrop3D
+        assert (
+            isinstance(steps[-2], NormalizeIntensity)
+            and type(steps[-1]).__name__ == "ToTensor"
+        )
+        augmentations = steps[1:-2]
+        expected = [] if augmentation is None else [STEP_TYPES[augmentation]]
+        assert [type(step).__name__ for step in augmentations] == expected, name
+        assert all(step.prob == 1.0 for step in augmentations), name
+
+
+def test_augmentations__every_view_transform_augmentation() -> None:
+    """The viewer offers every augmentation the training views can have."""
+    from lightly_train._transforms.view_transform import ViewTransformArgs
+
+    assert (
+        set(tv.AUGMENTATIONS) == set(ViewTransformArgs.model_fields) - NOT_AUGMENTATIONS
+    )
+    assert set(STEP_TYPES) == set(tv.AUGMENTATIONS)
 
 
 def test_interpolation_choices() -> None:

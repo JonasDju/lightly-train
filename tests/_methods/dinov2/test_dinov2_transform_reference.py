@@ -10,7 +10,8 @@
 ``dinov2_views_reference.npz`` holds the views ``_views()`` produced at commit d1aab3e,
 before ``transform.crop_foreground`` existed, regenerated on 2026-11-18 when the blur and
 sharpen started scaling their depth sigma by the view's voxel spacing (``monai_wrappers``;
-these inputs carry no spacing, so they pin the ``1 / shape`` fallback). With
+these inputs carry no spacing, so they pin the ``1 / shape`` fallback), and again for the re-tuned
+augmentation defaults (sharpen, histogram shift, contrast, Gibbs; Gibbs no longer on the local views). With
 ``crop_foreground`` off (its default), the pipeline must still produce exactly those views.
 Regenerate the file only for an intended change of the augmentations:
 

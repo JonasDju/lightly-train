@@ -7,7 +7,8 @@ config's ``transform:`` block by lightly-train's own ``get_transform_args`` / ``
 differ from training:
 
 * **One augmentation at a time.** The one under test runs with ``prob = 1``; every other one is off. For the
-  blur and the sharpen, the local view uses the config's ``local_view`` block, as in training.
+  augmentations with a ``local_view`` block (blur, sharpen, Gibbs noise; ``LOCAL_OVERRIDES``, read from the config
+  classes), the local view uses that block, as in training.
 * **The crop is fixed.** ``CenterCrop3D`` is the training crop (``AnisotropyTrackingRandomResizedCrop3D``) with
   centred placement and no aspect jitter. Its ``scale`` slider is the crop's volume fraction, the quantity of the
   config's ``random_resize``. Resampling and the view-spacing tag are the training crop's own code, so the depth
@@ -39,6 +40,7 @@ import math
 import re
 import sys
 import tempfile
+import typing
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,9 +51,11 @@ import torch
 import yaml
 from matplotlib.widgets import TextBox
 from PIL import Image
+from pydantic import BaseModel
 
 from lightly_train._commands import train_helpers
 from lightly_train._data.mi_dataset import MIDataset, reseed_randomizables
+from lightly_train._methods.dinov2.dinov2_transform import DINOv2ViTTransformArgs
 from lightly_train._transforms.monai_wrappers import (
     VOXEL_SPACING_META_KEY,
     AlphaRandHistogramShift,
@@ -78,10 +82,27 @@ AUGMENTATIONS = (
     "gibbs_noise",
     "gaussian_noise",
 )
+
+
+def _own_blocks(view_group: str) -> tuple[str, ...]:
+    """The augmentations a view group of ``DINOv2ViTTransformArgs`` configures itself (``transform.<view_group>.<name>``,
+    replacing the top-level block in those views), in ``AUGMENTATIONS`` order.
+
+    Read from the args class training uses, so that a new per-view block reaches the viewer by itself.
+    """
+    annotation = DINOv2ViTTransformArgs.model_fields[view_group].annotation
+    (args_cls,) = (
+        a
+        for a in (typing.get_args(annotation) or (annotation,))
+        if isinstance(a, type) and issubclass(a, BaseModel)
+    )
+    return tuple(name for name in AUGMENTATIONS if name in args_cls.model_fields)
+
+
 #: Augmentations whose local view has its own block (``transform.local_view.<name>``).
-LOCAL_OVERRIDES = ("gaussian_blur", "gaussian_sharpen")
+LOCAL_OVERRIDES = _own_blocks("local_view")
 #: The second global view's own blocks (``transform.global_view_1``); that view isn't shown.
-GLOBAL_VIEW_1 = ("gaussian_blur", "gaussian_sharpen", "gibbs_noise")
+GLOBAL_VIEW_1 = _own_blocks("global_view_1")
 #: Starting values for an augmentation the config leaves off; the args classes' defaults fill in the rest.
 FALLBACK_ARGS: dict[str, dict[str, Any]] = {"random_rotation": {"degrees": 15.0}}
 

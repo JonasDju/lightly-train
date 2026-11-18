@@ -56,7 +56,7 @@ class DINOLocalViewRandomResizeArgs(RandomResizeArgs):
 
 class DINOGaussianBlurArgs(GaussianBlurArgs):
     prob: float = 1.0
-    sigma_range: tuple[float, float] = Field(default=(0.4, 0.6), strict=False)
+    sigma_range: tuple[float, float] = Field(default=(0.4, 0.5), strict=False)
 
 
 class DINOGlobalView1GaussianBlurArgs(DINOGaussianBlurArgs):
@@ -65,6 +65,7 @@ class DINOGlobalView1GaussianBlurArgs(DINOGaussianBlurArgs):
 
 class DINOLocalViewGaussianBlurArgs(DINOGaussianBlurArgs):
     prob: float = 0.5
+    sigma_range: tuple[float, float] = Field(default=(0.3, 0.4), strict=False)
 
 
 class DINOGaussianSharpenArgs(RandGaussianSharpenArgs):
@@ -87,6 +88,9 @@ class DINOGlobalView1TransformArgs(PydanticConfig):
         default_factory=RandGibbsNoiseArgs
     )
 
+class DINOLocalViewGibbsNoiseArgs(RandGibbsNoiseArgs):
+    alpha: float | tuple[float, float] = (0.3, 0.4)
+
 
 class DINOLocalViewTransformArgs(PydanticConfig):
     num_views: int = 6
@@ -98,7 +102,7 @@ class DINOLocalViewTransformArgs(PydanticConfig):
         default_factory=DINOLocalViewGaussianBlurArgs
     )
     gaussian_sharpen: DINOLocalViewGaussianSharpenArgs | None = None
-
+    gibbs_noise: DINOLocalViewGibbsNoiseArgs | None = None
 
 class DINOTransformArgs(MethodTransformArgs):
     image_size: ImageSizeTuple = (224, 224, 16)
@@ -214,7 +218,7 @@ class DINOTransform(MethodTransform):
                     gaussian_blur=transform_args.local_view.gaussian_blur,
                     normalize=transform_args.normalize,
                     gaussian_sharpen=transform_args.local_view.gaussian_sharpen,
-                    gibbs_noise=transform_args.gibbs_noise,
+                    gibbs_noise=transform_args.local_view.gibbs_noise,
                     histogram_shift=transform_args.histogram_shift,
                     adjust_contrast=transform_args.adjust_contrast,
                     gaussian_noise=transform_args.gaussian_noise,

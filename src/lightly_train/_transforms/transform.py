@@ -207,11 +207,11 @@ class SolarizeArgs(PydanticConfig):
 
 class RandAdjustContrastArgs(PydanticConfig):
     prob: float = Field(default=0.8, ge=0.0, le=1.0)
-    gamma: tuple[float, float] = Field(default=(0.8, 1.2), strict=False)
+    gamma: tuple[float, float] = Field(default=(0.9, 1.1), strict=False)
 
 
 class RandGaussianNoiseArgs(PydanticConfig):
-    prob: float = Field(default=0.1, ge=0.0, le=1.0)
+    prob: float = Field(default=0.2, ge=0.0, le=1.0)
     mean: float = 0.0
     std: float = 4
 
@@ -219,7 +219,7 @@ class RandGaussianNoiseArgs(PydanticConfig):
 class RandHistogramShiftArgs(PydanticConfig):
     # alpha blends AlphaRandHistogramShift's (monai_wrappers.py) output with the
     # original image (0 = no-op, 1 = MONAI's unblended RandHistogramShift)
-    alpha: float = Field(default=0.25, ge=0.0, le=1.0)
+    alpha: float = Field(default=0.2, ge=0.0, le=1.0)
     prob: float = Field(default=0.8, ge=0.0, le=1.0)
     num_control_points: int | tuple[int, int] = 10
 
@@ -244,9 +244,9 @@ class RandGaussianSharpenArgs(PydanticConfig):
     # AnisotropyAwareRandGaussianSharpen (monai_wrappers.py) fans each out to
     # sigma{1,2}_{x,y,z} and anisotropy-scales the z component
     prob: float = Field(default=0.1, ge=0.0, le=1.0)
-    sigma1: tuple[float, float] = Field(default=(1.0, 1.0), strict=False)
-    sigma2: float | tuple[float, float] = (0.5, 0.5)
-    alpha: tuple[float, float] = Field(default=(5.0, 10.0), strict=False)
+    sigma1: tuple[float, float] = Field(default=(0.4, 0.4), strict=False)
+    sigma2: float | tuple[float, float] = (0.75, 0.75)
+    alpha: tuple[float, float] = Field(default=(1.0, 1.75), strict=False)
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
     @pydantic.field_validator("sigma2", mode="before")
@@ -273,7 +273,7 @@ class RandGibbsNoiseArgs(PydanticConfig):
     # from in-plane readout/phase-encode truncation, not across slices), so no
     # rescaling is applied here.
     prob: float = Field(default=0.2, ge=0.0, le=1.0)
-    alpha: float | tuple[float, float] = (0.5, 0.7)
+    alpha: float | tuple[float, float] = (0.5, 0.6)
 
     # Required because of: https://github.com/pydantic/pydantic/issues/10571
     @pydantic.field_validator("alpha", mode="before")

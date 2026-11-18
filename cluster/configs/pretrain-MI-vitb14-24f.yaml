@@ -103,7 +103,11 @@ transform:
   resize_interpolation: area
   resize_upscale_interpolation: linear
   crop_foreground: null
+#    threshold: 10
   random_rotation: null
+#    prob: 0.8
+#    degrees: 5
+#    interpolation: bilinear
   normalize:
     mean:
     - 0.5
@@ -113,31 +117,54 @@ transform:
     prob: 1.0
     sigma_range:
     - 0.4
-    - 0.6
+    - 0.5
   histogram_shift:
-    alpha: 0.25
+    alpha: 0.2
     prob: 0.8
     num_control_points: 10
   adjust_contrast:
     prob: 0.8
     gamma:
-    - 0.8
-    - 1.2
+    - 0.9
+    - 1.1
   gaussian_sharpen: null
+#    prob: 1.0
+#    sigma1:
+#      - 0.4
+#      - 0.4
+#    sigma2:
+#      - 0.75
+#      - 0.75
+#    alpha:
+#      - 1.0
+#      - 1.75
   gibbs_noise: null
   gaussian_noise: null
+#    prob: 0.2
+#    mean: 0.0
+#    std: 4
   global_view_1:
     gaussian_blur:
       prob: 0.1
       sigma_range:
       - 0.4
-      - 0.6
+      - 0.5
     gaussian_sharpen: null
+#      prob: 0.1
+#      sigma1:
+#        - 0.4
+#        - 0.4
+#      sigma2:
+#        - 0.75
+#        - 0.75
+#      alpha:
+#        - 1.0
+#        - 1.75
     gibbs_noise:
       prob: 0.2
       alpha:
       - 0.5
-      - 0.7
+      - 0.6
   local_view:
     num_views: 8
     view_size:
@@ -150,9 +177,20 @@ transform:
     gaussian_blur:
       prob: 0.5
       sigma_range:
+      - 0.3
       - 0.4
-      - 0.6
     gaussian_sharpen: null
+#      prob: 0.5
+#      sigma1:
+#        - 0.4
+#        - 0.4
+#      sigma2:
+#        - 0.75
+#        - 0.75
+#      alpha:
+#        - 1.0
+#        - 1.75
+    gibbs_noise: null
 
 # lightly-train's own callbacks (CallbackArgs in src/lightly_train/_callbacks/callback_args.py), each a mapping
 # over that callback's defaults or null to switch it off; a callback left out keeps its default. kneeno_eval is

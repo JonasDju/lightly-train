@@ -37,7 +37,6 @@ from lightly_train._transforms.random_resized_crop import RandomResizedCrop3D
 from lightly_train._transforms.transform import (
     RandAdjustContrastArgs,
     RandGaussianNoiseArgs,
-    RandGibbsNoiseArgs,
     RandHistogramShiftArgs,
 )
 from lightly_train.types import TransformInput
@@ -231,25 +230,39 @@ def test_dinov2_transform__gaussian_sharpen_does_not_leak_into_other_views() -> 
         assert not _contains(view_ops, AnisotropyAwareRandGaussianSharpen)
 
 
-def test_dinov2_transform__gibbs_noise_has_global_view_1_override() -> None:
-    # A top-level gibbs_noise reaches global view 0 and the local views; global view 1
-    # has its own DINOGlobalView1TransformArgs.gibbs_noise instead (on by default).
-    transform_args = DINOv2ViTTransform.transform_args_cls()(
-        gibbs_noise=RandGibbsNoiseArgs(prob=0.9),
-    )
+def _gibbs_probs(**overrides: Any) -> list[float | None]:
+    """The RandGibbsNoise prob of every view (global 0, global 1, the 8 local ones); None = no Gibbs noise."""
+    transform_args = DINOv2ViTTransform.transform_args_cls().model_validate(overrides)
     transform_args.resolve_auto()
     transform_args.resolve_incompatible()
     transform = DINOv2ViTTransform(transform_args)
+    gibbs = [_find(view.transform.transforms, RandGibbsNoise) for view in transform.transforms]
+    return [None if g is None else g.prob for g in gibbs]
 
-    probs = []
-    for view_transform in transform.transforms:
-        gibbs = _find(view_transform.transform.transforms, RandGibbsNoise)
-        assert gibbs is not None
-        probs.append(gibbs.prob)
-    assert probs[0] == 0.9
-    assert transform_args.global_view_1.gibbs_noise is not None
-    assert probs[1] == transform_args.global_view_1.gibbs_noise.prob != 0.9
-    assert probs[2:] == [0.9] * 8
+
+def test_dinov2_transform__gibbs_noise_per_view() -> None:
+    # Each view group has its own gibbs_noise: the top-level one is global view 0's, global view 1 has
+    # DINOGlobalView1TransformArgs.gibbs_noise (on by default) and the local views local_view.gibbs_noise
+    # (off by default).
+    view_1 = DINOv2ViTTransform.transform_args_cls()().global_view_1.gibbs_noise
+    assert view_1 is not None
+    assert _gibbs_probs() == [None, view_1.prob] + [None] * 8
+    assert _gibbs_probs(gibbs_noise={"prob": 0.9}) == [0.9, view_1.prob] + [None] * 8
+    assert _gibbs_probs(local_view={"gibbs_noise": {"prob": 0.7}}) == [None, view_1.prob] + [0.7] * 8
+    assert _gibbs_probs(global_view_1={"gibbs_noise": None}) == [None] * 10
+
+
+def test_dinov2_transform_args__local_view_gibbs_noise_defaults() -> None:
+    args = DINOv2ViTTransform.transform_args_cls().model_validate({"local_view": {"gibbs_noise": {}}})
+    local = args.local_view.gibbs_noise
+    assert local is not None
+    assert (local.prob, local.alpha) == (0.2, (0.3, 0.4))
+    # Like the top-level gibbs_noise: a list (YAML) or a single value.
+    for alpha, expected in (([0.25, 0.35], (0.25, 0.35)), (0.3, 0.3)):
+        args = DINOv2ViTTransform.transform_args_cls().model_validate(
+            {"local_view": {"gibbs_noise": {"alpha": alpha}}}
+        )
+        assert args.local_view.gibbs_noise.alpha == expected
 
 
 def test_dinov2_transform_args__crop_foreground() -> None:

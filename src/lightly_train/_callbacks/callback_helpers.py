@@ -112,6 +112,7 @@ def get_callbacks(
                 num_channels=num_channels,
                 image_size=image_size,
                 normalize_args=normalize_args,
+                out_dir=out / "exported_models",
                 **callback_args.kneeno_eval.model_dump(),
             )
         )

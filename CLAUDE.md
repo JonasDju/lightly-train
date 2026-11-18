@@ -107,13 +107,27 @@ Frozen-encoder, multi-label classification (k-NN, linear, linear-pool, attentive
     (`eval.encoder: online` = student).
   - A labeled dataset that can't be loaded only logs "Disabling KneeNo evaluation" and turns eval off.
   - Wired through `CallbackArgs.kneeno_eval` and `get_callbacks(..., num_channels, image_size)` (from
-    `train.py`: the resolved `transform_args.num_channels` and `transform_args.image_size`).
+    `train.py`: the resolved `transform_args.num_channels` and `transform_args.image_size`); `get_callbacks` also
+    passes `out_dir=<out>/exported_models` (for `exported_best.pt`).
 - **`evaluate()` is called on every rank, deliberately with no rank guard.** `ClassificationEvaluator` works on
   rank 0, then hits `dist.barrier()` + `dist.broadcast_object_list()`. A rank guard deadlocks multi-GPU runs.
 - **Metrics go through lightly-train's loggers.** `logging.tensorboard_dir: null` disables KneeNo's
-  `SummaryWriter`, and the callback re-logs the metrics via `pl_module.log_dict` under `eval/`.
+  `SummaryWriter`, and the callback re-logs the metrics via `pl_module.log_dict` under
+  `eval.logging.tag_prefix` (`eval/` in the shipped configs; hardcoded `eval/` until 2026-11-18), the prefix
+  KneeNo's own writer uses.
 - **Config deep-merge:** a task left out of `freq` keeps KneeNo's default, which is null (off) for every task since
   KneeNo `77839f0`.
+- **Best model (`eval.model_selection: true`, since 2026-11-17; set in the pretraining config).** After each eval,
+  `kneeno.BestModelTracker` scores the metrics: the mean of `internal/knn/k100/auroc` and
+  `internal/linear_pool/auroc`. On a strict improvement, the evaluated encoder (teacher, or student with
+  `encoder: online`) is exported to `<out>/exported_models/exported_best.pt`. That's `exported_last.pt`'s format
+  (`common_helpers.export_model`, package default), written to a `.tmp` and renamed, so `eval_classification` loads
+  it via `weights:`.
+  - The tracker state is the callback's `state_dict`, so it's in every `last.ckpt` and restored on resume.
+    Lightning runs `ModelCheckpoint` after all other callbacks, so an epoch's checkpoint already holds that epoch's
+    eval. `test_model_selection__resume_restores_the_best` pins this with a real `Trainer`.
+  - A failed export logs a warning and keeps the previous best.
+  - Its `internal/*` numbers are optimistic (picked on them); report `external/*`.
 - `src/lightly_train/_commands/eval_classification.py`: the standalone `lightly-train eval_classification`
   command (also `lightly_train.eval_classification`), ported from `3d_dinov2`. It loads a checkpoint or an exported
   model and runs `evaluate(..., epoch=0)` once: each task logs its metrics once per test set (KneeNo's

@@ -23,7 +23,8 @@ with these top-level keys:
     weights:     the file to evaluate, its format detected from its content: a LightlyTrain
                  checkpoint (``<out>/checkpoints/*.ckpt``) or the state dict of the bare
                  DINOv2 ViT, as exported by pretraining (``<out>/exported_models/
-                 exported_last.pt``) or ``lightly-train export`` (default ``part`` and
+                 exported_last.pt``, or ``exported_best.pt`` with ``eval.model_selection``)
+                 or ``lightly-train export`` (default ``part`` and
                  ``format``), or as released by Meta (e.g. ``dinov2_vitb14_reg4_pretrain.pth``)
     image_size:  [H, W], the crop size the model was pretrained with (in neither file)
     eval:        KneeNo's evaluation config, deep-merged over its DEFAULT_EVAL_CONFIG

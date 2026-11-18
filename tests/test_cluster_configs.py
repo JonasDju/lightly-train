@@ -162,7 +162,10 @@ def test_load_run_config__expands_env_vars(
     }
     loaded = load_run_config(_write(tmp_path, config))
     assert loaded["data"]["out"] == "/runs/vitb14"
-    assert loaded["data"]["data_root"] == {"internal": "/scratch/internal", "msk": "/scratch/msk"}
+    assert loaded["data"]["data_root"] == {
+        "internal": "/scratch/internal",
+        "msk": "/scratch/msk",
+    }
     assert loaded["eval"]["data"]["data_root"] == {"internal": "/scratch/labeled"}
 
 
@@ -638,6 +641,8 @@ def test_eval_config__matches_pretrain_config(
                 "compile_encoder",
                 "compile_attentive_heads",
                 "extraction_batch_size",
+                # Pretraining only: picks the best in-training evaluation's model.
+                "model_selection",
             )
             and not (k in ALL_TASKS and k not in in_training)
         }

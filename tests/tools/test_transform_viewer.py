@@ -289,6 +289,20 @@ def test_render__equals_training_with_the_same_crops(
         )
 
 
+def test_render__gaussian_noise_shows_the_drawn_strength(tmp_path: Path) -> None:
+    """MONAI draws the noise std per call, uniform in [0, std]: two seeds give two strengths, both shown."""
+    renderer = _renderer(tmp_path)
+    cfg, _ = tv.editable_config(_config(), "gaussian_noise")
+    cfg["gaussian_noise"]["std"] = 20.0
+    drawn = []
+    for seed in (0, 1):
+        info = renderer.render(cfg, SCALES, seed=seed).info["global"]
+        assert "(drawn from 0-20)" in info
+        drawn.append(float(info.split("noise std ")[1].split()[0]))
+    assert all(0 < value <= 20 for value in drawn)
+    assert drawn[0] != pytest.approx(drawn[1], rel=0.05)
+
+
 @pytest.mark.parametrize(
     "index, start, crop, out, expected",
     [

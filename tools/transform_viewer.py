@@ -334,6 +334,11 @@ def _describe_draw(step: Any) -> str | None:
         return f"gamma {step.gamma_value:.3g}"
     if name == "RandGibbsNoise":
         return f"alpha {step.sampled_alpha:.3g}"
+    if name == "RandGaussianNoise" and step.noise is not None:
+        # MONAI's default sample_std=True draws the strength itself per call, uniform in [0, std]: the config's
+        # std is the maximum. The drawn value isn't kept, so this is the noise's own standard deviation.
+        drawn = f"noise std {float(np.std(step.noise)):.3g}"
+        return f"{drawn} (drawn from 0-{step.std:g})" if step.sample_std else drawn
     return None
 
 

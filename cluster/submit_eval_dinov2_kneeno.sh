@@ -17,13 +17,13 @@
 # split it is slurm_logs/<job id>.log, where an early error (e.g. CONFIG and CONFIG_FILE_NAME both set) stays.
 # The evaluation runs in a single process on one GPU (KneeNo evaluates on rank 0 only, more GPUs would not help).
 # --cpus-per-task feeds the eval loader's eval.data.num_workers (31) workers.
-##SBATCH --account=truhnlab
-##SBATCH --partition=truhnlab
+#SBATCH --account=truhnlab
+#SBATCH --partition=truhnlab
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=08:00:00
+#SBATCH --time=24:00:00
 #SBATCH --job-name=lightly-2d-dinov2-eval
 #SBATCH --output=slurm_logs/%j.log
 
